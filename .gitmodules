@@ -1,0 +1,3 @@
+[submodule "vendor/msquic"]
+	path = vendor/msquic
+	url = https://github.com/microsoft/msquic.git
