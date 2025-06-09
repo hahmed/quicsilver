@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require "quicsilver/version"
-require "quicsilver.bundle"
+require "quicsilver/quicsilver"
 
 module Quicsilver
   class Error < StandardError; end
