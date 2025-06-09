@@ -1,5 +1,26 @@
 require "bundler/gem_tasks"
 require "rake/testtask"
+require "rake/extensiontask"
+
+Rake::ExtensionTask.new('quicsilver') do |ext|
+  ext.lib_dir = 'lib/quicsilver'
+end
+
+task :setup do
+  # Initialize git submodule if it doesn't exist
+  unless File.exist?('vendor/msquic')
+    sh 'git submodule add https://github.com/microsoft/msquic.git vendor/msquic'
+    sh 'cd vendor/msquic && git submodule update --init --recursive'
+  end
+end
+
+task :build_msquic => :setup do
+  # Build MSQUIC using CMake
+  sh 'cd vendor/msquic && cmake -B build -DCMAKE_BUILD_TYPE=Release'
+  sh 'cd vendor/msquic && cmake --build build --config Release'
+end
+
+task :build => [:build_msquic, :compile]
 
 Rake::TestTask.new(:test) do |t|
   t.libs << "test"
