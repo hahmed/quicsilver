@@ -12,13 +12,53 @@ static HQUIC Registration = NULL;
 // Registration configuration
 static const QUIC_REGISTRATION_CONFIG RegConfig = { "quicsilver", QUIC_EXECUTION_PROFILE_LOW_LATENCY };
 
-// Simple connection callback that just returns success
-// Real event handling will be done in Ruby
+// Connection state tracking
+typedef struct {
+    int connected;
+    int failed;
+    QUIC_STATUS error_status;
+    uint64_t error_code;
+    VALUE ruby_callback;
+} ConnectionContext;
+
+// Enhanced connection callback that handles key events
 static QUIC_STATUS QUIC_API
 ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event)
 {
-    // For now, just handle the basic events
-    // Ruby layer will handle the real logic
+    ConnectionContext* ctx = (ConnectionContext*)Context;
+    
+    if (ctx == NULL) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    
+    switch (Event->Type) {
+        case QUIC_CONNECTION_EVENT_CONNECTED:
+            ctx->connected = 1;
+            ctx->failed = 0;
+            break;
+            
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+            ctx->connected = 0;
+            ctx->failed = 1;
+            ctx->error_status = Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status;
+            ctx->error_code = Event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode;
+            break;
+            
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+            ctx->connected = 0;
+            ctx->failed = 1;
+            ctx->error_status = QUIC_STATUS_SUCCESS; // Peer initiated, not an error
+            ctx->error_code = Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode;
+            break;
+            
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+            ctx->connected = 0;
+            break;
+            
+        default:
+            break;
+    }
+    
     return QUIC_STATUS_SUCCESS;
 }
 
@@ -95,7 +135,7 @@ quicsilver_create_configuration(VALUE self, VALUE unsecure)
     return ULL2NUM((uintptr_t)Configuration);
 }
 
-// Create a QUIC connection
+// Create a QUIC connection with context
 static VALUE
 quicsilver_create_connection(VALUE self)
 {
@@ -107,14 +147,31 @@ quicsilver_create_connection(VALUE self)
     QUIC_STATUS Status;
     HQUIC Connection = NULL;
     
-    // Create connection with simple callback
-    if (QUIC_FAILED(Status = MsQuic->ConnectionOpen(Registration, ConnectionCallback, NULL, &Connection))) {
+    // Allocate and initialize connection context
+    ConnectionContext* ctx = (ConnectionContext*)malloc(sizeof(ConnectionContext));
+    if (ctx == NULL) {
+        rb_raise(rb_eRuntimeError, "Failed to allocate connection context");
+        return Qnil;
+    }
+    
+    ctx->connected = 0;
+    ctx->failed = 0;
+    ctx->error_status = QUIC_STATUS_SUCCESS;
+    ctx->error_code = 0;
+    ctx->ruby_callback = Qnil;
+    
+    // Create connection with enhanced callback and context
+    if (QUIC_FAILED(Status = MsQuic->ConnectionOpen(Registration, ConnectionCallback, ctx, &Connection))) {
+        free(ctx);
         rb_raise(rb_eRuntimeError, "ConnectionOpen failed, 0x%x!", Status);
         return Qnil;
     }
     
-    // Return the connection handle as a Ruby integer (pointer)
-    return ULL2NUM((uintptr_t)Connection);
+    // Return both the connection handle and context as an array
+    VALUE result = rb_ary_new2(2);
+    rb_ary_push(result, ULL2NUM((uintptr_t)Connection));
+    rb_ary_push(result, ULL2NUM((uintptr_t)ctx));
+    return result;
 }
 
 // Start a QUIC connection
@@ -140,16 +197,74 @@ quicsilver_start_connection(VALUE self, VALUE connection_handle, VALUE config_ha
     return Qtrue;
 }
 
-// Close a QUIC connection
+// Wait for connection to complete (connected or failed)
 static VALUE
-quicsilver_close_connection_handle(VALUE self, VALUE connection_handle)
+quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_ms)
+{
+    ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
+    int timeout = NUM2INT(timeout_ms);
+    int elapsed = 0;
+    const int sleep_interval = 10; // 10ms
+    
+    while (elapsed < timeout && !ctx->connected && !ctx->failed) {
+        usleep(sleep_interval * 1000); // Convert to microseconds
+        elapsed += sleep_interval;
+    }
+    
+    if (ctx->connected) {
+        return rb_hash_new();
+    } else if (ctx->failed) {
+        VALUE error_info = rb_hash_new();
+        rb_hash_aset(error_info, rb_str_new_cstr("error"), Qtrue);
+        rb_hash_aset(error_info, rb_str_new_cstr("status"), ULL2NUM(ctx->error_status));
+        rb_hash_aset(error_info, rb_str_new_cstr("code"), ULL2NUM(ctx->error_code));
+        return error_info;
+    } else {
+        VALUE timeout_info = rb_hash_new();
+        rb_hash_aset(timeout_info, rb_str_new_cstr("timeout"), Qtrue);
+        return timeout_info;
+    }
+}
+
+// Check connection status
+static VALUE
+quicsilver_connection_status(VALUE self, VALUE context_handle)
+{
+    ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
+    
+    VALUE status = rb_hash_new();
+    rb_hash_aset(status, rb_str_new_cstr("connected"), ctx->connected ? Qtrue : Qfalse);
+    rb_hash_aset(status, rb_str_new_cstr("failed"), ctx->failed ? Qtrue : Qfalse);
+    
+    if (ctx->failed) {
+        rb_hash_aset(status, rb_str_new_cstr("error_status"), ULL2NUM(ctx->error_status));
+        rb_hash_aset(status, rb_str_new_cstr("error_code"), ULL2NUM(ctx->error_code));
+    }
+    
+    return status;
+}
+
+// Close a QUIC connection and free context
+static VALUE
+quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
 {
     if (MsQuic == NULL) {
         return Qnil;
     }
     
+    // Extract connection handle and context from array
+    VALUE connection_handle = rb_ary_entry(connection_data, 0);
+    VALUE context_handle = rb_ary_entry(connection_data, 1);
+    
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
+    ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
+    
     MsQuic->ConnectionClose(Connection);
+    
+    if (ctx != NULL) {
+        free(ctx);
+    }
+    
     return Qnil;
 }
 
@@ -200,5 +315,7 @@ Init_quicsilver(void)
     // Connection management  
     rb_define_singleton_method(mQuicsilver, "create_connection", quicsilver_create_connection, 0);
     rb_define_singleton_method(mQuicsilver, "start_connection", quicsilver_start_connection, 4);
+    rb_define_singleton_method(mQuicsilver, "wait_for_connection", quicsilver_wait_for_connection, 2);
+    rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
 }
