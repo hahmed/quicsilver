@@ -7,14 +7,103 @@ module Quicsilver
   class Error < StandardError; end
   class ConnectionError < Error; end
   class TimeoutError < Error; end
+  class StreamError < Error; end
+
+  class Stream
+    attr_reader :bidirectional, :client
+    
+    def initialize(client, bidirectional: true, stream_timeout: 5000)
+      @client = client
+      @bidirectional = bidirectional
+      @stream_timeout = stream_timeout
+      @stream_data = nil
+      @opened = false
+      
+      raise Error, "Client must be connected" unless client.connected?
+      
+      # Create the stream using the connection handle
+      connection_handle = client.connection_data[0]
+      @stream_data = Quicsilver.create_stream(connection_handle, bidirectional)
+      
+      # Wait for stream to open
+      wait_for_open
+      @opened = true
+    end
+    
+    def opened?
+      return false unless @stream_data
+      
+      context_handle = @stream_data[1]
+      status = Quicsilver.stream_status(context_handle)
+      status["opened"] && !status["failed"]
+    end
+    
+    def closed?
+      return true unless @stream_data
+      
+      context_handle = @stream_data[1]  
+      status = Quicsilver.stream_status(context_handle)
+      status["closed"]
+    end
+    
+    def failed?
+      return false unless @stream_data
+      
+      context_handle = @stream_data[1]
+      status = Quicsilver.stream_status(context_handle)
+      status["failed"]
+    end
+    
+    def status
+      return nil unless @stream_data
+      
+      context_handle = @stream_data[1]
+      Quicsilver.stream_status(context_handle)
+    end
+    
+    def close
+      return unless @stream_data
+      
+      Quicsilver.close_stream(@stream_data)
+      @stream_data = nil
+      @opened = false
+    end
+    
+    private
+    
+    def wait_for_open
+      return unless @stream_data
+      
+      context_handle = @stream_data[1]
+      timeout = @stream_timeout
+      elapsed = 0
+      sleep_interval = 0.01 # 10ms
+      
+      while elapsed < timeout && !opened? && !failed?
+        sleep(sleep_interval)
+        elapsed += (sleep_interval * 1000)
+      end
+      
+      if failed?
+        close
+        raise StreamError, "Stream failed to open"
+      elsif !opened?
+        close
+        raise TimeoutError, "Stream timed out after #{timeout}ms"
+      end
+    end
+  end
 
   class Client
+    attr_reader :connection_data
+    
     def initialize(unsecure: true, connection_timeout: 5000)
       @unsecure = unsecure
       @connection_timeout = connection_timeout
       @config = nil
       @connection_data = nil
       @connected = false
+      @streams = []
       
       # Initialize MSQUIC if not already done
       Quicsilver.open_connection
@@ -56,8 +145,40 @@ module Quicsilver
       true
     end
     
+    def open_bidirectional_stream(**options)
+      raise Error, "Not connected" unless connected?
+      
+      stream = Stream.new(self, bidirectional: true, **options)
+      @streams << stream
+      stream
+    end
+    
+    def open_unidirectional_stream(**options) 
+      raise Error, "Not connected" unless connected?
+      
+      stream = Stream.new(self, bidirectional: false, **options)
+      @streams << stream
+      stream
+    end
+    
+    def open_stream(bidirectional: true, **options)
+      if bidirectional
+        open_bidirectional_stream(**options)
+      else
+        open_unidirectional_stream(**options)
+      end
+    end
+    
+    def streams
+      @streams.dup
+    end
+    
     def disconnect
       return unless @connected || @connection_data
+      
+      # Close all streams first
+      @streams.each(&:close)
+      @streams.clear
       
       # Close connection (in reverse order of creation)
       Quicsilver.close_connection_handle(@connection_data) if @connection_data

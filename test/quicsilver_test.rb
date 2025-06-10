@@ -16,6 +16,23 @@ class QuicsilverTest < Minitest::Test
     client = Quicsilver::Client.new
     refute client.connected?
     assert_nil client.connection_info
+    assert_empty client.streams
+  end
+  
+  def test_stream_creation_requires_connection
+    client = Quicsilver::Client.new
+    
+    assert_raises(Quicsilver::Error) do
+      client.open_bidirectional_stream
+    end
+    
+    assert_raises(Quicsilver::Error) do 
+      client.open_unidirectional_stream
+    end
+    
+    assert_raises(Quicsilver::Error) do
+      client.open_stream
+    end
   end
   
   def test_connection_failure_on_invalid_host
@@ -87,5 +104,10 @@ class QuicsilverTest < Minitest::Test
     refute client.connected?
     # connection_info should be nil after failed connection cleanup
     assert_nil client.connection_info
+  end
+  
+  def test_stream_classes_exist
+    assert defined?(Quicsilver::Stream)
+    assert defined?(Quicsilver::StreamError)
   end
 end

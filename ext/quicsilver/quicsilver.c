@@ -21,6 +21,38 @@ typedef struct {
     VALUE ruby_callback;
 } ConnectionContext;
 
+// Stream state tracking (minimal)
+typedef struct {
+    int opened;
+    int closed;
+    int failed;
+    QUIC_STATUS error_status;
+} StreamContext;
+
+// Stream callback (minimal)
+static QUIC_STATUS QUIC_API
+StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
+{
+    StreamContext* ctx = (StreamContext*)Context;
+    if (ctx == NULL) return QUIC_STATUS_SUCCESS;
+    
+    switch (Event->Type) {
+        case QUIC_STREAM_EVENT_START_COMPLETE:
+            ctx->opened = 1;
+            break;
+        case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+            ctx->closed = 1;
+            break;
+        case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
+            ctx->failed = 1;
+            ctx->error_status = Event->PEER_SEND_ABORTED.ErrorCode;
+            break;
+        default:
+            break;
+    }
+    return QUIC_STATUS_SUCCESS;
+}
+
 // Enhanced connection callback that handles key events
 static QUIC_STATUS QUIC_API
 ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event)
@@ -268,6 +300,94 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
     return Qnil;
 }
 
+// Create a QUIC stream
+static VALUE
+quicsilver_create_stream(VALUE self, VALUE connection_handle, VALUE bidirectional)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+    
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
+    HQUIC Stream = NULL;
+    QUIC_STATUS Status;
+    
+    // Create stream context
+    StreamContext* ctx = (StreamContext*)malloc(sizeof(StreamContext));
+    if (ctx == NULL) {
+        rb_raise(rb_eRuntimeError, "Failed to allocate stream context");
+        return Qnil;
+    }
+    
+    ctx->opened = 0;
+    ctx->closed = 0;
+    ctx->failed = 0;
+    ctx->error_status = QUIC_STATUS_SUCCESS;
+    
+    // Determine stream flags
+    QUIC_STREAM_OPEN_FLAGS flags = QUIC_STREAM_OPEN_FLAG_NONE;
+    if (!RTEST(bidirectional)) {
+        flags |= QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL;
+    }
+    
+    // Create and start stream
+    if (QUIC_FAILED(Status = MsQuic->StreamOpen(Connection, flags, StreamCallback, ctx, &Stream))) {
+        free(ctx);
+        rb_raise(rb_eRuntimeError, "StreamOpen failed, 0x%x!", Status);
+        return Qnil;
+    }
+    
+    if (QUIC_FAILED(Status = MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE))) {
+        MsQuic->StreamClose(Stream);
+        free(ctx);
+        rb_raise(rb_eRuntimeError, "StreamStart failed, 0x%x!", Status);
+        return Qnil;
+    }
+    
+    // Return stream handle and context
+    VALUE result = rb_ary_new2(2);
+    rb_ary_push(result, ULL2NUM((uintptr_t)Stream));
+    rb_ary_push(result, ULL2NUM((uintptr_t)ctx));
+    return result;
+}
+
+// Check stream status
+static VALUE
+quicsilver_stream_status(VALUE self, VALUE context_handle)
+{
+    StreamContext* ctx = (StreamContext*)(uintptr_t)NUM2ULL(context_handle);
+    
+    VALUE status = rb_hash_new();
+    rb_hash_aset(status, rb_str_new_cstr("opened"), ctx->opened ? Qtrue : Qfalse);
+    rb_hash_aset(status, rb_str_new_cstr("closed"), ctx->closed ? Qtrue : Qfalse);
+    rb_hash_aset(status, rb_str_new_cstr("failed"), ctx->failed ? Qtrue : Qfalse);
+    
+    return status;
+}
+
+// Close stream
+static VALUE
+quicsilver_close_stream(VALUE self, VALUE stream_data)
+{
+    if (MsQuic == NULL) {
+        return Qnil;
+    }
+    
+    VALUE stream_handle = rb_ary_entry(stream_data, 0);
+    VALUE context_handle = rb_ary_entry(stream_data, 1);
+    
+    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    StreamContext* ctx = (StreamContext*)(uintptr_t)NUM2ULL(context_handle);
+    
+    MsQuic->StreamClose(Stream);
+    if (ctx != NULL) {
+        free(ctx);
+    }
+    
+    return Qnil;
+}
+
 // Close a QUIC configuration
 static VALUE
 quicsilver_close_configuration(VALUE self, VALUE config_handle)
@@ -318,4 +438,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "wait_for_connection", quicsilver_wait_for_connection, 2);
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
+    rb_define_singleton_method(mQuicsilver, "create_stream", quicsilver_create_stream, 2);
+    rb_define_singleton_method(mQuicsilver, "stream_status", quicsilver_stream_status, 1);
+    rb_define_singleton_method(mQuicsilver, "close_stream", quicsilver_close_stream, 1);
 }
