@@ -27,6 +27,12 @@ typedef struct {
     int closed;
     int failed;
     QUIC_STATUS error_status;
+    // Data transfer support
+    char* receive_buffer;
+    size_t receive_buffer_size;
+    size_t received_bytes;
+    int send_complete;
+    int receive_complete;
 } StreamContext;
 
 // Stream callback (minimal)
@@ -46,6 +52,38 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
             ctx->failed = 1;
             ctx->error_status = Event->PEER_SEND_ABORTED.ErrorCode;
+            break;
+        case QUIC_STREAM_EVENT_SEND_COMPLETE:
+            ctx->send_complete = 1;
+            break;
+        case QUIC_STREAM_EVENT_RECEIVE:
+            // Handle received data
+            if (Event->RECEIVE.BufferCount > 0 && Event->RECEIVE.Buffers != NULL) {
+                for (uint32_t i = 0; i < Event->RECEIVE.BufferCount; i++) {
+                    QUIC_BUFFER* buffer = &Event->RECEIVE.Buffers[i];
+                    if (buffer->Length > 0) {
+                        // Expand receive buffer if needed
+                        size_t needed_size = ctx->received_bytes + buffer->Length;
+                        if (needed_size > ctx->receive_buffer_size) {
+                            size_t new_size = needed_size * 2; // Double the size
+                            char* new_buffer = (char*)realloc(ctx->receive_buffer, new_size);
+                            if (new_buffer != NULL) {
+                                ctx->receive_buffer = new_buffer;
+                                ctx->receive_buffer_size = new_size;
+                            }
+                        }
+                        
+                        // Copy data if we have space
+                        if (ctx->received_bytes + buffer->Length <= ctx->receive_buffer_size) {
+                            memcpy(ctx->receive_buffer + ctx->received_bytes, buffer->Buffer, buffer->Length);
+                            ctx->received_bytes += buffer->Length;
+                        }
+                    }
+                }
+            }
+            break;
+        case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
+            ctx->receive_complete = 1;
             break;
         default:
             break;
@@ -324,6 +362,11 @@ quicsilver_create_stream(VALUE self, VALUE connection_handle, VALUE bidirectiona
     ctx->closed = 0;
     ctx->failed = 0;
     ctx->error_status = QUIC_STATUS_SUCCESS;
+    ctx->receive_buffer = NULL;
+    ctx->receive_buffer_size = 0;
+    ctx->received_bytes = 0;
+    ctx->send_complete = 0;
+    ctx->receive_complete = 0;
     
     // Determine stream flags
     QUIC_STREAM_OPEN_FLAGS flags = QUIC_STREAM_OPEN_FLAG_NONE;
@@ -366,6 +409,104 @@ quicsilver_stream_status(VALUE self, VALUE context_handle)
     return status;
 }
 
+// Send data on stream
+static VALUE
+quicsilver_stream_send(VALUE self, VALUE stream_handle, VALUE data)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qfalse;
+    }
+    
+    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    
+    // Convert Ruby string to C string
+    Check_Type(data, T_STRING);
+    char* buffer = RSTRING_PTR(data);
+    size_t length = RSTRING_LEN(data);
+    
+    if (length == 0) {
+        return Qtrue; // Nothing to send
+    }
+    
+    // Allocate buffer for the data (MSQUIC will free it)
+    QUIC_BUFFER* quic_buffer = (QUIC_BUFFER*)malloc(sizeof(QUIC_BUFFER));
+    if (quic_buffer == NULL) {
+        rb_raise(rb_eRuntimeError, "Failed to allocate send buffer");
+        return Qfalse;
+    }
+    
+    // Copy data to new buffer
+    char* send_buffer = (char*)malloc(length);
+    if (send_buffer == NULL) {
+        free(quic_buffer);
+        rb_raise(rb_eRuntimeError, "Failed to allocate send data buffer");
+        return Qfalse;
+    }
+    memcpy(send_buffer, buffer, length);
+    
+    quic_buffer->Buffer = (uint8_t*)send_buffer;
+    quic_buffer->Length = (uint32_t)length;
+    
+    // Send the data
+    QUIC_STATUS Status = MsQuic->StreamSend(Stream, quic_buffer, 1, QUIC_SEND_FLAG_NONE, quic_buffer);
+    if (QUIC_FAILED(Status)) {
+        free(send_buffer);
+        free(quic_buffer);
+        rb_raise(rb_eRuntimeError, "StreamSend failed, 0x%x!", Status);
+        return Qfalse;
+    }
+    
+    return Qtrue;
+}
+
+// Receive data from stream
+static VALUE
+quicsilver_stream_receive(VALUE self, VALUE context_handle)
+{
+    StreamContext* ctx = (StreamContext*)(uintptr_t)NUM2ULL(context_handle);
+    
+    if (ctx->received_bytes == 0) {
+        return rb_str_new("", 0); // Return empty string if no data
+    }
+    
+    // Create Ruby string from received data
+    VALUE result = rb_str_new(ctx->receive_buffer, ctx->received_bytes);
+    
+    // Clear the buffer for next receive
+    ctx->received_bytes = 0;
+    
+    return result;
+}
+
+// Check if stream has received data
+static VALUE
+quicsilver_stream_has_data(VALUE self, VALUE context_handle)
+{
+    StreamContext* ctx = (StreamContext*)(uintptr_t)NUM2ULL(context_handle);
+    return ctx->received_bytes > 0 ? Qtrue : Qfalse;
+}
+
+// Shutdown stream sending
+static VALUE
+quicsilver_stream_shutdown_send(VALUE self, VALUE stream_handle)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qfalse;
+    }
+    
+    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    
+    QUIC_STATUS Status = MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
+    if (QUIC_FAILED(Status)) {
+        rb_raise(rb_eRuntimeError, "StreamShutdown failed, 0x%x!", Status);
+        return Qfalse;
+    }
+    
+    return Qtrue;
+}
+
 // Close stream
 static VALUE
 quicsilver_close_stream(VALUE self, VALUE stream_data)
@@ -382,6 +523,9 @@ quicsilver_close_stream(VALUE self, VALUE stream_data)
     
     MsQuic->StreamClose(Stream);
     if (ctx != NULL) {
+        if (ctx->receive_buffer != NULL) {
+            free(ctx->receive_buffer);
+        }
         free(ctx);
     }
     
@@ -441,4 +585,8 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "create_stream", quicsilver_create_stream, 2);
     rb_define_singleton_method(mQuicsilver, "stream_status", quicsilver_stream_status, 1);
     rb_define_singleton_method(mQuicsilver, "close_stream", quicsilver_close_stream, 1);
+    rb_define_singleton_method(mQuicsilver, "stream_send", quicsilver_stream_send, 2);
+    rb_define_singleton_method(mQuicsilver, "stream_receive", quicsilver_stream_receive, 1);
+    rb_define_singleton_method(mQuicsilver, "stream_has_data", quicsilver_stream_has_data, 1);
+    rb_define_singleton_method(mQuicsilver, "stream_shutdown_send", quicsilver_stream_shutdown_send, 1);
 }
