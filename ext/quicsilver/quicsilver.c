@@ -35,6 +35,16 @@ typedef struct {
     int receive_complete;
 } StreamContext;
 
+// Listener state tracking
+typedef struct {
+    int started;
+    int stopped;
+    int failed;
+    QUIC_STATUS error_status;
+    VALUE ruby_callback;
+    HQUIC Configuration;
+} ListenerContext;
+
 // Stream callback (minimal)
 static QUIC_STATUS QUIC_API
 StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
@@ -132,6 +142,54 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
     return QUIC_STATUS_SUCCESS;
 }
 
+// Listener callback to handle incoming connections
+static QUIC_STATUS QUIC_API
+ListenerCallback(HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event)
+{
+    ListenerContext* ctx = (ListenerContext*)Context;
+    ConnectionContext* conn_ctx;
+    
+    if (ctx == NULL) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    
+    switch (Event->Type) {
+        case QUIC_LISTENER_EVENT_NEW_CONNECTION:
+            // Create a connection context for the new connection
+            conn_ctx = (ConnectionContext*)malloc(sizeof(ConnectionContext));
+            if (conn_ctx != NULL) {
+                conn_ctx->connected = 0;
+                conn_ctx->failed = 0;
+                conn_ctx->error_status = QUIC_STATUS_SUCCESS;
+                conn_ctx->error_code = 0;
+                conn_ctx->ruby_callback = Qnil;
+                
+                // Set the connection callback
+                MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, (void*)ConnectionCallback, conn_ctx);
+                
+                // Accept the new connection with the server configuration
+                QUIC_STATUS Status = MsQuic->ConnectionSetConfiguration(Event->NEW_CONNECTION.Connection, ctx->Configuration);
+                if (QUIC_FAILED(Status)) {
+                    free(conn_ctx);
+                    return Status;
+                }
+            } else {
+                // Reject the connection if we can't allocate context
+                return QUIC_STATUS_OUT_OF_MEMORY;
+            }
+            break;
+            
+        case QUIC_LISTENER_EVENT_STOP_COMPLETE:
+            ctx->stopped = 1;
+            break;
+            
+        default:
+            break;
+    }
+    
+    return QUIC_STATUS_SUCCESS;
+}
+
 // Initialize MSQUIC
 static VALUE
 quicsilver_open(VALUE self)
@@ -174,7 +232,7 @@ quicsilver_create_configuration(VALUE self, VALUE unsecure)
     
     // Basic settings
     QUIC_SETTINGS Settings = {0};
-    Settings.IdleTimeoutMs = 1000; // 1 second idle timeout
+    Settings.IdleTimeoutMs = 10000; // 10 second idle timeout to match server
     Settings.IsSet.IdleTimeoutMs = TRUE;
     
     // Simple ALPN for now - Ruby can customize this later
@@ -197,6 +255,63 @@ quicsilver_create_configuration(VALUE self, VALUE unsecure)
     
     if (QUIC_FAILED(Status = MsQuic->ConfigurationLoadCredential(Configuration, &CredConfig))) {
         rb_raise(rb_eRuntimeError, "ConfigurationLoadCredential failed, 0x%x!", Status);
+        MsQuic->ConfigurationClose(Configuration);
+        return Qnil;
+    }
+    
+    // Return the configuration handle as a Ruby integer (pointer)
+    return ULL2NUM((uintptr_t)Configuration);
+}
+
+// Create a QUIC server configuration
+static VALUE
+quicsilver_create_server_configuration(VALUE self, VALUE cert_file, VALUE key_file)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized. Call Quicsilver.open_connection first.");
+        return Qnil;
+    }
+    
+    QUIC_STATUS Status;
+    HQUIC Configuration = NULL;
+    
+    // Basic settings
+    QUIC_SETTINGS Settings = {0};
+    Settings.IdleTimeoutMs = 10000; // 10 second idle timeout for server
+    Settings.IsSet.IdleTimeoutMs = TRUE;
+    Settings.ServerResumptionLevel = QUIC_SERVER_RESUME_AND_ZERORTT;
+    Settings.IsSet.ServerResumptionLevel = TRUE;
+    Settings.PeerBidiStreamCount = 10;
+    Settings.IsSet.PeerBidiStreamCount = TRUE;
+    Settings.PeerUnidiStreamCount = 10;
+    Settings.IsSet.PeerUnidiStreamCount = TRUE;
+    
+    // Simple ALPN for now - Ruby can customize this later
+    QUIC_BUFFER Alpn = { sizeof("quicsilver") - 1, (uint8_t*)"quicsilver" };
+    
+    // Create configuration
+    if (QUIC_FAILED(Status = MsQuic->ConfigurationOpen(Registration, &Alpn, 1, &Settings, sizeof(Settings), NULL, &Configuration))) {
+        rb_raise(rb_eRuntimeError, "Server ConfigurationOpen failed, 0x%x!", Status);
+        return Qnil;
+    }
+    
+    // Set up server credentials with certificate files
+    QUIC_CREDENTIAL_CONFIG CredConfig = {0};
+    QUIC_CERTIFICATE_FILE CertFile = {0};
+    
+    // Convert Ruby strings to C strings
+    const char* cert_path = StringValueCStr(cert_file);
+    const char* key_path = StringValueCStr(key_file);
+    
+    CertFile.CertificateFile = cert_path;
+    CertFile.PrivateKeyFile = key_path;
+    
+    CredConfig.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+    CredConfig.CertificateFile = &CertFile;
+    CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    
+    if (QUIC_FAILED(Status = MsQuic->ConfigurationLoadCredential(Configuration, &CredConfig))) {
+        rb_raise(rb_eRuntimeError, "Server ConfigurationLoadCredential failed, 0x%x!", Status);
         MsQuic->ConfigurationClose(Configuration);
         return Qnil;
     }
@@ -244,6 +359,18 @@ quicsilver_create_connection(VALUE self)
     return result;
 }
 
+// Configure MSQUIC for more verbose logging
+void enable_msquic_logging() {
+    QUIC_STATUS status = MsQuicOpenVersion(2, (const void**)&MsQuic);
+    if (QUIC_FAILED(status)) {
+        fprintf(stderr, "DEBUG: Failed to open MSQUIC for logging\n");
+        return;
+    }
+    fprintf(stderr, "DEBUG: MSQUIC logging enabled\n");
+    // Set logging level to verbose
+    MsQuic->SetParam(NULL, QUIC_PARAM_GLOBAL_LOG_LEVEL, sizeof(QUIC_LOG_LEVEL), &QUIC_LOG_LEVEL_VERBOSE);
+}
+
 // Start a QUIC connection
 static VALUE
 quicsilver_start_connection(VALUE self, VALUE connection_handle, VALUE config_handle, VALUE hostname, VALUE port)
@@ -264,6 +391,10 @@ quicsilver_start_connection(VALUE self, VALUE connection_handle, VALUE config_ha
         return Qfalse;
     }
     
+    enable_msquic_logging();
+    
+    fprintf(stderr, "DEBUG: start_connection succeeded\n");
+    fprintf(stderr, "DEBUG: Waiting for handshake...\n");
     return Qtrue;
 }
 
@@ -282,16 +413,19 @@ quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_m
     }
     
     if (ctx->connected) {
+        fprintf(stderr, "DEBUG: Handshake succeeded\n");
         return rb_hash_new();
     } else if (ctx->failed) {
         VALUE error_info = rb_hash_new();
         rb_hash_aset(error_info, rb_str_new_cstr("error"), Qtrue);
         rb_hash_aset(error_info, rb_str_new_cstr("status"), ULL2NUM(ctx->error_status));
         rb_hash_aset(error_info, rb_str_new_cstr("code"), ULL2NUM(ctx->error_code));
+        fprintf(stderr, "DEBUG: Handshake failed: %s\n", rb_str_new_cstr(rb_inspect(error_info)));
         return error_info;
     } else {
         VALUE timeout_info = rb_hash_new();
         rb_hash_aset(timeout_info, rb_str_new_cstr("timeout"), Qtrue);
+        fprintf(stderr, "DEBUG: Handshake timed out\n");
         return timeout_info;
     }
 }
@@ -562,6 +696,121 @@ quicsilver_close(VALUE self)
     return Qnil;
 }
 
+// Create a QUIC listener
+static VALUE
+quicsilver_create_listener(VALUE self, VALUE config_handle)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+    
+    HQUIC Configuration = (HQUIC)(uintptr_t)NUM2ULL(config_handle);
+    HQUIC Listener = NULL;
+    QUIC_STATUS Status;
+    
+    // Create listener context
+    ListenerContext* ctx = (ListenerContext*)malloc(sizeof(ListenerContext));
+    if (ctx == NULL) {
+        rb_raise(rb_eRuntimeError, "Failed to allocate listener context");
+        return Qnil;
+    }
+    
+    ctx->started = 0;
+    ctx->stopped = 0;
+    ctx->failed = 0;
+    ctx->error_status = QUIC_STATUS_SUCCESS;
+    ctx->ruby_callback = Qnil;
+    ctx->Configuration = Configuration;
+    
+    // Create listener
+    if (QUIC_FAILED(Status = MsQuic->ListenerOpen(Registration, ListenerCallback, ctx, &Listener))) {
+        free(ctx);
+        rb_raise(rb_eRuntimeError, "ListenerOpen failed, 0x%x!", Status);
+        return Qnil;
+    }
+    
+    // Return listener handle and context
+    VALUE result = rb_ary_new2(2);
+    rb_ary_push(result, ULL2NUM((uintptr_t)Listener));
+    rb_ary_push(result, ULL2NUM((uintptr_t)ctx));
+    return result;
+}
+
+// Start listener on specific address and port
+static VALUE
+quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALUE port)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qfalse;
+    }
+    
+    HQUIC Listener = (HQUIC)(uintptr_t)NUM2ULL(listener_handle);
+    const char* addr_str = StringValueCStr(address);
+    uint16_t Port = (uint16_t)NUM2INT(port);
+    
+    // Setup address - properly initialize the entire structure
+    QUIC_ADDR Address;
+    memset(&Address, 0, sizeof(Address));
+    
+    // Set up for localhost/any address
+    QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_INET);
+    QuicAddrSetPort(&Address, Port);
+    
+    // For localhost, we can just use the default (any address)
+    // The QuicAddrSetFamily and QuicAddrSetPort should be sufficient
+    
+    QUIC_STATUS Status;
+    
+    // Create QUIC_BUFFER for the address
+    QUIC_BUFFER AlpnBuffer = { sizeof("quicsilver") - 1, (uint8_t*)"quicsilver" };
+    
+    if (QUIC_FAILED(Status = MsQuic->ListenerStart(Listener, &AlpnBuffer, 1, &Address))) {
+        rb_raise(rb_eRuntimeError, "ListenerStart failed, 0x%x!", Status);
+        return Qfalse;
+    }
+    
+    fprintf(stderr, "DEBUG: start_listener succeeded\n");
+    return Qtrue;
+}
+
+// Stop listener
+static VALUE
+quicsilver_stop_listener(VALUE self, VALUE listener_handle)
+{
+    if (MsQuic == NULL) {
+        return Qfalse;
+    }
+    
+    HQUIC Listener = (HQUIC)(uintptr_t)NUM2ULL(listener_handle);
+    MsQuic->ListenerStop(Listener);
+    return Qtrue;
+}
+
+// Close listener
+static VALUE
+quicsilver_close_listener(VALUE self, VALUE listener_data)
+{
+    if (MsQuic == NULL) {
+        return Qnil;
+    }
+    
+    VALUE listener_handle = rb_ary_entry(listener_data, 0);
+    VALUE context_handle = rb_ary_entry(listener_data, 1);
+    
+    HQUIC Listener = (HQUIC)(uintptr_t)NUM2ULL(listener_handle);
+    ListenerContext* ctx = (ListenerContext*)(uintptr_t)NUM2ULL(context_handle);
+    
+    MsQuic->ListenerClose(Listener);
+    
+    if (ctx != NULL) {
+        free(ctx);
+    }
+    
+    return Qnil;
+}
+
 // Initialize the extension
 void
 Init_quicsilver(void)
@@ -574,6 +823,7 @@ Init_quicsilver(void)
     
     // Configuration management
     rb_define_singleton_method(mQuicsilver, "create_configuration", quicsilver_create_configuration, 1);
+    rb_define_singleton_method(mQuicsilver, "create_server_configuration", quicsilver_create_server_configuration, 2);
     rb_define_singleton_method(mQuicsilver, "close_configuration", quicsilver_close_configuration, 1);
     
     // Connection management  
@@ -589,4 +839,8 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "stream_receive", quicsilver_stream_receive, 1);
     rb_define_singleton_method(mQuicsilver, "stream_has_data", quicsilver_stream_has_data, 1);
     rb_define_singleton_method(mQuicsilver, "stream_shutdown_send", quicsilver_stream_shutdown_send, 1);
+    rb_define_singleton_method(mQuicsilver, "create_listener", quicsilver_create_listener, 1);
+    rb_define_singleton_method(mQuicsilver, "start_listener", quicsilver_start_listener, 3);
+    rb_define_singleton_method(mQuicsilver, "stop_listener", quicsilver_stop_listener, 1);
+    rb_define_singleton_method(mQuicsilver, "close_listener", quicsilver_close_listener, 1);
 }
