@@ -7,6 +7,9 @@ msquic_dir = File.expand_path('../../../vendor/msquic', __FILE__)
 $CFLAGS << " -I#{msquic_dir}/src/inc"
 $CFLAGS << " -I#{msquic_dir}/src/inc/public"
 
+# Add our fixes header
+$CFLAGS << " -I#{File.expand_path('.', __FILE__)}"
+
 # Add MSQUIC library directory
 lib_dir = "#{msquic_dir}/build/bin/Release"
 $LDFLAGS << " -L#{lib_dir}"

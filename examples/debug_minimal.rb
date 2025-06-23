@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
-require_relative 'lib/quicsilver'
+require "bundler/setup"
+require "quicsilver"
 
 puts "🔍 Minimal QUIC Connection Debug Test"
 puts "=" * 50
@@ -38,7 +39,7 @@ begin
   else
     puts "   ✅ Connection successful!"
   end
-  
+
 rescue => e
   puts "💥 Error: #{e.message}"
   puts "   Backtrace: #{e.backtrace.first}"

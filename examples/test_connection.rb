@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 
-$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+require "bundler/setup"
 require "quicsilver"
 
 def test_quic_connection(host = "127.0.0.1", port = 4433)

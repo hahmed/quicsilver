@@ -1,7 +1,6 @@
 #!/usr/bin/env ruby
 
-$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
-require "quicsilver"
+require "bundler/setup"
 
 puts "🔥 Quicsilver QUIC Server Test"
 puts "═" * 40
