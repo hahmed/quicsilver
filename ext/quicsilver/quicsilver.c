@@ -18,22 +18,7 @@ typedef struct {
     int failed;
     QUIC_STATUS error_status;
     uint64_t error_code;
-    VALUE ruby_callback;
 } ConnectionContext;
-
-// Stream state tracking (minimal)
-typedef struct {
-    int opened;
-    int closed;
-    int failed;
-    QUIC_STATUS error_status;
-    // Data transfer support
-    char* receive_buffer;
-    size_t receive_buffer_size;
-    size_t received_bytes;
-    int send_complete;
-    int receive_complete;
-} StreamContext;
 
 // Listener state tracking
 typedef struct {
@@ -41,67 +26,10 @@ typedef struct {
     int stopped;
     int failed;
     QUIC_STATUS error_status;
-    VALUE ruby_callback;
     HQUIC Configuration;
 } ListenerContext;
 
-// Stream callback (minimal)
-static QUIC_STATUS QUIC_API
-StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
-{
-    StreamContext* ctx = (StreamContext*)Context;
-    if (ctx == NULL) return QUIC_STATUS_SUCCESS;
-    
-    switch (Event->Type) {
-        case QUIC_STREAM_EVENT_START_COMPLETE:
-            ctx->opened = 1;
-            break;
-        case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
-            ctx->closed = 1;
-            break;
-        case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
-            ctx->failed = 1;
-            ctx->error_status = Event->PEER_SEND_ABORTED.ErrorCode;
-            break;
-        case QUIC_STREAM_EVENT_SEND_COMPLETE:
-            ctx->send_complete = 1;
-            break;
-        case QUIC_STREAM_EVENT_RECEIVE:
-            // Handle received data
-            if (Event->RECEIVE.BufferCount > 0 && Event->RECEIVE.Buffers != NULL) {
-                for (uint32_t i = 0; i < Event->RECEIVE.BufferCount; i++) {
-                    QUIC_BUFFER* buffer = &Event->RECEIVE.Buffers[i];
-                    if (buffer->Length > 0) {
-                        // Expand receive buffer if needed
-                        size_t needed_size = ctx->received_bytes + buffer->Length;
-                        if (needed_size > ctx->receive_buffer_size) {
-                            size_t new_size = needed_size * 2; // Double the size
-                            char* new_buffer = (char*)realloc(ctx->receive_buffer, new_size);
-                            if (new_buffer != NULL) {
-                                ctx->receive_buffer = new_buffer;
-                                ctx->receive_buffer_size = new_size;
-                            }
-                        }
-                        
-                        // Copy data if we have space
-                        if (ctx->received_bytes + buffer->Length <= ctx->receive_buffer_size) {
-                            memcpy(ctx->receive_buffer + ctx->received_bytes, buffer->Buffer, buffer->Length);
-                            ctx->received_bytes += buffer->Length;
-                        }
-                    }
-                }
-            }
-            break;
-        case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
-            ctx->receive_complete = 1;
-            break;
-        default:
-            break;
-    }
-    return QUIC_STATUS_SUCCESS;
-}
-
-// Enhanced connection callback that handles key events
+// Connection callback
 static QUIC_STATUS QUIC_API
 ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event)
 {
@@ -162,7 +90,6 @@ ListenerCallback(HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event)
                 conn_ctx->failed = 0;
                 conn_ctx->error_status = QUIC_STATUS_SUCCESS;
                 conn_ctx->error_code = 0;
-                conn_ctx->ruby_callback = Qnil;
                 
                 // Set the connection callback
                 MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, (void*)ConnectionCallback, conn_ctx);
@@ -343,7 +270,6 @@ quicsilver_create_connection(VALUE self)
     ctx->failed = 0;
     ctx->error_status = QUIC_STATUS_SUCCESS;
     ctx->error_code = 0;
-    ctx->ruby_callback = Qnil;
     
     // Create connection with enhanced callback and context
     if (QUIC_FAILED(Status = MsQuic->ConnectionOpen(Registration, ConnectionCallback, ctx, &Connection))) {
@@ -357,18 +283,6 @@ quicsilver_create_connection(VALUE self)
     rb_ary_push(result, ULL2NUM((uintptr_t)Connection));
     rb_ary_push(result, ULL2NUM((uintptr_t)ctx));
     return result;
-}
-
-// Configure MSQUIC for more verbose logging
-void enable_msquic_logging() {
-    QUIC_STATUS status = MsQuicOpenVersion(2, (const void**)&MsQuic);
-    if (QUIC_FAILED(status)) {
-        fprintf(stderr, "DEBUG: Failed to open MSQUIC for logging\n");
-        return;
-    }
-    fprintf(stderr, "DEBUG: MSQUIC logging enabled\n");
-    // Set logging level to verbose
-    MsQuic->SetParam(NULL, QUIC_PARAM_GLOBAL_LOG_LEVEL, sizeof(QUIC_LOG_LEVEL), &QUIC_LOG_LEVEL_VERBOSE);
 }
 
 // Start a QUIC connection
@@ -390,8 +304,6 @@ quicsilver_start_connection(VALUE self, VALUE connection_handle, VALUE config_ha
         rb_raise(rb_eRuntimeError, "ConnectionStart failed, 0x%x!", Status);
         return Qfalse;
     }
-    
-    enable_msquic_logging();
     
     fprintf(stderr, "DEBUG: start_connection succeeded\n");
     fprintf(stderr, "DEBUG: Waiting for handshake...\n");
@@ -472,200 +384,6 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
     return Qnil;
 }
 
-// Create a QUIC stream
-static VALUE
-quicsilver_create_stream(VALUE self, VALUE connection_handle, VALUE bidirectional)
-{
-    if (MsQuic == NULL) {
-        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
-        return Qnil;
-    }
-    
-    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
-    HQUIC Stream = NULL;
-    QUIC_STATUS Status;
-    
-    // Create stream context
-    StreamContext* ctx = (StreamContext*)malloc(sizeof(StreamContext));
-    if (ctx == NULL) {
-        rb_raise(rb_eRuntimeError, "Failed to allocate stream context");
-        return Qnil;
-    }
-    
-    ctx->opened = 0;
-    ctx->closed = 0;
-    ctx->failed = 0;
-    ctx->error_status = QUIC_STATUS_SUCCESS;
-    ctx->receive_buffer = NULL;
-    ctx->receive_buffer_size = 0;
-    ctx->received_bytes = 0;
-    ctx->send_complete = 0;
-    ctx->receive_complete = 0;
-    
-    // Determine stream flags
-    QUIC_STREAM_OPEN_FLAGS flags = QUIC_STREAM_OPEN_FLAG_NONE;
-    if (!RTEST(bidirectional)) {
-        flags |= QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL;
-    }
-    
-    // Create and start stream
-    if (QUIC_FAILED(Status = MsQuic->StreamOpen(Connection, flags, StreamCallback, ctx, &Stream))) {
-        free(ctx);
-        rb_raise(rb_eRuntimeError, "StreamOpen failed, 0x%x!", Status);
-        return Qnil;
-    }
-    
-    if (QUIC_FAILED(Status = MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE))) {
-        MsQuic->StreamClose(Stream);
-        free(ctx);
-        rb_raise(rb_eRuntimeError, "StreamStart failed, 0x%x!", Status);
-        return Qnil;
-    }
-    
-    // Return stream handle and context
-    VALUE result = rb_ary_new2(2);
-    rb_ary_push(result, ULL2NUM((uintptr_t)Stream));
-    rb_ary_push(result, ULL2NUM((uintptr_t)ctx));
-    return result;
-}
-
-// Check stream status
-static VALUE
-quicsilver_stream_status(VALUE self, VALUE context_handle)
-{
-    StreamContext* ctx = (StreamContext*)(uintptr_t)NUM2ULL(context_handle);
-    
-    VALUE status = rb_hash_new();
-    rb_hash_aset(status, rb_str_new_cstr("opened"), ctx->opened ? Qtrue : Qfalse);
-    rb_hash_aset(status, rb_str_new_cstr("closed"), ctx->closed ? Qtrue : Qfalse);
-    rb_hash_aset(status, rb_str_new_cstr("failed"), ctx->failed ? Qtrue : Qfalse);
-    
-    return status;
-}
-
-// Send data on stream
-static VALUE
-quicsilver_stream_send(VALUE self, VALUE stream_handle, VALUE data)
-{
-    if (MsQuic == NULL) {
-        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
-        return Qfalse;
-    }
-    
-    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
-    
-    // Convert Ruby string to C string
-    Check_Type(data, T_STRING);
-    char* buffer = RSTRING_PTR(data);
-    size_t length = RSTRING_LEN(data);
-    
-    if (length == 0) {
-        return Qtrue; // Nothing to send
-    }
-    
-    // Allocate buffer for the data (MSQUIC will free it)
-    QUIC_BUFFER* quic_buffer = (QUIC_BUFFER*)malloc(sizeof(QUIC_BUFFER));
-    if (quic_buffer == NULL) {
-        rb_raise(rb_eRuntimeError, "Failed to allocate send buffer");
-        return Qfalse;
-    }
-    
-    // Copy data to new buffer
-    char* send_buffer = (char*)malloc(length);
-    if (send_buffer == NULL) {
-        free(quic_buffer);
-        rb_raise(rb_eRuntimeError, "Failed to allocate send data buffer");
-        return Qfalse;
-    }
-    memcpy(send_buffer, buffer, length);
-    
-    quic_buffer->Buffer = (uint8_t*)send_buffer;
-    quic_buffer->Length = (uint32_t)length;
-    
-    // Send the data
-    QUIC_STATUS Status = MsQuic->StreamSend(Stream, quic_buffer, 1, QUIC_SEND_FLAG_NONE, quic_buffer);
-    if (QUIC_FAILED(Status)) {
-        free(send_buffer);
-        free(quic_buffer);
-        rb_raise(rb_eRuntimeError, "StreamSend failed, 0x%x!", Status);
-        return Qfalse;
-    }
-    
-    return Qtrue;
-}
-
-// Receive data from stream
-static VALUE
-quicsilver_stream_receive(VALUE self, VALUE context_handle)
-{
-    StreamContext* ctx = (StreamContext*)(uintptr_t)NUM2ULL(context_handle);
-    
-    if (ctx->received_bytes == 0) {
-        return rb_str_new("", 0); // Return empty string if no data
-    }
-    
-    // Create Ruby string from received data
-    VALUE result = rb_str_new(ctx->receive_buffer, ctx->received_bytes);
-    
-    // Clear the buffer for next receive
-    ctx->received_bytes = 0;
-    
-    return result;
-}
-
-// Check if stream has received data
-static VALUE
-quicsilver_stream_has_data(VALUE self, VALUE context_handle)
-{
-    StreamContext* ctx = (StreamContext*)(uintptr_t)NUM2ULL(context_handle);
-    return ctx->received_bytes > 0 ? Qtrue : Qfalse;
-}
-
-// Shutdown stream sending
-static VALUE
-quicsilver_stream_shutdown_send(VALUE self, VALUE stream_handle)
-{
-    if (MsQuic == NULL) {
-        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
-        return Qfalse;
-    }
-    
-    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
-    
-    QUIC_STATUS Status = MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
-    if (QUIC_FAILED(Status)) {
-        rb_raise(rb_eRuntimeError, "StreamShutdown failed, 0x%x!", Status);
-        return Qfalse;
-    }
-    
-    return Qtrue;
-}
-
-// Close stream
-static VALUE
-quicsilver_close_stream(VALUE self, VALUE stream_data)
-{
-    if (MsQuic == NULL) {
-        return Qnil;
-    }
-    
-    VALUE stream_handle = rb_ary_entry(stream_data, 0);
-    VALUE context_handle = rb_ary_entry(stream_data, 1);
-    
-    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
-    StreamContext* ctx = (StreamContext*)(uintptr_t)NUM2ULL(context_handle);
-    
-    MsQuic->StreamClose(Stream);
-    if (ctx != NULL) {
-        if (ctx->receive_buffer != NULL) {
-            free(ctx->receive_buffer);
-        }
-        free(ctx);
-    }
-    
-    return Qnil;
-}
-
 // Close a QUIC configuration
 static VALUE
 quicsilver_close_configuration(VALUE self, VALUE config_handle)
@@ -720,7 +438,6 @@ quicsilver_create_listener(VALUE self, VALUE config_handle)
     ctx->stopped = 0;
     ctx->failed = 0;
     ctx->error_status = QUIC_STATUS_SUCCESS;
-    ctx->ruby_callback = Qnil;
     ctx->Configuration = Configuration;
     
     // Create listener
@@ -757,9 +474,6 @@ quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALU
     // Set up for localhost/any address
     QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_INET);
     QuicAddrSetPort(&Address, Port);
-    
-    // For localhost, we can just use the default (any address)
-    // The QuicAddrSetFamily and QuicAddrSetPort should be sufficient
     
     QUIC_STATUS Status;
     
@@ -832,13 +546,8 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "wait_for_connection", quicsilver_wait_for_connection, 2);
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
-    rb_define_singleton_method(mQuicsilver, "create_stream", quicsilver_create_stream, 2);
-    rb_define_singleton_method(mQuicsilver, "stream_status", quicsilver_stream_status, 1);
-    rb_define_singleton_method(mQuicsilver, "close_stream", quicsilver_close_stream, 1);
-    rb_define_singleton_method(mQuicsilver, "stream_send", quicsilver_stream_send, 2);
-    rb_define_singleton_method(mQuicsilver, "stream_receive", quicsilver_stream_receive, 1);
-    rb_define_singleton_method(mQuicsilver, "stream_has_data", quicsilver_stream_has_data, 1);
-    rb_define_singleton_method(mQuicsilver, "stream_shutdown_send", quicsilver_stream_shutdown_send, 1);
+    
+    // Listener management
     rb_define_singleton_method(mQuicsilver, "create_listener", quicsilver_create_listener, 1);
     rb_define_singleton_method(mQuicsilver, "start_listener", quicsilver_start_listener, 3);
     rb_define_singleton_method(mQuicsilver, "stop_listener", quicsilver_stop_listener, 1);
