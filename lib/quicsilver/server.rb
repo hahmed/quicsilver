@@ -14,7 +14,7 @@ module Quicsilver
     end
     
     def start
-      raise Error, "Server is already running" if @running
+      raise ServerIsRunningError, "Server is already running" if @running
       
       # Initialize MSQUIC if not already done
       Quicsilver.open_connection
@@ -22,7 +22,7 @@ module Quicsilver
       # Create server configuration
       config = Quicsilver.create_server_configuration(@cert_file, @key_file)
       unless config
-        raise Error, "Failed to create server configuration"
+        raise ServerConfigurationError, "Failed to create server configuration"
       end
       
       # Create and start the listener
@@ -30,7 +30,7 @@ module Quicsilver
       
       unless @listener_data
         Quicsilver.close_configuration(config)
-        raise Error, "Failed to create listener on #{@address}:#{@port}"
+        raise ServerListenerError, "Failed to create listener on #{@address}:#{@port}"
       end
       
       # Start the listener 
@@ -39,7 +39,7 @@ module Quicsilver
       unless result
         Quicsilver.close_configuration(config)
         cleanup_failed_server
-        raise Error, "Failed to start listener on #{@address}:#{@port}"
+        raise ServerListenerError, "Failed to start listener on #{@address}:#{@port}"
       end
       
       @running = true
@@ -60,7 +60,7 @@ module Quicsilver
         e.message
       end
       
-      raise Error, "Server start failed: #{error_msg}"
+      raise ServerError, "Server start failed: #{error_msg}"
     end
     
     def stop

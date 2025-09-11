@@ -7,6 +7,10 @@ require_relative "quicsilver/server"
 
 module Quicsilver
   class Error < StandardError; end
+  class ServerIsRunningError < Error; end
+  class ServerConfigurationError < Error; end
+  class ServerListenerError < Error; end
+  class ServerError < Error; end
   class ConnectionError < Error; end
   class TimeoutError < Error; end
 end
