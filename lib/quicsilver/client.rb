@@ -4,11 +4,12 @@ module Quicsilver
   class Client
     attr_reader :hostname, :port, :unsecure, :connection_timeout
     
-    def initialize(hostname, port = 4433, unsecure: false, connection_timeout: 5000)
+    def initialize(hostname, port = 4433, options = {})
       @hostname = hostname
       @port = port
-      @unsecure = unsecure
-      @connection_timeout = connection_timeout
+      @unsecure = options[:unsecure] || true
+      @connection_timeout = options[:connection_timeout] || 5000
+
       
       @connection_data = nil
       @connected = false
@@ -19,7 +20,7 @@ module Quicsilver
       raise Error, "Already connected" if @connected
 
       # Initialize MSQUIC if not already done
-      Quicsilver.open_connection
+      result = Quicsilver.open_connection
       
       # Create configuration
       config = Quicsilver.create_configuration(@unsecure)
@@ -39,10 +40,10 @@ module Quicsilver
         cleanup_failed_connection
         raise ConnectionError, "Failed to start connection"
       end
-      
+
       # Wait for connection to establish or fail
       result = Quicsilver.wait_for_connection(context_handle, @connection_timeout)
-      
+
       if result.key?("error")
         error_status = result["status"]
         error_code = result["code"]
@@ -79,11 +80,11 @@ module Quicsilver
       begin
         if @connection_data
           Quicsilver.close_connection_handle(@connection_data)
+          @connection_data = nil
         end
       rescue
         # Ignore disconnect errors
       ensure
-        cleanup_failed_connection
         @connected = false
         @connection_start_time = nil
       end

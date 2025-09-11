@@ -163,7 +163,7 @@ quicsilver_create_configuration(VALUE self, VALUE unsecure)
     Settings.IsSet.IdleTimeoutMs = TRUE;
     
     // Simple ALPN for now - Ruby can customize this later
-    QUIC_BUFFER Alpn = { sizeof("quicsilver") - 1, (uint8_t*)"quicsilver" };
+    QUIC_BUFFER Alpn = { sizeof("h3") - 1, (uint8_t*)"h3" };
     
     // Create configuration
     if (QUIC_FAILED(Status = MsQuic->ConfigurationOpen(Registration, &Alpn, 1, &Settings, sizeof(Settings), NULL, &Configuration))) {
@@ -214,7 +214,7 @@ quicsilver_create_server_configuration(VALUE self, VALUE cert_file, VALUE key_fi
     Settings.IsSet.PeerUnidiStreamCount = TRUE;
     
     // Simple ALPN for now - Ruby can customize this later
-    QUIC_BUFFER Alpn = { sizeof("quicsilver") - 1, (uint8_t*)"quicsilver" };
+    QUIC_BUFFER Alpn = { sizeof("h3") - 1, (uint8_t*)"h3" };
     
     // Create configuration
     if (QUIC_FAILED(Status = MsQuic->ConfigurationOpen(Registration, &Alpn, 1, &Settings, sizeof(Settings), NULL, &Configuration))) {
@@ -305,8 +305,6 @@ quicsilver_start_connection(VALUE self, VALUE connection_handle, VALUE config_ha
         return Qfalse;
     }
     
-    fprintf(stderr, "DEBUG: start_connection succeeded\n");
-    fprintf(stderr, "DEBUG: Waiting for handshake...\n");
     return Qtrue;
 }
 
@@ -325,19 +323,17 @@ quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_m
     }
     
     if (ctx->connected) {
-        fprintf(stderr, "DEBUG: Handshake succeeded\n");
         return rb_hash_new();
     } else if (ctx->failed) {
         VALUE error_info = rb_hash_new();
         rb_hash_aset(error_info, rb_str_new_cstr("error"), Qtrue);
         rb_hash_aset(error_info, rb_str_new_cstr("status"), ULL2NUM(ctx->error_status));
         rb_hash_aset(error_info, rb_str_new_cstr("code"), ULL2NUM(ctx->error_code));
-        fprintf(stderr, "DEBUG: Handshake failed: %s\n", rb_str_new_cstr(rb_inspect(error_info)));
+        
         return error_info;
     } else {
         VALUE timeout_info = rb_hash_new();
         rb_hash_aset(timeout_info, rb_str_new_cstr("timeout"), Qtrue);
-        fprintf(stderr, "DEBUG: Handshake timed out\n");
         return timeout_info;
     }
 }
@@ -375,8 +371,12 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
     ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
     
-    MsQuic->ConnectionClose(Connection);
+    // Only close if connection is valid
+    if (Connection != NULL) {
+        MsQuic->ConnectionClose(Connection);
+    }
     
+    // Free context if valid
     if (ctx != NULL) {
         free(ctx);
     }
@@ -478,14 +478,13 @@ quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALU
     QUIC_STATUS Status;
     
     // Create QUIC_BUFFER for the address
-    QUIC_BUFFER AlpnBuffer = { sizeof("quicsilver") - 1, (uint8_t*)"quicsilver" };
+    QUIC_BUFFER AlpnBuffer = { sizeof("h3") - 1, (uint8_t*)"h3" };
     
     if (QUIC_FAILED(Status = MsQuic->ListenerStart(Listener, &AlpnBuffer, 1, &Address))) {
         rb_raise(rb_eRuntimeError, "ListenerStart failed, 0x%x!", Status);
         return Qfalse;
     }
     
-    fprintf(stderr, "DEBUG: start_listener succeeded\n");
     return Qtrue;
 }
 

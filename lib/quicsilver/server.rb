@@ -47,10 +47,6 @@ module Quicsilver
       puts "✅ QUIC server started successfully on #{@address}:#{@port}"
       puts "📄 Certificate: #{@cert_file}"
       puts "🔑 Private Key: #{@key_file}"
-      
-      # Clean up config since listener is started
-      Quicsilver.close_configuration(config)
-      
     rescue => e
       cleanup_failed_server
       @running = false
