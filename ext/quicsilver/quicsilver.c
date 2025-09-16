@@ -192,29 +192,42 @@ quicsilver_create_configuration(VALUE self, VALUE unsecure)
 
 // Create a QUIC server configuration
 static VALUE
-quicsilver_create_server_configuration(VALUE self, VALUE cert_file, VALUE key_file)
+quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
 {
     if (MsQuic == NULL) {
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized. Call Quicsilver.open_connection first.");
         return Qnil;
     }
+    VALUE cert_file_val = rb_hash_aref(config_hash, rb_str_new_cstr("cert_file"));
+    VALUE key_file_val = rb_hash_aref(config_hash, rb_str_new_cstr("key_file"));
+    VALUE idle_timeout_val = rb_hash_aref(config_hash, rb_str_new_cstr("idle_timeout"));
+    VALUE server_resumption_level_val = rb_hash_aref(config_hash, rb_str_new_cstr("server_resumption_level"));
+    VALUE peer_bidi_stream_count_val = rb_hash_aref(config_hash, rb_str_new_cstr("peer_bidi_stream_count"));
+    VALUE peer_unidi_stream_count_val = rb_hash_aref(config_hash, rb_str_new_cstr("peer_unidi_stream_count"));
+    VALUE alpn_val = rb_hash_aref(config_hash, rb_str_new_cstr("alpn"));
     
     QUIC_STATUS Status;
     HQUIC Configuration = NULL;
-    
-    // Basic settings
+
+    const char* cert_path = StringValueCStr(cert_file_val);
+    const char* key_path = StringValueCStr(key_file_val);
+    uint32_t idle_timeout_ms = NUM2INT(idle_timeout_val);
+    uint32_t server_resumption_level = NUM2INT(server_resumption_level_val);
+    uint32_t peer_bidi_stream_count = NUM2INT(peer_bidi_stream_count_val);
+    uint32_t peer_unidi_stream_count = NUM2INT(peer_unidi_stream_count_val);
+    const char* alpn_str = StringValueCStr(alpn_val);
+
     QUIC_SETTINGS Settings = {0};
-    Settings.IdleTimeoutMs = 10000; // 10 second idle timeout for server
+    Settings.IdleTimeoutMs = idle_timeout_ms; 
     Settings.IsSet.IdleTimeoutMs = TRUE;
-    Settings.ServerResumptionLevel = QUIC_SERVER_RESUME_AND_ZERORTT;
+    Settings.ServerResumptionLevel = server_resumption_level;
     Settings.IsSet.ServerResumptionLevel = TRUE;
-    Settings.PeerBidiStreamCount = 10;
+    Settings.PeerBidiStreamCount = peer_bidi_stream_count;
     Settings.IsSet.PeerBidiStreamCount = TRUE;
-    Settings.PeerUnidiStreamCount = 10;
+    Settings.PeerUnidiStreamCount = peer_unidi_stream_count;
     Settings.IsSet.PeerUnidiStreamCount = TRUE;
-    
-    // Simple ALPN for now - Ruby can customize this later
-    QUIC_BUFFER Alpn = { sizeof("h3") - 1, (uint8_t*)"h3" };
+
+    QUIC_BUFFER Alpn = { (uint32_t)strlen(alpn_str), (uint8_t*)alpn_str };
     
     // Create configuration
     if (QUIC_FAILED(Status = MsQuic->ConfigurationOpen(Registration, &Alpn, 1, &Settings, sizeof(Settings), NULL, &Configuration))) {
@@ -225,10 +238,6 @@ quicsilver_create_server_configuration(VALUE self, VALUE cert_file, VALUE key_fi
     // Set up server credentials with certificate files
     QUIC_CREDENTIAL_CONFIG CredConfig = {0};
     QUIC_CERTIFICATE_FILE CertFile = {0};
-    
-    // Convert Ruby strings to C strings
-    const char* cert_path = StringValueCStr(cert_file);
-    const char* key_path = StringValueCStr(key_file);
     
     CertFile.CertificateFile = cert_path;
     CertFile.PrivateKeyFile = key_path;
@@ -536,7 +545,7 @@ Init_quicsilver(void)
     
     // Configuration management
     rb_define_singleton_method(mQuicsilver, "create_configuration", quicsilver_create_configuration, 1);
-    rb_define_singleton_method(mQuicsilver, "create_server_configuration", quicsilver_create_server_configuration, 2);
+    rb_define_singleton_method(mQuicsilver, "create_server_configuration", quicsilver_create_server_configuration, 1);
     rb_define_singleton_method(mQuicsilver, "close_configuration", quicsilver_close_configuration, 1);
     
     // Connection management  

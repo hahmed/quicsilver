@@ -2,13 +2,12 @@
 
 module Quicsilver
   class Server
-    attr_reader :address, :port, :cert_file, :key_file, :running
+    attr_reader :address, :port, :server_configuration, :running
     
-    def initialize(port = 4433, address: "0.0.0.0", cert_file: nil, key_file: nil)
+    def initialize(port = 4433, address: "0.0.0.0", server_configuration: nil)
       @port = port
       @address = address
-      @cert_file = cert_file || "certs/server.crt"
-      @key_file = key_file || "certs/server.key"
+      @server_configuration = server_configuration || ServerConfiguration.new
       @running = false
       @listener_data = nil
     end
@@ -20,31 +19,22 @@ module Quicsilver
       Quicsilver.open_connection
       
       # Create server configuration
-      config = Quicsilver.create_server_configuration(@cert_file, @key_file)
+      config = Quicsilver.create_server_configuration(@server_configuration.to_h)
       unless config
         raise ServerConfigurationError, "Failed to create server configuration"
       end
       
       # Create and start the listener
-      @listener_data = Quicsilver.create_listener(config)
-      
-      unless @listener_data
-        Quicsilver.close_configuration(config)
-        raise ServerListenerError, "Failed to create listener on #{@address}:#{@port}"
-      end
-      
-      # Start the listener 
-      listener_handle = @listener_data[0]
-      result = Quicsilver.start_listener(listener_handle, @address, @port)
-      unless result
-        Quicsilver.close_configuration(config)
-        cleanup_failed_server
-        raise ServerListenerError, "Failed to start listener on #{@address}:#{@port}"
-      end
+      start_listener(config)
+      start_server(config)
       
       @running = true
       
       puts "✅ QUIC server started successfully on #{@address}:#{@port}"
+    rescue ServerConfigurationError, ServerListenerError => e
+      cleanup_failed_server
+      @running = false
+      raise e
     rescue => e
       cleanup_failed_server
       @running = false
@@ -109,6 +99,25 @@ module Quicsilver
     end
     
     private
+
+    def start_server(config)
+      listener_handle = @listener_data[0]
+      result = Quicsilver.start_listener(listener_handle, @address, @port)
+      unless result
+        Quicsilver.close_configuration(config)
+        cleanup_failed_server
+        raise ServerListenerError, "Failed to start listener on #{@address}:#{@port}"
+      end
+    end
+
+    def start_listener(config)
+      @listener_data = Quicsilver.create_listener(config)
+      
+      unless @listener_data
+        Quicsilver.close_configuration(config)
+        raise ServerListenerError, "Failed to create listener on #{@address}:#{@port}"
+      end
+    end
     
     def cleanup_failed_server
       if @listener_data
