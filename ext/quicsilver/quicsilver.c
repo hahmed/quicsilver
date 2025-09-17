@@ -198,13 +198,13 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized. Call Quicsilver.open_connection first.");
         return Qnil;
     }
-    VALUE cert_file_val = rb_hash_aref(config_hash, rb_str_new_cstr("cert_file"));
-    VALUE key_file_val = rb_hash_aref(config_hash, rb_str_new_cstr("key_file"));
-    VALUE idle_timeout_val = rb_hash_aref(config_hash, rb_str_new_cstr("idle_timeout"));
-    VALUE server_resumption_level_val = rb_hash_aref(config_hash, rb_str_new_cstr("server_resumption_level"));
-    VALUE peer_bidi_stream_count_val = rb_hash_aref(config_hash, rb_str_new_cstr("peer_bidi_stream_count"));
-    VALUE peer_unidi_stream_count_val = rb_hash_aref(config_hash, rb_str_new_cstr("peer_unidi_stream_count"));
-    VALUE alpn_val = rb_hash_aref(config_hash, rb_str_new_cstr("alpn"));
+    VALUE cert_file_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("cert_file")));
+    VALUE key_file_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("key_file")));
+    VALUE idle_timeout_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("idle_timeout")));
+    VALUE server_resumption_level_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("server_resumption_level")));
+    VALUE peer_bidi_stream_count_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("peer_bidi_stream_count")));
+    VALUE peer_unidi_stream_count_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("peer_unidi_stream_count")));
+    VALUE alpn_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("alpn")));
     
     QUIC_STATUS Status;
     HQUIC Configuration = NULL;
