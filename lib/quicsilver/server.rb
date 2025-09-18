@@ -25,7 +25,7 @@ module Quicsilver
       end
       
       # Create and start the listener
-      start_listener(config)
+      @listener_data = start_listener(config)
       start_server(config)
       
       @running = true
@@ -101,8 +101,7 @@ module Quicsilver
     private
 
     def start_server(config)
-      listener_handle = @listener_data[0]
-      result = Quicsilver.start_listener(listener_handle, @address, @port)
+      result = Quicsilver.start_listener(@listener_data.listener_handle, @address, @port)
       unless result
         Quicsilver.close_configuration(config)
         cleanup_failed_server
@@ -111,12 +110,15 @@ module Quicsilver
     end
 
     def start_listener(config)
-      @listener_data = Quicsilver.create_listener(config)
-      
-      unless @listener_data
+      result = Quicsilver.create_listener(config)
+      listener_data = ListenerData.new(result[0], result[1])
+
+      unless listener_data
         Quicsilver.close_configuration(config)
         raise ServerListenerError, "Failed to create listener on #{@address}:#{@port}"
       end
+
+      listener_data
     end
     
     def cleanup_failed_server
