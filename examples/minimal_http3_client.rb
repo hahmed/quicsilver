@@ -15,6 +15,9 @@ begin
   puts "✅ Connected successfully!"
   puts "📋 Connection info: #{client.connection_info}"
   
+  10.times do
+    client.send_data("Hello, server!")
+  end
   # Keep connection alive for a bit
   puts "⏳ Connection established. Press Enter to disconnect..."
   gets

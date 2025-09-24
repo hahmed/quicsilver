@@ -18,7 +18,6 @@ module Quicsilver
       # Initialize MSQUIC if not already done
       Quicsilver.open_connection
       
-      # Create server configuration
       config = Quicsilver.create_server_configuration(@server_configuration.to_h)
       unless config
         raise ServerConfigurationError, "Failed to create server configuration"

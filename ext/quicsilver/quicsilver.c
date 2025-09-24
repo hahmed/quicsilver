@@ -29,11 +29,49 @@ typedef struct {
     HQUIC Configuration;
 } ListenerContext;
 
+// Stream state tracking
+typedef struct {
+    int started;
+    int shutdown;
+    QUIC_STATUS error_status;
+} StreamContext;
+
+QUIC_STATUS
+StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
+{
+    StreamContext* ctx = (StreamContext*)Context;
+    
+    if (ctx == NULL) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    
+    switch (Event->Type) {
+        case QUIC_STREAM_EVENT_RECEIVE:
+            // Client sent data - process it here
+            // Event->RECEIVE.Buffers contains the data
+            if (Event->RECEIVE.BufferCount > 0) {
+                const QUIC_BUFFER* buffer = &Event->RECEIVE.Buffers[0];
+                printf("Data: %.*s\n", (int)buffer->Length, (char*)buffer->Buffer);
+            }
+            break;
+        case QUIC_STREAM_EVENT_SEND_COMPLETE:
+            // Data send completed
+            break;
+        case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+            ctx->shutdown = 1;
+            break;
+    }
+    
+    return QUIC_STATUS_SUCCESS;
+}
+
 // Connection callback
 static QUIC_STATUS QUIC_API
 ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event)
 {
     ConnectionContext* ctx = (ConnectionContext*)Context;
+    HQUIC Stream;
+    StreamContext* stream_ctx;
     
     if (ctx == NULL) {
         return QUIC_STATUS_SUCCESS;
@@ -43,26 +81,35 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
         case QUIC_CONNECTION_EVENT_CONNECTED:
             ctx->connected = 1;
             ctx->failed = 0;
-            break;
-            
+            break;            
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
             ctx->failed = 1;
             ctx->error_status = Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status;
             ctx->error_code = Event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode;
             break;
-            
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
             ctx->connected = 0;
             ctx->failed = 1;
             ctx->error_status = QUIC_STATUS_SUCCESS; // Peer initiated, not an error
             ctx->error_code = Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode;
-            break;
-            
+            break;            
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
             break;
-            
+         case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
+            // Client opened a stream
+            Stream = Event->PEER_STREAM_STARTED.Stream;
+            stream_ctx = (StreamContext*)malloc(sizeof(StreamContext));
+            if (stream_ctx != NULL) {
+                stream_ctx->started = 1;
+                stream_ctx->shutdown = 0;
+                stream_ctx->error_status = QUIC_STATUS_SUCCESS;
+                
+                // Set the stream callback handler to handle data events
+                MsQuic->SetCallbackHandler(Stream, (void*)StreamCallback, stream_ctx);
+            }
+         break; 
         default:
             break;
     }
@@ -473,7 +520,6 @@ quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALU
     }
     
     HQUIC Listener = (HQUIC)(uintptr_t)NUM2ULL(listener_handle);
-    const char* addr_str = StringValueCStr(address);
     uint16_t Port = (uint16_t)NUM2INT(port);
     
     // Setup address - properly initialize the entire structure
@@ -533,6 +579,96 @@ quicsilver_close_listener(VALUE self, VALUE listener_data)
     return Qnil;
 }
 
+// Open a QUIC stream
+static VALUE
+quicsilver_open_stream(VALUE self, VALUE connection_handle)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
+    HQUIC Stream = NULL;
+
+    printf("Connection handle: %p\n", Connection);
+    printf("About to call StreamOpen...\n");
+    
+    StreamContext* ctx = (StreamContext*)malloc(sizeof(StreamContext));
+    if (ctx == NULL) {
+        rb_raise(rb_eRuntimeError, "Failed to allocate stream context");
+        return Qnil;
+    }
+    
+    ctx->started = 1;
+    ctx->shutdown = 0;
+    ctx->error_status = QUIC_STATUS_SUCCESS;
+
+    // Create stream
+    QUIC_STATUS Status = MsQuic->StreamOpen(Connection, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, StreamCallback, ctx, &Stream);
+    if (QUIC_FAILED(Status)) {
+        free(ctx);
+        rb_raise(rb_eRuntimeError, "StreamOpen failed, 0x%x!", Status);
+        return Qnil;
+    }
+    
+    // Start the stream
+    Status = MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE);
+    if (QUIC_FAILED(Status)) {
+        free(ctx);
+        MsQuic->StreamClose(Stream);
+        rb_raise(rb_eRuntimeError, "StreamStart failed, 0x%x!", Status);
+        return Qnil;
+    }
+    
+    return ULL2NUM((uintptr_t)Stream);
+}
+
+// Send data on a QUIC stream
+static VALUE
+quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+
+    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    const char* data_str = StringValueCStr(data);
+    uint32_t data_len = (uint32_t)strlen(data_str);
+    
+    void* SendBufferRaw = malloc(sizeof(QUIC_BUFFER) + data_len);
+    if (SendBufferRaw == NULL) {
+        rb_raise(rb_eRuntimeError, "SendBuffer allocation failed!");
+        return Qnil;
+    }
+
+    QUIC_BUFFER* SendBuffer = (QUIC_BUFFER*)SendBufferRaw;
+    SendBuffer->Buffer = (uint8_t*)SendBufferRaw + sizeof(QUIC_BUFFER);
+    SendBuffer->Length = data_len;
+
+    memcpy(SendBuffer->Buffer, data_str, data_len);
+    
+    QUIC_STATUS Status = MsQuic->StreamSend(Stream, SendBuffer, 1, QUIC_SEND_FLAG_NONE, SendBufferRaw);
+    if (QUIC_FAILED(Status)) {
+        free(SendBufferRaw);
+        rb_raise(rb_eRuntimeError, "StreamSend failed, 0x%x!", Status);
+        return Qfalse;
+    }
+    
+    return Qtrue;
+}
+
+// Receive data on a QUIC stream
+static VALUE
+quicsilver_receive_stream(VALUE self, VALUE stream_handle)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+}
+
 // Initialize the extension
 void
 Init_quicsilver(void)
@@ -560,4 +696,9 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "start_listener", quicsilver_start_listener, 3);
     rb_define_singleton_method(mQuicsilver, "stop_listener", quicsilver_stop_listener, 1);
     rb_define_singleton_method(mQuicsilver, "close_listener", quicsilver_close_listener, 1);
+
+    // Stream management
+    rb_define_singleton_method(mQuicsilver, "open_stream", quicsilver_open_stream, 1);
+    rb_define_singleton_method(mQuicsilver, "send_stream", quicsilver_send_stream, 2);
+    rb_define_singleton_method(mQuicsilver, "receive_stream", quicsilver_receive_stream, 1);
 }

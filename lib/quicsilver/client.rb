@@ -63,7 +63,6 @@ module Quicsilver
       
       # Clean up config since connection is established
       Quicsilver.close_configuration(config)
-      
     rescue => e
       cleanup_failed_connection
       
@@ -143,6 +142,12 @@ module Quicsilver
       return 0 unless @connection_start_time
       Time.now - @connection_start_time
     end
+
+    def send_data(data)
+      stream = open_stream
+      result = Quicsilver.send_stream(stream, data)
+      puts "Send data result: #{result}"
+    end
     
     private
     
@@ -150,6 +155,10 @@ module Quicsilver
       Quicsilver.close_connection_handle(@connection_data) if @connection_data
       @connection_data = nil
       @connected = false
+    end
+
+    def open_stream
+      Quicsilver.open_stream(@connection_data[0])
     end
   end
 end
