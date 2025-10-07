@@ -3,7 +3,13 @@
 module Quicsilver
   class Server
     attr_reader :address, :port, :server_configuration, :running
-    
+
+    class << self
+      def handle_stream(event, data)
+        puts "🔧 Ruby: Server callback: #{event}, #{data}"
+      end
+    end
+
     def initialize(port = 4433, address: "0.0.0.0", server_configuration: nil)
       @port = port
       @address = address
@@ -11,24 +17,24 @@ module Quicsilver
       @running = false
       @listener_data = nil
     end
-    
+
     def start
       raise ServerIsRunningError, "Server is already running" if @running
-      
+
       # Initialize MSQUIC if not already done
       Quicsilver.open_connection
-      
+
       config = Quicsilver.create_server_configuration(@server_configuration.to_h)
       unless config
         raise ServerConfigurationError, "Failed to create server configuration"
       end
-      
+
       # Create and start the listener
       @listener_data = start_listener(config)
       start_server(config)
-      
+
       @running = true
-      
+
       puts "✅ QUIC server started successfully on #{@address}:#{@port}"
     rescue ServerConfigurationError, ServerListenerError => e
       cleanup_failed_server
@@ -37,7 +43,7 @@ module Quicsilver
     rescue => e
       cleanup_failed_server
       @running = false
-      
+
       error_msg = case e.message
       when /0x16/
         "Invalid parameter error - check certificate files and network configuration"
@@ -46,22 +52,22 @@ module Quicsilver
       else
         e.message
       end
-      
+
       raise ServerError, "Server start failed: #{error_msg}"
     end
-    
+
     def stop
       return unless @running
-      
+
       puts "🛑 Stopping QUIC server..."
-      
+
       if @listener_data
         listener_handle = @listener_data[0]
         Quicsilver.stop_listener(listener_handle)
         Quicsilver.close_listener(@listener_data)
         @listener_data = nil
       end
-      
+
       @running = false
       puts "👋 Server stopped"    
     rescue
@@ -70,11 +76,11 @@ module Quicsilver
       @listener_data = nil
       @running = false
     end
-    
+
     def running?
       @running
     end
-    
+
     def server_info
       {
         address: @address,
@@ -84,19 +90,25 @@ module Quicsilver
         key_file: @key_file
       }
     end
-    
+
     def wait_for_connections(timeout: nil)
-      start_time = Time.now
-      
-      while @running
-        sleep(0.1)
-        
-        if timeout && (Time.now - start_time) > timeout
-          break
+      if timeout
+        end_time = Time.now + timeout
+        while Time.now < end_time && @running
+          Quicsilver.process_events
+          sleep(0.01) # Poll every 10ms
+        end
+      else
+        # Keep the server running indefinitely
+        # Process events from MSQUIC callbacks
+        loop do
+          Quicsilver.process_events
+          sleep(0.01) # Poll every 10ms
+          break unless @running
         end
       end
     end
-    
+
     private
 
     def start_server(config)
@@ -119,7 +131,7 @@ module Quicsilver
 
       listener_data
     end
-    
+
     def cleanup_failed_server
       if @listener_data
         begin

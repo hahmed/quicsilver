@@ -1,7 +1,22 @@
 #include <ruby.h>
 #include "msquic.h"
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 
 static VALUE mQuicsilver;
+
+// Event queue for callbacks
+typedef struct CallbackEvent {
+    char* event_type;
+    char* data;
+    size_t data_len;
+    struct CallbackEvent* next;
+} CallbackEvent;
+
+static CallbackEvent* event_queue_head = NULL;
+static CallbackEvent* event_queue_tail = NULL;
+static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Global MSQUIC API table
 static const QUIC_API_TABLE* MsQuic = NULL;
@@ -36,29 +51,92 @@ typedef struct {
     QUIC_STATUS error_status;
 } StreamContext;
 
+// Enqueue a callback event (thread-safe)
+static void
+enqueue_callback_event(const char* event_type, const char* data, size_t data_len)
+{
+    CallbackEvent* event = (CallbackEvent*)malloc(sizeof(CallbackEvent));
+    if (event == NULL) return;
+
+    event->event_type = strdup(event_type);
+    event->data = (char*)malloc(data_len);
+    if (event->data != NULL) {
+        memcpy(event->data, data, data_len);
+    }
+    event->data_len = data_len;
+    event->next = NULL;
+
+    pthread_mutex_lock(&queue_mutex);
+    if (event_queue_tail == NULL) {
+        event_queue_head = event_queue_tail = event;
+    } else {
+        event_queue_tail->next = event;
+        event_queue_tail = event;
+    }
+    pthread_mutex_unlock(&queue_mutex);
+}
+
+// Process all pending callback events (called from Ruby)
+static VALUE
+quicsilver_process_events(VALUE self)
+{
+    CallbackEvent* event;
+    VALUE server_class = rb_const_get(mQuicsilver, rb_intern("Server"));
+    int processed = 0;
+
+    while (1) {
+        pthread_mutex_lock(&queue_mutex);
+        event = event_queue_head;
+        if (event != NULL) {
+            event_queue_head = event->next;
+            if (event_queue_head == NULL) {
+                event_queue_tail = NULL;
+            }
+        }
+        pthread_mutex_unlock(&queue_mutex);
+
+        if (event == NULL) break;
+
+        if (!NIL_P(server_class)) {
+            rb_funcall(server_class, rb_intern("handle_stream"), 2,
+                rb_str_new_cstr(event->event_type),
+                rb_str_new(event->data, event->data_len));
+            processed++;
+        }
+
+        free(event->event_type);
+        free(event->data);
+        free(event);
+    }
+
+    return INT2NUM(processed);
+}
+
 QUIC_STATUS
 StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
 {
     StreamContext* ctx = (StreamContext*)Context;
-    
+
     if (ctx == NULL) {
         return QUIC_STATUS_SUCCESS;
     }
-    
+
     switch (Event->Type) {
         case QUIC_STREAM_EVENT_RECEIVE:
-            // Client sent data - process it here
-            // Event->RECEIVE.Buffers contains the data
+            // Client sent data - enqueue for Ruby processing
             if (Event->RECEIVE.BufferCount > 0) {
                 const QUIC_BUFFER* buffer = &Event->RECEIVE.Buffers[0];
-                printf("Data: %.*s\n", (int)buffer->Length, (char*)buffer->Buffer);
+                enqueue_callback_event("RECEIVE", (const char*)buffer->Buffer, buffer->Length);
             }
             break;
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
-            // Data send completed
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
             ctx->shutdown = 1;
+            break;
+        case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
+            break;
+        case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
             break;
     }
     
@@ -591,9 +669,6 @@ quicsilver_open_stream(VALUE self, VALUE connection_handle)
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
     HQUIC Stream = NULL;
 
-    printf("Connection handle: %p\n", Connection);
-    printf("About to call StreamOpen...\n");
-    
     StreamContext* ctx = (StreamContext*)malloc(sizeof(StreamContext));
     if (ctx == NULL) {
         rb_raise(rb_eRuntimeError, "Failed to allocate stream context");
@@ -605,7 +680,7 @@ quicsilver_open_stream(VALUE self, VALUE connection_handle)
     ctx->error_status = QUIC_STATUS_SUCCESS;
 
     // Create stream
-    QUIC_STATUS Status = MsQuic->StreamOpen(Connection, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, StreamCallback, ctx, &Stream);
+    QUIC_STATUS Status = MsQuic->StreamOpen(Connection, QUIC_STREAM_OPEN_FLAG_NONE, StreamCallback, ctx, &Stream);
     if (QUIC_FAILED(Status)) {
         free(ctx);
         rb_raise(rb_eRuntimeError, "StreamOpen failed, 0x%x!", Status);
@@ -649,7 +724,7 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data)
 
     memcpy(SendBuffer->Buffer, data_str, data_len);
     
-    QUIC_STATUS Status = MsQuic->StreamSend(Stream, SendBuffer, 1, QUIC_SEND_FLAG_NONE, SendBufferRaw);
+    QUIC_STATUS Status = MsQuic->StreamSend(Stream, SendBuffer, 1, QUIC_SEND_FLAG_FIN, SendBufferRaw);
     if (QUIC_FAILED(Status)) {
         free(SendBufferRaw);
         rb_raise(rb_eRuntimeError, "StreamSend failed, 0x%x!", Status);
@@ -659,22 +734,12 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data)
     return Qtrue;
 }
 
-// Receive data on a QUIC stream
-static VALUE
-quicsilver_receive_stream(VALUE self, VALUE stream_handle)
-{
-    if (MsQuic == NULL) {
-        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
-        return Qnil;
-    }
-}
-
 // Initialize the extension
 void
 Init_quicsilver(void)
 {
     mQuicsilver = rb_define_module("Quicsilver");
-    
+
     // Core initialization
     rb_define_singleton_method(mQuicsilver, "open_connection", quicsilver_open, 0);
     rb_define_singleton_method(mQuicsilver, "close_connection", quicsilver_close, 0);
@@ -700,5 +765,7 @@ Init_quicsilver(void)
     // Stream management
     rb_define_singleton_method(mQuicsilver, "open_stream", quicsilver_open_stream, 1);
     rb_define_singleton_method(mQuicsilver, "send_stream", quicsilver_send_stream, 2);
-    rb_define_singleton_method(mQuicsilver, "receive_stream", quicsilver_receive_stream, 1);
+
+    // Event processing
+    rb_define_singleton_method(mQuicsilver, "process_events", quicsilver_process_events, 0);
 }

@@ -144,9 +144,13 @@ module Quicsilver
     end
 
     def send_data(data)
-      stream = open_stream
-      result = Quicsilver.send_stream(stream, data)
-      puts "Send data result: #{result}"
+      # Async do
+        stream = open_stream
+        result = Quicsilver.send_stream(stream, data)
+        puts "Send data result: #{result}"
+      # rescue => e
+      #   puts "Send data error: #{e.message}"
+      # end
     end
     
     private

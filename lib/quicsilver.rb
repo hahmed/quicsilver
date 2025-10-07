@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
 require_relative "quicsilver/version"
-require_relative "quicsilver/quicsilver"
 require_relative "quicsilver/client"
 require_relative "quicsilver/listener_data"
 require_relative "quicsilver/server"
 require_relative "quicsilver/server_configuration"
+require_relative "quicsilver/quicsilver"
 
 module Quicsilver
   class Error < StandardError; end
