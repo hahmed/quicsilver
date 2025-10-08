@@ -9,6 +9,7 @@ static VALUE mQuicsilver;
 // Event queue for callbacks
 typedef struct CallbackEvent {
     char* event_type;
+    uint64_t stream_id;
     char* data;
     size_t data_len;
     struct CallbackEvent* next;
@@ -53,12 +54,13 @@ typedef struct {
 
 // Enqueue a callback event (thread-safe)
 static void
-enqueue_callback_event(const char* event_type, const char* data, size_t data_len)
+enqueue_callback_event(const char* event_type, uint64_t stream_id, const char* data, size_t data_len)
 {
     CallbackEvent* event = (CallbackEvent*)malloc(sizeof(CallbackEvent));
     if (event == NULL) return;
 
     event->event_type = strdup(event_type);
+    event->stream_id = stream_id;
     event->data = (char*)malloc(data_len);
     if (event->data != NULL) {
         memcpy(event->data, data, data_len);
@@ -98,7 +100,8 @@ quicsilver_process_events(VALUE self)
         if (event == NULL) break;
 
         if (!NIL_P(server_class)) {
-            rb_funcall(server_class, rb_intern("handle_stream"), 2,
+            rb_funcall(server_class, rb_intern("handle_stream"), 3,
+                ULL2NUM(event->stream_id),
                 rb_str_new_cstr(event->event_type),
                 rb_str_new(event->data, event->data_len));
             processed++;
@@ -126,7 +129,14 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             // Client sent data - enqueue for Ruby processing
             if (Event->RECEIVE.BufferCount > 0) {
                 const QUIC_BUFFER* buffer = &Event->RECEIVE.Buffers[0];
-                enqueue_callback_event("RECEIVE", (const char*)buffer->Buffer, buffer->Length);
+                const char* event_type = (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) ? "RECEIVE_FIN" : "RECEIVE";
+
+                // Get the QUIC protocol stream ID (0, 4, 8, 12...)
+                uint64_t stream_id = 0;
+                uint32_t stream_id_len = sizeof(stream_id);
+                MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
+
+                enqueue_callback_event(event_type, stream_id, (const char*)buffer->Buffer, buffer->Length);
             }
             break;
         case QUIC_STREAM_EVENT_SEND_COMPLETE:

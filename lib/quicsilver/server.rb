@@ -5,8 +5,28 @@ module Quicsilver
     attr_reader :address, :port, :server_configuration, :running
 
     class << self
-      def handle_stream(event, data)
-        puts "🔧 Ruby: Server callback: #{event}, #{data}"
+      def stream_buffers
+        @stream_buffers ||= {}
+      end
+
+      def handle_stream(stream_id, event, data)
+        case event
+        when "RECEIVE"
+          # Accumulate data
+          stream_buffers[stream_id] ||= ""
+          stream_buffers[stream_id] += data
+          puts "🔧 Ruby: Stream #{stream_id}: Buffering #{data.bytesize} bytes (total: #{stream_buffers[stream_id].bytesize})"
+        when "RECEIVE_FIN"
+          # Final chunk - process complete message
+          stream_buffers[stream_id] ||= ""
+          stream_buffers[stream_id] += data
+          complete_data = stream_buffers[stream_id]
+
+          puts "✅ Ruby: Stream #{stream_id}: Complete message (#{complete_data.bytesize} bytes): #{complete_data[0..100]}"
+
+          # Clean up buffer
+          stream_buffers.delete(stream_id)
+        end
       end
     end
 

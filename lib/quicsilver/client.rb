@@ -144,13 +144,20 @@ module Quicsilver
     end
 
     def send_data(data)
-      # Async do
-        stream = open_stream
-        result = Quicsilver.send_stream(stream, data)
-        puts "Send data result: #{result}"
-      # rescue => e
-      #   puts "Send data error: #{e.message}"
-      # end
+      raise Error, "Not connected" unless @connected
+
+      stream = open_stream
+      unless stream
+        puts "❌ Failed to open stream for: #{data[0..50]}"
+        return false
+      end
+
+      result = Quicsilver.send_stream(stream, data)
+      puts "✅ Send data result for '#{data[0..30]}': #{result}"
+      result
+    rescue => e
+      puts "❌ Send data error for '#{data[0..30]}': #{e.message}"
+      false
     end
     
     private
