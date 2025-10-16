@@ -4,6 +4,11 @@ module Quicsilver
   class Server
     attr_reader :address, :port, :server_configuration, :running
 
+    STREAM_EVENT_RECEIVE = "RECEIVE"
+    STREAM_EVENT_RECEIVE_FIN = "RECEIVE_FIN"
+    STREAM_EVENT_CONNECTION_ESTABLISHED = "CONNECTION_ESTABLISHED"
+    STREAM_EVENT_SEND_COMPLETE = "SEND_COMPLETE"
+
     class << self
       def stream_buffers
         @stream_buffers ||= {}
@@ -11,18 +16,33 @@ module Quicsilver
 
       def handle_stream(stream_id, event, data)
         case event
-        when "RECEIVE"
+        when STREAM_EVENT_CONNECTION_ESTABLISHED
+          puts "🔧 Ruby: Connection established with client"
+          connection_handle = data.unpack1('Q')  # Unpack 64-bit pointer
+          stream = Quicsilver.open_stream(connection_handle, true)  # unidirectional
+          control_data = Quicsilver::HTTP3.build_control_stream
+          Quicsilver.send_stream(stream, control_data, false)  # no FIN
+        when STREAM_EVENT_SEND_COMPLETE
+          puts "🔧 Ruby: Control stream sent to client"
+        when STREAM_EVENT_RECEIVE
           # Accumulate data
           stream_buffers[stream_id] ||= ""
           stream_buffers[stream_id] += data
           puts "🔧 Ruby: Stream #{stream_id}: Buffering #{data.bytesize} bytes (total: #{stream_buffers[stream_id].bytesize})"
-        when "RECEIVE_FIN"
+        when STREAM_EVENT_RECEIVE_FIN
           # Final chunk - process complete message
           stream_buffers[stream_id] ||= ""
           stream_buffers[stream_id] += data
           complete_data = stream_buffers[stream_id]
 
-          puts "✅ Ruby: Stream #{stream_id}: Complete message (#{complete_data.bytesize} bytes): #{complete_data[0..100]}"
+          # Check if this looks like binary HTTP/3 frame (starts with frame type byte)
+          if complete_data.bytes.first && complete_data.bytes.first <= 0x07
+            puts "✅ Ruby: Stream #{stream_id}: HTTP/3 Frame (#{complete_data.bytesize} bytes)"
+            puts "   Frame type: 0x#{complete_data.bytes.first.to_s(16).upcase}"
+            puts "   Hex dump: #{complete_data.bytes[0..20].map { |b| '%02X' % b }.join(' ')}"
+          else
+            puts "✅ Ruby: Stream #{stream_id}: Text message (#{complete_data.bytesize} bytes): #{complete_data[0..100]}"
+          end
 
           # Clean up buffer
           stream_buffers.delete(stream_id)

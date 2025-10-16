@@ -169,7 +169,9 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
         case QUIC_CONNECTION_EVENT_CONNECTED:
             ctx->connected = 1;
             ctx->failed = 0;
-            break;            
+            // Notify Ruby about new connection
+            enqueue_callback_event("CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC));
+            break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
             ctx->failed = 1;
@@ -181,7 +183,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             ctx->failed = 1;
             ctx->error_status = QUIC_STATUS_SUCCESS; // Peer initiated, not an error
             ctx->error_code = Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode;
-            break;            
+            break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
             break;
@@ -193,7 +195,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
                 stream_ctx->started = 1;
                 stream_ctx->shutdown = 0;
                 stream_ctx->error_status = QUIC_STATUS_SUCCESS;
-                
+
                 // Set the stream callback handler to handle data events
                 MsQuic->SetCallbackHandler(Stream, (void*)StreamCallback, stream_ctx);
             }
@@ -669,7 +671,7 @@ quicsilver_close_listener(VALUE self, VALUE listener_data)
 
 // Open a QUIC stream
 static VALUE
-quicsilver_open_stream(VALUE self, VALUE connection_handle)
+quicsilver_open_stream(VALUE self, VALUE connection_handle, VALUE unidirectional)
 {
     if (MsQuic == NULL) {
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
@@ -689,8 +691,13 @@ quicsilver_open_stream(VALUE self, VALUE connection_handle)
     ctx->shutdown = 0;
     ctx->error_status = QUIC_STATUS_SUCCESS;
 
+    // Use flag based on parameter
+    QUIC_STREAM_OPEN_FLAGS flags = RTEST(unidirectional)
+        ? QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL
+        : QUIC_STREAM_OPEN_FLAG_NONE;
+
     // Create stream
-    QUIC_STATUS Status = MsQuic->StreamOpen(Connection, QUIC_STREAM_OPEN_FLAG_NONE, StreamCallback, ctx, &Stream);
+    QUIC_STATUS Status = MsQuic->StreamOpen(Connection, flags, StreamCallback, ctx, &Stream);
     if (QUIC_FAILED(Status)) {
         free(ctx);
         rb_raise(rb_eRuntimeError, "StreamOpen failed, 0x%x!", Status);
@@ -711,7 +718,7 @@ quicsilver_open_stream(VALUE self, VALUE connection_handle)
 
 // Send data on a QUIC stream
 static VALUE
-quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data)
+quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data, VALUE send_fin)
 {
     if (MsQuic == NULL) {
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
@@ -719,8 +726,9 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data)
     }
 
     HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
-    const char* data_str = StringValueCStr(data);
-    uint32_t data_len = (uint32_t)strlen(data_str);
+    // Use StringValuePtr and RSTRING_LEN for binary data with null bytes
+    const char* data_str = RSTRING_PTR(data);
+    uint32_t data_len = (uint32_t)RSTRING_LEN(data);
     
     void* SendBufferRaw = malloc(sizeof(QUIC_BUFFER) + data_len);
     if (SendBufferRaw == NULL) {
@@ -733,8 +741,13 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data)
     SendBuffer->Length = data_len;
 
     memcpy(SendBuffer->Buffer, data_str, data_len);
+
+    // Use flag based on parameter (default to FIN for backwards compat)
+    QUIC_SEND_FLAGS flags = (NIL_P(send_fin) || RTEST(send_fin))
+        ? QUIC_SEND_FLAG_FIN
+        : QUIC_SEND_FLAG_NONE;
     
-    QUIC_STATUS Status = MsQuic->StreamSend(Stream, SendBuffer, 1, QUIC_SEND_FLAG_FIN, SendBufferRaw);
+    QUIC_STATUS Status = MsQuic->StreamSend(Stream, SendBuffer, 1, flags, SendBufferRaw);
     if (QUIC_FAILED(Status)) {
         free(SendBufferRaw);
         rb_raise(rb_eRuntimeError, "StreamSend failed, 0x%x!", Status);
@@ -742,7 +755,7 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data)
     }
     
     return Qtrue;
-}
+}  
 
 // Initialize the extension
 void
@@ -773,8 +786,8 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "close_listener", quicsilver_close_listener, 1);
 
     // Stream management
-    rb_define_singleton_method(mQuicsilver, "open_stream", quicsilver_open_stream, 1);
-    rb_define_singleton_method(mQuicsilver, "send_stream", quicsilver_send_stream, 2);
+    rb_define_singleton_method(mQuicsilver, "open_stream", quicsilver_open_stream, 2);
+    rb_define_singleton_method(mQuicsilver, "send_stream", quicsilver_send_stream, 3);
 
     // Event processing
     rb_define_singleton_method(mQuicsilver, "process_events", quicsilver_process_events, 0);

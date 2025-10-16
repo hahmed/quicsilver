@@ -9,8 +9,7 @@ module Quicsilver
       @port = port
       @unsecure = options[:unsecure] || true
       @connection_timeout = options[:connection_timeout] || 5000
-
-      
+   
       @connection_data = nil
       @connected = false
       @connection_start_time = nil
@@ -60,6 +59,8 @@ module Quicsilver
       
       @connected = true
       @connection_start_time = Time.now
+      
+      send_control_stream
       
       # Clean up config since connection is established
       Quicsilver.close_configuration(config)
@@ -152,7 +153,7 @@ module Quicsilver
         return false
       end
 
-      result = Quicsilver.send_stream(stream, data)
+      result = Quicsilver.send_stream(stream, data, true)
       puts "✅ Send data result for '#{data[0..30]}': #{result}"
       result
     rescue => e
@@ -169,7 +170,22 @@ module Quicsilver
     end
 
     def open_stream
-      Quicsilver.open_stream(@connection_data[0])
+      Quicsilver.open_stream(@connection_data[0], false)
+    end
+
+    def open_unidirectional_stream
+      Quicsilver.open_stream(@connection_data[0], true)
+    end
+
+    def send_control_stream
+      # Open unidirectional stream
+      stream = open_unidirectional_stream
+
+      # Build and send control stream data
+      control_data = Quicsilver::HTTP3.build_control_stream
+      Quicsilver.send_stream(stream, control_data, false)
+
+      @control_stream = stream
     end
   end
 end
