@@ -136,7 +136,20 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                 uint32_t stream_id_len = sizeof(stream_id);
                 MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
 
-                enqueue_callback_event(event_type, stream_id, (const char*)buffer->Buffer, buffer->Length);
+                // Pack stream handle pointer along with data for RECEIVE_FIN
+                if (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) {
+                    // Create combined buffer: [stream_handle(8 bytes)][data]
+                    size_t total_len = sizeof(HQUIC) + buffer->Length;
+                    char* combined = (char*)malloc(total_len);
+                    if (combined != NULL) {
+                        memcpy(combined, &Stream, sizeof(HQUIC));
+                        memcpy(combined + sizeof(HQUIC), buffer->Buffer, buffer->Length);
+                        enqueue_callback_event(event_type, stream_id, combined, total_len);
+                        free(combined);
+                    }
+                } else {
+                    enqueue_callback_event(event_type, stream_id, (const char*)buffer->Buffer, buffer->Length);
+                }
             }
             break;
         case QUIC_STREAM_EVENT_SEND_COMPLETE:

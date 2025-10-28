@@ -1,13 +1,8 @@
 # Quicsilver
 
-A minimal HTTP/3 server implementation for Ruby using Microsoft's MSQUIC library.
+HTTP/3 server for Ruby with Rack support.
 
-## Features
-
-- **Minimal HTTP/3 Server**: Basic QUIC server with TLS support
-- **Minimal HTTP/3 Client**: Basic QUIC client for testing
-- **TLS Certificate Support**: Self-signed certificate generation
-- **Simple API**: Easy-to-use Ruby interface
+Disclaimer: currenly in early prototype.
 
 ## Installation
 
@@ -26,13 +21,32 @@ rake compile
 bash examples/setup_certs.sh
 ```
 
-### 2. Start the server
+### 2. Run a Rack app over HTTP/3
 
-```bash
-ruby examples/minimal_http3_server.rb
+```ruby
+require "quicsilver"
+
+# Define your Rack app
+app = ->(env) {
+  path = env['PATH_INFO']
+
+  case path
+  when '/'
+    [200, {'Content-Type' => 'text/plain'}, ["Hello HTTP/3!"]]
+  when '/api/users'
+    [200, {'Content-Type' => 'application/json'}, ['{"users": ["alice", "bob"]}']]
+  else
+    [404, {'Content-Type' => 'text/plain'}, ["Not Found"]]
+  end
+}
+
+# Start HTTP/3 server with Rack app
+server = Quicsilver::Server.new(4433, app: app)
+server.start
+server.wait_for_connections
 ```
 
-### 3. Connect with client
+### 3. Test with the client
 
 ```bash
 ruby examples/minimal_http3_client.rb
@@ -40,61 +54,38 @@ ruby examples/minimal_http3_client.rb
 
 ## Usage
 
-### Server
+### Rack HTTP/3 Server
 
 ```ruby
 require "quicsilver"
 
-# Create and start server
-server = Quicsilver::Server.new(4433)
+app = ->(env) {
+  [200, {'Content-Type' => 'text/html'}, ["<h1>Hello from HTTP/3!</h1>"]]
+}
+
+server = Quicsilver::Server.new(4433, app: app)
 server.start
-
-# Keep server running
 server.wait_for_connections
-
-# Stop server
-server.stop
 ```
 
-### Client
+### HTTP/3 Client
 
 ```ruby
 require "quicsilver"
 
-# Create client
 client = Quicsilver::Client.new("127.0.0.1", 4433, unsecure: true)
-
-# Connect
 client.connect
 
-# Check connection status
-if client.connected?
-  puts "Connected!"
-end
+# Send HTTP/3 request
+request = Quicsilver::HTTP3::RequestEncoder.new(
+  method: 'GET',
+  path: '/api/users',
+  authority: 'example.com'
+)
+client.send_data(request.encode)
 
-# Disconnect
 client.disconnect
 ```
-
-## API
-
-### Quicsilver::Server
-
-- `new(port, address:, cert_file:, key_file:)` - Create server
-- `start` - Start the server
-- `stop` - Stop the server
-- `running?` - Check if server is running
-- `server_info` - Get server information
-- `wait_for_connections(timeout:)` - Wait for connections
-
-### Quicsilver::Client
-
-- `new(hostname, port, unsecure:, connection_timeout:)` - Create client
-- `connect` - Connect to server
-- `disconnect` - Disconnect from server
-- `connected?` - Check connection status
-- `connection_info` - Get connection information
-- `connection_uptime` - Get connection uptime
 
 ## Development
 
@@ -108,12 +99,6 @@ rake compile
 # Clean build artifacts
 rake clean
 ```
-
-## Requirements
-
-- Ruby 2.7+
-- MSQUIC library
-- OpenSSL for certificate generation
 
 ## License
 

@@ -149,15 +149,15 @@ module Quicsilver
 
       stream = open_stream
       unless stream
-        puts "❌ Failed to open stream for: #{data[0..50]}"
+        puts "❌ Failed to open stream"
         return false
       end
 
       result = Quicsilver.send_stream(stream, data, true)
-      puts "✅ Send data result for '#{data[0..30]}': #{result}"
+      puts "✅ Sent #{data.bytesize} bytes"
       result
     rescue => e
-      puts "❌ Send data error for '#{data[0..30]}': #{e.message}"
+      puts "❌ Send data error: #{e.class} - #{e.message}"
       false
     end
     

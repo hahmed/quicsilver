@@ -14,6 +14,18 @@ module Quicsilver
         @stream_buffers ||= {}
       end
 
+      def stream_handles
+        @stream_handles ||= {}
+      end
+
+      def rack_app
+        @rack_app
+      end
+
+      def rack_app=(app)
+        @rack_app = app
+      end
+
       def handle_stream(stream_id, event, data)
         case event
         when STREAM_EVENT_CONNECTION_ESTABLISHED
@@ -30,32 +42,82 @@ module Quicsilver
           stream_buffers[stream_id] += data
           puts "🔧 Ruby: Stream #{stream_id}: Buffering #{data.bytesize} bytes (total: #{stream_buffers[stream_id].bytesize})"
         when STREAM_EVENT_RECEIVE_FIN
+          # Extract stream handle from data (first 8 bytes)
+          stream_handle = data[0, 8].unpack1('Q')
+          actual_data = data[8..-1] || ""
+
+          # Store stream handle for later use
+          stream_handles[stream_id] = stream_handle
+
           # Final chunk - process complete message
           stream_buffers[stream_id] ||= ""
-          stream_buffers[stream_id] += data
+          stream_buffers[stream_id] += actual_data
           complete_data = stream_buffers[stream_id]
 
-          # Check if this looks like binary HTTP/3 frame (starts with frame type byte)
-          if complete_data.bytes.first && complete_data.bytes.first <= 0x07
-            puts "✅ Ruby: Stream #{stream_id}: HTTP/3 Frame (#{complete_data.bytesize} bytes)"
-            puts "   Frame type: 0x#{complete_data.bytes.first.to_s(16).upcase}"
-            puts "   Hex dump: #{complete_data.bytes[0..20].map { |b| '%02X' % b }.join(' ')}"
+          # Handle bidirectional streams (client requests)
+          if bidirectional?(stream_id)
+            handle_http3_request(stream_id, complete_data)
           else
-            puts "✅ Ruby: Stream #{stream_id}: Text message (#{complete_data.bytesize} bytes): #{complete_data[0..100]}"
+            # Unidirectional stream (control/QPACK)
+            puts "✅ Ruby: Stream #{stream_id}: Control/QPACK stream (#{complete_data.bytesize} bytes)"
           end
 
-          # Clean up buffer
+          # Clean up buffers
           stream_buffers.delete(stream_id)
+          stream_handles.delete(stream_id)
         end
+      end
+
+      private
+
+      def bidirectional?(stream_id)
+        # Client-initiated bidirectional streams have bit 0x02 clear
+        (stream_id & 0x02) == 0
+      end
+
+      def handle_http3_request(stream_id, data)
+        parser = HTTP3::RequestParser.new(data)
+        parser.parse
+        env = parser.to_rack_env
+
+        if env && rack_app
+          puts "✅ Ruby: #{env['REQUEST_METHOD']} #{env['PATH_INFO']}"
+
+          # Call Rack app
+          status, headers, body = rack_app.call(env)
+
+          # Encode response
+          encoder = HTTP3::ResponseEncoder.new(status, headers, body)
+          response_data = encoder.encode
+
+          # Get stream handle from stored handles
+          stream_handle = stream_handles[stream_id]
+          if stream_handle
+            # Send response
+            Quicsilver.send_stream(stream_handle, response_data, true)
+            puts "✅ Ruby: Response sent: #{status}"
+          else
+            puts "❌ Ruby: Stream handle not found for stream #{stream_id}"
+          end
+        else
+          puts "❌ Ruby: Failed to parse request"
+        end
+      rescue => e
+        puts "❌ Ruby: Error handling request: #{e.class} - #{e.message}"
+        puts e.backtrace.first(5)
       end
     end
 
-    def initialize(port = 4433, address: "0.0.0.0", server_configuration: nil)
+    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil)
       @port = port
       @address = address
+      @app = app || default_rack_app
       @server_configuration = server_configuration || ServerConfiguration.new
       @running = false
       @listener_data = nil
+
+      # Set class-level rack app so handle_stream can access it
+      self.class.rack_app = @app
     end
 
     def start
@@ -150,6 +212,14 @@ module Quicsilver
     end
 
     private
+
+    def default_rack_app
+      ->(env) {
+        [200,
+         {'Content-Type' => 'text/plain'},
+         ["Hello from Quicsilver!\nMethod: #{env['REQUEST_METHOD']}\nPath: #{env['PATH_INFO']}\n"]]
+      }
+    end
 
     def start_server(config)
       result = Quicsilver.start_listener(@listener_data.listener_handle, @address, @port)

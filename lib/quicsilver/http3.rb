@@ -43,6 +43,26 @@ module Quicsilver
 
       stream_type + settings
     end
+
+    # Decode variable-length integer (RFC 9000)
+    # Returns [value, bytes_consumed]
+    def self.decode_varint(bytes, offset = 0)
+      first = bytes[offset]
+      case (first & 0xC0) >> 6
+      when 0
+        [first & 0x3F, 1]
+      when 1
+        [(first & 0x3F) << 8 | bytes[offset + 1], 2]
+      when 2
+        [(first & 0x3F) << 24 | bytes[offset + 1] << 16 |
+         bytes[offset + 2] << 8 | bytes[offset + 3], 4]
+      else # when 3
+        [(first & 0x3F) << 56 | bytes[offset + 1] << 48 |
+         bytes[offset + 2] << 40 | bytes[offset + 3] << 32 |
+         bytes[offset + 4] << 24 | bytes[offset + 5] << 16 |
+         bytes[offset + 6] << 8 | bytes[offset + 7], 8]
+      end
+    end
   end
 end
 

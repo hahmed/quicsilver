@@ -6,6 +6,9 @@ require_relative "quicsilver/listener_data"
 require_relative "quicsilver/server"
 require_relative "quicsilver/server_configuration"
 require_relative "quicsilver/http3"
+require_relative "quicsilver/http3/request_parser"
+require_relative "quicsilver/http3/request_encoder"
+require_relative "quicsilver/http3/response_encoder"
 require_relative "quicsilver/quicsilver"
 
 module Quicsilver
