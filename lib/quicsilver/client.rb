@@ -7,8 +7,8 @@ module Quicsilver
     def initialize(hostname, port = 4433, options = {})
       @hostname = hostname
       @port = port
-      @unsecure = options[:unsecure] || true
-      @connection_timeout = options[:connection_timeout] || 5000
+      @unsecure = options.fetch(:unsecure, true)
+      @connection_timeout = options.fetch(:connection_timeout, 5000)
    
       @connection_data = nil
       @connected = false

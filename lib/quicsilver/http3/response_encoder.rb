@@ -56,7 +56,7 @@ module Quicsilver
         @headers.each do |name, value|
           next if name.start_with?('rack.')  # Skip Rack internals
 
-          name = name.downcase
+          name = name.to_s.downcase
           value = value.to_s
 
           # Literal field line with literal name (0x2X prefix)
