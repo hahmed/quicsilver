@@ -10,3 +10,4 @@
 /certs/*
 *.bundle
 lib/quicsilver/quicsilver.bundle
+*.gem
