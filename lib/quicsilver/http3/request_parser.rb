@@ -139,17 +139,17 @@ module Quicsilver
       # Returns Hash for complete fields, String for name-only fields
       def decode_static_table_field(index)
         case index
-        when 0 then ':authority'        # Name only
-        when 1 then ':path'             # Name only
-        when 15 then {':method' => 'CONNECT'}
-        when 16 then {':method' => 'DELETE'}
-        when 17 then {':method' => 'GET'}
-        when 18 then {':method' => 'HEAD'}
-        when 19 then {':method' => 'OPTIONS'}
-        when 20 then {':method' => 'POST'}
-        when 21 then {':method' => 'PUT'}
-        when 22 then {':scheme' => 'http'}
-        when 23 then {':scheme' => 'https'}
+        when HTTP3::QPACK_AUTHORITY then ':authority'
+        when HTTP3::QPACK_PATH then ':path'
+        when HTTP3::QPACK_METHOD_CONNECT then {':method' => 'CONNECT'}
+        when HTTP3::QPACK_METHOD_DELETE then {':method' => 'DELETE'}
+        when HTTP3::QPACK_METHOD_GET then {':method' => 'GET'}
+        when HTTP3::QPACK_METHOD_HEAD then {':method' => 'HEAD'}
+        when HTTP3::QPACK_METHOD_OPTIONS then {':method' => 'OPTIONS'}
+        when HTTP3::QPACK_METHOD_POST then {':method' => 'POST'}
+        when HTTP3::QPACK_METHOD_PUT then {':method' => 'PUT'}
+        when HTTP3::QPACK_SCHEME_HTTP then {':scheme' => 'http'}
+        when HTTP3::QPACK_SCHEME_HTTPS then {':scheme' => 'https'}
         else nil
         end
       end

@@ -30,14 +30,14 @@ module Quicsilver
       def encode_headers_frame
         payload = encode_qpack_response
 
-        frame_type = HTTP3.encode_varint(0x01)  # HEADERS
+        frame_type = HTTP3.encode_varint(HTTP3::FRAME_HEADERS)
         frame_length = HTTP3.encode_varint(payload.bytesize)
 
         frame_type + frame_length + payload
       end
 
       def encode_data_frame(data)
-        frame_type = HTTP3.encode_varint(0x00)  # DATA
+        frame_type = HTTP3.encode_varint(HTTP3::FRAME_DATA)
         frame_length = HTTP3.encode_varint(data.bytesize)
 
         frame_type + frame_length + data

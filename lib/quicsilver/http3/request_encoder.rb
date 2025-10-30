@@ -17,12 +17,12 @@ module Quicsilver
 
         # Build HEADERS frame
         headers_payload = encode_headers
-        frames << build_frame(0x01, headers_payload)  # 0x01 = HEADERS frame
+        frames << build_frame(HTTP3::FRAME_HEADERS, headers_payload)
 
         # Build DATA frame if body present
         if @body && !@body.empty?
           body_data = @body.is_a?(String) ? @body : @body.join
-          frames << build_frame(0x00, body_data)  # 0x00 = DATA frame
+          frames << build_frame(HTTP3::FRAME_DATA, body_data)
         end
 
         frames.join.force_encoding(Encoding::BINARY)
@@ -72,10 +72,10 @@ module Quicsilver
         # For pseudo-headers, use indexed name reference from static table
         # with literal value (pattern: 0101xxxx where xxxx = static table index)
         static_index = case name
-        when ':authority' then 0
-        when ':path' then 1
-        when ':method' then (@method == 'GET' ? 17 : 20)  # GET=17, POST=20
-        when ':scheme' then (@scheme == 'http' ? 22 : 23)
+        when ':authority' then HTTP3::QPACK_AUTHORITY
+        when ':path' then HTTP3::QPACK_PATH
+        when ':method' then (@method == 'GET' ? HTTP3::QPACK_METHOD_GET : HTTP3::QPACK_METHOD_POST)
+        when ':scheme' then (@scheme == 'http' ? HTTP3::QPACK_SCHEME_HTTP : HTTP3::QPACK_SCHEME_HTTPS)
         else nil
         end
 

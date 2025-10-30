@@ -98,13 +98,29 @@ module Quicsilver
             puts "✅ Ruby: Response sent: #{status}"
           else
             puts "❌ Ruby: Stream handle not found for stream #{stream_id}"
+            # cannot send response, connection is lost
           end
         else
           puts "❌ Ruby: Failed to parse request"
+          stream_handle = stream_handles[stream_id]
+          if stream_handle
+            error_response = encode_error_response(400, "Bad Request")
+            Quicsilver.send_stream(stream_handle, error_response, true)
+          end
         end
       rescue => e
         puts "❌ Ruby: Error handling request: #{e.class} - #{e.message}"
         puts e.backtrace.first(5)
+        error_response = encode_error_response(500, "Internal Server Error")
+
+        stream_handle = stream_handles[stream_id]
+        Quicsilver.send_stream(stream_handle, error_response, true) if stream_handle
+      end
+
+      def encode_error_response(status, message)
+        body = ["#{status} #{message}"]
+        encoder = HTTP3::ResponseEncoder.new(status, {"content-type" => "text/plain"}, body)
+        encoder.encode
       end
     end
 
