@@ -69,30 +69,51 @@ module Quicsilver
       # Literal field line with literal name for pseudo-headers
       # Pattern: 0x50 (indexed name from static table) + value
       def encode_literal_pseudo_header(name, value)
-        # For pseudo-headers, use indexed name reference from static table
-        # with literal value (pattern: 0101xxxx where xxxx = static table index)
-        static_index = case name
-        when ':authority' then HTTP3::QPACK_AUTHORITY
-        when ':path' then HTTP3::QPACK_PATH
-        when ':method' then (@method == 'GET' ? HTTP3::QPACK_METHOD_GET : HTTP3::QPACK_METHOD_POST)
-        when ':scheme' then (@scheme == 'http' ? HTTP3::QPACK_SCHEME_HTTP : HTTP3::QPACK_SCHEME_HTTPS)
-        else nil
-        end
+        result = "".b
 
-        if static_index
-          # Use indexed field line (0x40 | index)
-          result = "".b
-          result += [0x40 | static_index].pack('C')
-          # For non-exact matches, append literal value
-          if name == ':authority' || name == ':path'
-            result += HTTP3.encode_varint(value.bytesize)
-            result += value.to_s.b
+        case name
+        when ':method'
+          # Check if exact match in static table
+          index = case @method
+          when 'GET' then HTTP3::QPACK_METHOD_GET
+          when 'POST' then HTTP3::QPACK_METHOD_POST
+          when 'PUT' then HTTP3::QPACK_METHOD_PUT
+          when 'DELETE' then HTTP3::QPACK_METHOD_DELETE
+          when 'CONNECT' then HTTP3::QPACK_METHOD_CONNECT
+          when 'HEAD' then HTTP3::QPACK_METHOD_HEAD
+          when 'OPTIONS' then HTTP3::QPACK_METHOD_OPTIONS
+          else nil
           end
-          result
+
+          if index
+            # Exact match - use indexed field line (0x80 | index)
+            result += [0x80 | index].pack('C')
+          else
+            # No exact match - use literal with name reference
+            result += [0x40 | HTTP3::QPACK_METHOD_GET].pack('C')  # Use any :method index for name
+            result += HTTP3.encode_varint(value.bytesize)
+            result += value.b
+          end
+
+        when ':scheme'
+          # Check if exact match
+          index = (@scheme == 'https' ? HTTP3::QPACK_SCHEME_HTTPS : HTTP3::QPACK_SCHEME_HTTP)
+          # Exact match - use indexed field line
+          result += [0x80 | index].pack('C')
+
+        when ':authority', ':path'
+          # Name in static table, but value is custom - use literal with name reference
+          index = (name == ':authority' ? HTTP3::QPACK_AUTHORITY : HTTP3::QPACK_PATH)
+          result += [0x40 | index].pack('C')
+          result += HTTP3.encode_varint(value.bytesize)
+          result += value.b
+
         else
           # Fallback to literal name
-          encode_literal_header(name, value)
+          return encode_literal_header(name, value)
         end
+
+        result
       end
 
       # Literal field line with literal name

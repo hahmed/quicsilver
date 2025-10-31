@@ -5,8 +5,7 @@ require_relative "../../lib/quicsilver/http3"
 require_relative "../../lib/quicsilver/http3/request_parser"
 
 class RequestParserTest < Minitest::Test
-  def test_parses_headers_and_body
-    # GET with custom headers
+  def test_parses_get
     headers_payload = build_qpack_headers(
       ":method" => "GET",
       ":scheme" => "https",
@@ -21,8 +20,9 @@ class RequestParserTest < Minitest::Test
     assert_equal "/test", parser.headers[":path"]
     assert_equal "Quicsilver/1.0", parser.headers["user-agent"]
     assert_empty parser.body.read
+  end
 
-    # POST with body
+  def test_parses_post_with_body
     headers_payload = build_qpack_headers(
       ":method" => "POST",
       ":scheme" => "https",
@@ -63,7 +63,9 @@ class RequestParserTest < Minitest::Test
     assert_equal "application/json", env["HTTP_CONTENT_TYPE"]
     assert_equal body, env["rack.input"].read
 
-    # Nil when no headers
+  end
+
+  def test_to_rack_env_returns_nil_when_no_headers
     assert_nil Quicsilver::HTTP3::RequestParser.new("").tap(&:parse).to_rack_env
   end
 
@@ -131,10 +133,10 @@ class RequestParserTest < Minitest::Test
         case name
         when ":method"
           index = value == "GET" ? Quicsilver::HTTP3::QPACK_METHOD_GET : Quicsilver::HTTP3::QPACK_METHOD_POST
-          payload += [0x40 | index].pack('C')
+          payload += [0x80 | index].pack('C')
         when ":scheme"
           index = value == "https" ? Quicsilver::HTTP3::QPACK_SCHEME_HTTPS : Quicsilver::HTTP3::QPACK_SCHEME_HTTP
-          payload += [0x40 | index].pack('C')
+          payload += [0x80 | index].pack('C')
         when ":authority"
           payload += [0x40 | Quicsilver::HTTP3::QPACK_AUTHORITY].pack('C')
           payload += Quicsilver::HTTP3.encode_varint(value.bytesize)

@@ -97,26 +97,35 @@ module Quicsilver
         while offset < payload.bytesize
           byte = payload.bytes[offset]
 
-          # Indexed field line (static table, starts with 0x4X or 0x5X)
-          if (byte & 0xC0) == 0x40 || (byte & 0xC0) == 0x80
+          # Pattern 1: Indexed Field Line (1Txxxxxx)
+          # Use both name AND value from static table
+          if (byte & 0x80) == 0x80
             index = byte & 0x3F
             offset += 1
 
-            # Check if this is a complete field (name+value) or just name
             field = decode_static_table_field(index)
-
             if field.is_a?(Hash)
-              # Complete field with both name and value (e.g., :method GET)
               @headers.merge!(field)
-            elsif field
-              # Name-only entry, value follows
+            end
+          # Pattern 3: Literal with Name Reference (01NTxxxx)
+          # Use name from static table, but value is provided as literal
+          elsif (byte & 0xC0) == 0x40
+            index = byte & 0x3F
+            offset += 1
+
+            # Get the name from static table
+            entry = HTTP3::STATIC_TABLE[index] if index < HTTP3::STATIC_TABLE.size
+            name = entry ? entry[0] : nil
+
+            if name
+              # Read literal value that follows
               value_len, len_bytes = HTTP3.decode_varint(payload.bytes, offset)
               offset += len_bytes
               value = payload[offset, value_len]
               offset += value_len
-              @headers[field] = value
+              @headers[name] = value
             end
-          # Literal with literal name (starts with 0x2X)
+          # Pattern 5: Literal with literal name (001NHxxx)
           elsif (byte & 0xE0) == 0x20
             name_len = byte & 0x1F
             offset += 1
@@ -138,19 +147,16 @@ module Quicsilver
       # QPACK static table decoder (RFC 9204 Appendix A)
       # Returns Hash for complete fields, String for name-only fields
       def decode_static_table_field(index)
-        case index
-        when HTTP3::QPACK_AUTHORITY then ':authority'
-        when HTTP3::QPACK_PATH then ':path'
-        when HTTP3::QPACK_METHOD_CONNECT then {':method' => 'CONNECT'}
-        when HTTP3::QPACK_METHOD_DELETE then {':method' => 'DELETE'}
-        when HTTP3::QPACK_METHOD_GET then {':method' => 'GET'}
-        when HTTP3::QPACK_METHOD_HEAD then {':method' => 'HEAD'}
-        when HTTP3::QPACK_METHOD_OPTIONS then {':method' => 'OPTIONS'}
-        when HTTP3::QPACK_METHOD_POST then {':method' => 'POST'}
-        when HTTP3::QPACK_METHOD_PUT then {':method' => 'PUT'}
-        when HTTP3::QPACK_SCHEME_HTTP then {':scheme' => 'http'}
-        when HTTP3::QPACK_SCHEME_HTTPS then {':scheme' => 'https'}
-        else nil
+        return nil if index >= HTTP3::STATIC_TABLE.size
+
+        name, value = HTTP3::STATIC_TABLE[index]
+
+        # If value is empty, return just the name (caller provides value)
+        # Otherwise return complete field as hash
+        if value.empty?
+          name
+        else
+          {name => value}
         end
       end
     end
