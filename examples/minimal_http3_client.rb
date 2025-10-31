@@ -74,6 +74,23 @@ begin
   )
   client.send_data(request8.encode)
 
+  puts "\n🧪 Testing error responses..."
+
+  # Malformed HTTP/3 frame (should get 400)
+  puts "\n1️⃣ Sending malformed data to trigger 400..."
+  client.send_data("\x00\xFF\xFF\xFF\xFF")  # Invalid varint
+
+  # Garbage data (should get 400)  
+  puts "2️⃣ Sending garbage data..."
+  client.send_data("TOTALLY_INVALID_DATA")
+
+  # Invalid QPACK headers (should get 400)
+  puts "3️⃣ Sending invalid QPACK encoding..."
+  bad_headers = "\x01\x10"  # HEADERS frame type=1, length=16
+  bad_headers += "\x00\x00"  # QPACK prefix
+  bad_headers += "\xFF\xFF\xFF\xFF\xFF\xFF"  # Garbage QPACK data
+  client.send_data(bad_headers)
+
   # Keep connection alive for a bit
   puts "⏳ Connection established. Press Enter to disconnect..."
   gets

@@ -180,8 +180,18 @@ module Quicsilver
       # Decode variable-length integer (RFC 9000)
       # Returns [value, bytes_consumed]
       def decode_varint(bytes, offset = 0)
+        return [0, 0] if offset >= bytes.size
+
         first = bytes[offset]
-        case (first & 0xC0) >> 6 # Extract 2 MSB
+        return [0, 0] if first.nil?
+
+        prefix = (first & 0xC0) >> 6 # Extract 2 MSB
+        length = 1 << prefix # 1, 2, 4, or 8 bytes
+
+        # Check if we have enough bytes
+        return [0, 0] if offset + length > bytes.size
+
+        case prefix
         when 0
           [first & 0x3F, 1]
         when 1
