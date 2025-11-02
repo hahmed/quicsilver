@@ -68,9 +68,10 @@ class ServerTest < Minitest::Test
     stream_id = 1
     event = Quicsilver::Server::STREAM_EVENT_RECEIVE
     data = "test data"
+    connection_data = [12345, 67890]  # Mock connection_data
 
     Quicsilver::Server.stream_buffers.clear
-    Quicsilver::Server.handle_stream(stream_id, event, data)
+    Quicsilver::Server.handle_stream(connection_data, stream_id, event, data)
 
     assert_equal "test data", Quicsilver::Server.stream_buffers[stream_id]
   end
@@ -78,11 +79,12 @@ class ServerTest < Minitest::Test
   def test_handle_stream_accumulates_data
     stream_id = 2
     event = Quicsilver::Server::STREAM_EVENT_RECEIVE
+    connection_data = [12345, 67890]  # Mock connection_data
 
     Quicsilver::Server.stream_buffers.clear
-    Quicsilver::Server.handle_stream(stream_id, event, "chunk1")
-    Quicsilver::Server.handle_stream(stream_id, event, "chunk2")
-    Quicsilver::Server.handle_stream(stream_id, event, "chunk3")
+    Quicsilver::Server.handle_stream(connection_data, stream_id, event, "chunk1")
+    Quicsilver::Server.handle_stream(connection_data, stream_id, event, "chunk2")
+    Quicsilver::Server.handle_stream(connection_data, stream_id, event, "chunk3")
 
     assert_equal "chunk1chunk2chunk3", Quicsilver::Server.stream_buffers[stream_id]
   end

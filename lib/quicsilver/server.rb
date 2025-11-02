@@ -10,6 +10,10 @@ module Quicsilver
     STREAM_EVENT_SEND_COMPLETE = "SEND_COMPLETE"
 
     class << self
+      def connections
+        @connections ||= {}
+      end
+
       def stream_buffers
         @stream_buffers ||= {}
       end
@@ -26,12 +30,16 @@ module Quicsilver
         @rack_app = app
       end
 
-      def handle_stream(stream_id, event, data)
+      def handle_stream(connection_data, stream_id, event, data)
         case event
         when STREAM_EVENT_CONNECTION_ESTABLISHED
           puts "🔧 Ruby: Connection established with client"
-          connection_handle = data.unpack1('Q')  # Unpack 64-bit pointer
-          stream = Quicsilver.open_stream(connection_handle, true)  # unidirectional
+          # connection_data is now passed directly from C extension
+          # Store it for later use
+          connection_handle = connection_data[0]
+          connections[connection_handle] = connection_data
+
+          stream = Quicsilver.open_stream(connection_data, true)  # unidirectional
           control_data = Quicsilver::HTTP3.build_control_stream
           Quicsilver.send_stream(stream, control_data, false)  # no FIN
         when STREAM_EVENT_SEND_COMPLETE

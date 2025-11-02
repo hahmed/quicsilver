@@ -1,18 +1,64 @@
 # frozen_string_literal: true
 
+require_relative 'http3/request_encoder'
+require_relative 'http3/response_parser'
+
 module Quicsilver
   class Client
     attr_reader :hostname, :port, :unsecure, :connection_timeout
-    
+
     def initialize(hostname, port = 4433, options = {})
       @hostname = hostname
       @port = port
       @unsecure = options.fetch(:unsecure, true)
       @connection_timeout = options.fetch(:connection_timeout, 5000)
-   
+
       @connection_data = nil
       @connected = false
       @connection_start_time = nil
+
+      # Instance-level response tracking
+      @response_buffers = {}  # stream_id => accumulated data
+      @response_complete = {} # stream_id => parsed response
+      @mutex = Mutex.new
+    end
+
+    # Called directly by C extension via process_events
+    # C extension routes to this instance based on client_obj stored in connection context
+    def handle_stream_event(stream_id, event, data)
+      # Client only handles RECEIVE events (responses from server)
+      return unless ["RECEIVE", "RECEIVE_FIN"].include?(event)
+
+      @mutex.synchronize do
+        case event
+        when "RECEIVE"
+          # Buffer incoming response data
+          @response_buffers[stream_id] ||= ""
+          @response_buffers[stream_id] += data
+        when "RECEIVE_FIN"
+          # Extract stream handle (first 8 bytes) and actual data
+          stream_handle = data[0, 8].unpack1('Q') if data.bytesize >= 8
+          actual_data = data[8..-1] || ""
+
+          # Get all buffered data
+          full_data = (@response_buffers[stream_id] || "") + actual_data
+          @response_buffers.delete(stream_id)
+
+          # Parse HTTP3 response
+          parser = Quicsilver::HTTP3::ResponseParser.new(full_data)
+          parser.parse
+
+          # Store complete response with body as string
+          @response_complete[stream_id] = {
+            status: parser.status,
+            headers: parser.headers,
+            body: parser.body.read
+          }
+        end
+      end
+    rescue => e
+      puts "❌ Ruby: Error handling client stream: #{e.class} - #{e.message}"
+      puts e.backtrace.first(5)
     end
     
     def connect
@@ -24,9 +70,10 @@ module Quicsilver
       # Create configuration
       config = Quicsilver.create_configuration(@unsecure)
       raise ConnectionError, "Failed to create configuration" if config.nil?
-      
+
       # Create connection (returns [handle, context])
-      @connection_data = Quicsilver.create_connection
+      # Pass self so C extension can route callbacks to this instance
+      @connection_data = Quicsilver.create_connection(self)
       raise ConnectionError, "Failed to create connection" if @connection_data.nil?
       
       connection_handle = @connection_data[0]
@@ -59,9 +106,9 @@ module Quicsilver
       
       @connected = true
       @connection_start_time = Time.now
-      
+
       send_control_stream
-      
+
       # Clean up config since connection is established
       Quicsilver.close_configuration(config)
     rescue => e
@@ -76,7 +123,7 @@ module Quicsilver
     
     def disconnect
       return unless @connected || @connection_data
-      
+
       begin
         if @connection_data
           Quicsilver.close_connection_handle(@connection_data)
@@ -144,6 +191,72 @@ module Quicsilver
       Time.now - @connection_start_time
     end
 
+    def send_request(method, path, headers: {}, body: nil)
+      raise Error, "Not connected" unless @connected
+
+      # Encode HTTP/3 request
+      encoder = Quicsilver::HTTP3::RequestEncoder.new(
+        method: method,
+        path: path,
+        scheme: 'https',
+        authority: "#{@hostname}:#{@port}",
+        headers: headers,
+        body: body
+      )
+
+      # Open stream and send
+      stream = open_stream
+      unless stream
+        raise Error, "Failed to open stream"
+      end
+
+      # Send data with FIN flag
+      encoded = encoder.encode
+      result = Quicsilver.send_stream(stream, encoded, true)
+
+      unless result
+        raise Error, "Failed to send request"
+      end
+
+      # Return stream handle for tracking
+      # Note: We don't have stream_id yet, it will come via callback
+      stream
+    end
+
+    def receive_response(timeout: 5000)
+      raise Error, "Not connected" unless @connected
+
+      start = Time.now
+      response = nil
+
+      loop do
+        # Process events - C extension will route to this instance
+        Quicsilver.process_events
+
+        # Check for completed responses
+        @mutex.synchronize do
+          # Find any completed response (simple approach - gets first available)
+          stream_id, resp = @response_complete.first
+          if resp
+            response = resp
+            @response_complete.delete(stream_id)
+          end
+        end
+
+        break if response
+
+        # Timeout check
+        elapsed = (Time.now - start) * 1000
+        if elapsed > timeout
+          raise TimeoutError, "Response timeout after #{timeout}ms"
+        end
+
+        sleep 0.01  # Release GVL for other threads (reduced for better responsiveness)
+      end
+
+      response
+    end
+
     def send_data(data)
       raise Error, "Not connected" unless @connected
 
@@ -170,11 +283,11 @@ module Quicsilver
     end
 
     def open_stream
-      Quicsilver.open_stream(@connection_data[0], false)
+      Quicsilver.open_stream(@connection_data, false)
     end
 
     def open_unidirectional_stream
-      Quicsilver.open_stream(@connection_data[0], true)
+      Quicsilver.open_stream(@connection_data, true)
     end
 
     def send_control_stream

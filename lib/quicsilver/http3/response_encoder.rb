@@ -85,10 +85,10 @@ module Quicsilver
         status_str = status.to_s
         # Map common status codes to static table indices
         index = case status_str
-                when '200' then HTTP3::QPACK_STATUS_200
-                when '404' then HTTP3::QPACK_STATUS_404
-                when '500' then HTTP3::QPACK_STATUS_500
-                when '400' then HTTP3::QPACK_STATUS_400
+                when '200' then HTTP3::QPACK_STATUS_200  # 25
+                when '404' then HTTP3::QPACK_STATUS_404  # 27
+                when '500' then HTTP3::QPACK_STATUS_500  # 71
+                when '400' then HTTP3::QPACK_STATUS_400  # 67
                 when '100' then 63
                 when '204' then 64
                 when '304' then 26
@@ -97,20 +97,38 @@ module Quicsilver
                 end
 
         if index
-          # Indexed field line: 1T (T=1 static) + index (6 bits)
-          [0xC0 | index].pack('C')
+          # Indexed field line: 11 (pattern) + T (1=static) + index (prefix integer with N=6)
+          encode_indexed_field_with_prefix(index)
         else
-          # Literal with name reference to :status name (various indices have :status name)
-          # Use index 25 (:status 200) as name reference, provide custom value
-          # Pattern 3: 01NTxxxx (N=0, T=1 static, index=24 which has :status as name)
-          # Note: index 24 has both :status name and 103 value, we want just the name
-          # Actually for non-standard status, safer to use index that's name-only
-          # But :status entries all have values. Let's encode as literal with name ref
-          # to any :status entry (e.g., 25) and provide our custom value
-          name_ref = [0x58].pack('C')  # 01 0 1 1000 = Pattern 3, N=0, T=1(static), index=24
+          # Literal with name reference - use index 25 (:status 200) for name
+          name_ref = [0x40 | 25].pack('C')
           status_bytes = status_str.b
           length = [status_bytes.bytesize].pack('C')
           name_ref + length + status_bytes
+        end
+      end
+
+      # Encode indexed field line using prefix integer encoding (RFC 7541)
+      # Pattern: 11 + T(1 bit) + index as prefix integer with N=6
+      def encode_indexed_field_with_prefix(index, prefix_bits: 6, pattern: 0xC0)
+        max_prefix = (1 << prefix_bits) - 1  # 2^6 - 1 = 63
+
+        if index < max_prefix
+          # Fits in prefix bits
+          [pattern | index].pack('C')
+        else
+          # Needs continuation bytes
+          result = [pattern | max_prefix].pack('C')  # First byte: all prefix bits set to 1
+          remaining = index - max_prefix
+
+          # Encode remaining value using 7-bit continuation bytes
+          while remaining >= 128
+            result += [(remaining & 0x7F) | 0x80].pack('C')  # MSB=1 means more bytes
+            remaining >>= 7
+          end
+          result += [remaining].pack('C')  # Last byte: MSB=0
+
+          result
         end
       end
 
@@ -129,9 +147,8 @@ module Quicsilver
       end
 
       def encode_indexed_field(index)
-        # Pattern 1: Indexed Field Line
-        # 1T (T=1 for static table) + 6-bit index
-        [0xC0 | index].pack('C')
+        # Pattern 1: Indexed Field Line with prefix integer encoding
+        encode_indexed_field_with_prefix(index)
       end
 
       def encode_literal_with_name_ref(name_index, value)

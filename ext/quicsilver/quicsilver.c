@@ -8,6 +8,9 @@ static VALUE mQuicsilver;
 
 // Event queue for callbacks
 typedef struct CallbackEvent {
+    HQUIC connection;
+    void* connection_ctx;  // ConnectionContext pointer for building connection_data
+    VALUE client_obj;      // Ruby client object (for routing callbacks)
     char* event_type;
     uint64_t stream_id;
     char* data;
@@ -34,6 +37,7 @@ typedef struct {
     int failed;
     QUIC_STATUS error_status;
     uint64_t error_code;
+    VALUE client_obj;  // Ruby client object (Qnil for server connections)
 } ConnectionContext;
 
 // Listener state tracking
@@ -47,6 +51,9 @@ typedef struct {
 
 // Stream state tracking
 typedef struct {
+    HQUIC connection;
+    void* connection_ctx;  // ConnectionContext pointer (for building connection_data)
+    VALUE client_obj;      // Ruby client object (copied from connection context)
     int started;
     int shutdown;
     QUIC_STATUS error_status;
@@ -54,11 +61,14 @@ typedef struct {
 
 // Enqueue a callback event (thread-safe)
 static void
-enqueue_callback_event(const char* event_type, uint64_t stream_id, const char* data, size_t data_len)
+enqueue_callback_event(HQUIC connection, void* connection_ctx, VALUE client_obj, const char* event_type, uint64_t stream_id, const char* data, size_t data_len)
 {
     CallbackEvent* event = (CallbackEvent*)malloc(sizeof(CallbackEvent));
     if (event == NULL) return;
 
+    event->connection = connection;
+    event->connection_ctx = connection_ctx;  // Store context pointer
+    event->client_obj = client_obj;          // Can be Qnil for server events
     event->event_type = strdup(event_type);
     event->stream_id = stream_id;
     event->data = (char*)malloc(data_len);
@@ -83,10 +93,20 @@ static VALUE
 quicsilver_process_events(VALUE self)
 {
     CallbackEvent* event;
-    VALUE server_class = rb_const_get(mQuicsilver, rb_intern("Server"));
+    VALUE server_class = Qnil;
     int processed = 0;
 
-    while (1) {
+    // Get Server class for server events (client_obj == Qnil)
+    server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
+    if (rb_class_real(CLASS_OF(server_class)) != rb_cClass) {
+        server_class = Qnil;
+    }
+
+    // Process events in a loop, but limit iterations to avoid GVL starvation
+    int max_iterations = 100;
+    int iteration = 0;
+
+    while (iteration++ < max_iterations) {
         pthread_mutex_lock(&queue_mutex);
         event = event_queue_head;
         if (event != NULL) {
@@ -99,11 +119,35 @@ quicsilver_process_events(VALUE self)
 
         if (event == NULL) break;
 
-        if (!NIL_P(server_class)) {
-            rb_funcall(server_class, rb_intern("handle_stream"), 3,
+        // Route based on client_obj:
+        // - If Qnil: server event, route to Server.handle_stream with connection_data
+        // - If not Qnil: client event, route to client_obj.handle_stream_event
+        int handled = 0;
+
+        if (NIL_P(event->client_obj)) {
+            // Server event - build connection_data array [connection_handle, context_ptr]
+            if (!NIL_P(server_class)) {
+                VALUE connection_data = rb_ary_new2(2);
+                rb_ary_push(connection_data, ULL2NUM((uintptr_t)event->connection));
+                rb_ary_push(connection_data, ULL2NUM((uintptr_t)event->connection_ctx));
+
+                rb_funcall(server_class, rb_intern("handle_stream"), 4,
+                    connection_data,
+                    ULL2NUM(event->stream_id),
+                    rb_str_new_cstr(event->event_type),
+                    rb_str_new(event->data, event->data_len));
+                handled = 1;
+            }
+        } else {
+            // Client event - call instance method directly
+            rb_funcall(event->client_obj, rb_intern("handle_stream_event"), 3,
                 ULL2NUM(event->stream_id),
                 rb_str_new_cstr(event->event_type),
                 rb_str_new(event->data, event->data_len));
+            handled = 1;
+        }
+
+        if (handled) {
             processed++;
         }
 
@@ -144,11 +188,11 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                     if (combined != NULL) {
                         memcpy(combined, &Stream, sizeof(HQUIC));
                         memcpy(combined + sizeof(HQUIC), buffer->Buffer, buffer->Length);
-                        enqueue_callback_event(event_type, stream_id, combined, total_len);
+                        enqueue_callback_event(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_len);
                         free(combined);
                     }
                 } else {
-                    enqueue_callback_event(event_type, stream_id, (const char*)buffer->Buffer, buffer->Length);
+                    enqueue_callback_event(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, (const char*)buffer->Buffer, buffer->Length);
                 }
             }
             break;
@@ -162,7 +206,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
             break;
     }
-    
+
     return QUIC_STATUS_SUCCESS;
 }
 
@@ -182,8 +226,8 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
         case QUIC_CONNECTION_EVENT_CONNECTED:
             ctx->connected = 1;
             ctx->failed = 0;
-            // Notify Ruby about new connection
-            enqueue_callback_event("CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC));
+            // Notify Ruby about new connection - pass ctx pointer for building connection_data
+            enqueue_callback_event(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC));
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
@@ -205,6 +249,9 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             Stream = Event->PEER_STREAM_STARTED.Stream;
             stream_ctx = (StreamContext*)malloc(sizeof(StreamContext));
             if (stream_ctx != NULL) {
+                stream_ctx->connection = Connection;
+                stream_ctx->connection_ctx = ctx;  // Store connection context pointer
+                stream_ctx->client_obj = ctx->client_obj;  // Copy from connection context
                 stream_ctx->started = 1;
                 stream_ctx->shutdown = 0;
                 stream_ctx->error_status = QUIC_STATUS_SUCCESS;
@@ -240,7 +287,8 @@ ListenerCallback(HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event)
                 conn_ctx->failed = 0;
                 conn_ctx->error_status = QUIC_STATUS_SUCCESS;
                 conn_ctx->error_code = 0;
-                
+                conn_ctx->client_obj = Qnil;  // Server connections have no client object
+
                 // Set the connection callback
                 MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, (void*)ConnectionCallback, conn_ctx);
                 
@@ -408,35 +456,44 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
 
 // Create a QUIC connection with context
 static VALUE
-quicsilver_create_connection(VALUE self)
+quicsilver_create_connection(VALUE self, VALUE client_obj)
 {
     if (MsQuic == NULL) {
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized. Call Quicsilver.open_connection first.");
         return Qnil;
     }
-    
+
     QUIC_STATUS Status;
     HQUIC Connection = NULL;
-    
+
     // Allocate and initialize connection context
     ConnectionContext* ctx = (ConnectionContext*)malloc(sizeof(ConnectionContext));
     if (ctx == NULL) {
         rb_raise(rb_eRuntimeError, "Failed to allocate connection context");
         return Qnil;
     }
-    
+
     ctx->connected = 0;
     ctx->failed = 0;
     ctx->error_status = QUIC_STATUS_SUCCESS;
     ctx->error_code = 0;
-    
+    ctx->client_obj = client_obj;  // Store Ruby client object (Qnil for server)
+
+    // Protect from GC if it's a Ruby object
+    if (!NIL_P(client_obj)) {
+        rb_gc_register_address(&ctx->client_obj);
+    }
+
     // Create connection with enhanced callback and context
     if (QUIC_FAILED(Status = MsQuic->ConnectionOpen(Registration, ConnectionCallback, ctx, &Connection))) {
+        if (!NIL_P(client_obj)) {
+            rb_gc_unregister_address(&ctx->client_obj);
+        }
         free(ctx);
         rb_raise(rb_eRuntimeError, "ConnectionOpen failed, 0x%x!", Status);
         return Qnil;
     }
-    
+
     // Return both the connection handle and context as an array
     VALUE result = rb_ary_new2(2);
     rb_ary_push(result, ULL2NUM((uintptr_t)Connection));
@@ -534,9 +591,13 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
     if (Connection != NULL) {
         MsQuic->ConnectionClose(Connection);
     }
-    
+
     // Free context if valid
     if (ctx != NULL) {
+        // Unregister from GC if client object was set
+        if (!NIL_P(ctx->client_obj)) {
+            rb_gc_unregister_address(&ctx->client_obj);
+        }
         free(ctx);
     }
     
@@ -683,15 +744,22 @@ quicsilver_close_listener(VALUE self, VALUE listener_data)
 }
 
 // Open a QUIC stream
+// Accepts connection_data array [connection_handle, context_handle]
+// Works uniformly for both client and server
 static VALUE
-quicsilver_open_stream(VALUE self, VALUE connection_handle, VALUE unidirectional)
+quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
 {
     if (MsQuic == NULL) {
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
         return Qnil;
     }
 
+    // Extract connection handle and context from array
+    VALUE connection_handle = rb_ary_entry(connection_data, 0);
+    VALUE context_handle = rb_ary_entry(connection_data, 1);
+
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
+    ConnectionContext* conn_ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
     HQUIC Stream = NULL;
 
     StreamContext* ctx = (StreamContext*)malloc(sizeof(StreamContext));
@@ -699,7 +767,10 @@ quicsilver_open_stream(VALUE self, VALUE connection_handle, VALUE unidirectional
         rb_raise(rb_eRuntimeError, "Failed to allocate stream context");
         return Qnil;
     }
-    
+
+    ctx->connection = Connection;
+    ctx->connection_ctx = conn_ctx;  // Store connection context pointer
+    ctx->client_obj = conn_ctx ? conn_ctx->client_obj : Qnil;
     ctx->started = 1;
     ctx->shutdown = 0;
     ctx->error_status = QUIC_STATUS_SUCCESS;
@@ -786,7 +857,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "close_configuration", quicsilver_close_configuration, 1);
     
     // Connection management  
-    rb_define_singleton_method(mQuicsilver, "create_connection", quicsilver_create_connection, 0);
+    rb_define_singleton_method(mQuicsilver, "create_connection", quicsilver_create_connection, 1);
     rb_define_singleton_method(mQuicsilver, "start_connection", quicsilver_start_connection, 4);
     rb_define_singleton_method(mQuicsilver, "wait_for_connection", quicsilver_wait_for_connection, 2);
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
