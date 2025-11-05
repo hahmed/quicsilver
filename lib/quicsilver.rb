@@ -10,6 +10,7 @@ require_relative "quicsilver/http3/request_parser"
 require_relative "quicsilver/http3/request_encoder"
 require_relative "quicsilver/http3/response_encoder"
 require_relative "quicsilver/quicsilver"
+require_relative "rack/handler/quicsilver"
 
 module Quicsilver
   class Error < StandardError; end

@@ -12,6 +12,7 @@ module Quicsilver
         @frames = []
         @headers = {}
         @body = StringIO.new
+        @body.set_encoding(Encoding::ASCII_8BIT)
       end
 
       def parse
@@ -48,6 +49,11 @@ module Quicsilver
           'SCRIPT_NAME' => '',
           'CONTENT_LENGTH' => @body.size.to_s,
         }
+
+        # Add HTTP_HOST from :authority pseudo-header
+        if @headers[':authority']
+          env['HTTP_HOST'] = @headers[':authority']
+        end
 
         # Add regular headers as HTTP_*
         @headers.each do |name, value|
