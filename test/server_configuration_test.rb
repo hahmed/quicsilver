@@ -1,15 +1,12 @@
 require "test_helper"
-
-# Test only the ServerConfiguration class without loading the full quicsilver gem
-# This avoids C extension compatibility issues
 require_relative "../lib/quicsilver/server_configuration"
 
 class ServerConfigurationTest < Minitest::Test
   def test_default_initialization
     config = Quicsilver::ServerConfiguration.new
     
-    assert_equal "certs/server.crt", config.cert_file
-    assert_equal "certs/server.key", config.key_file
+    assert_equal "certificates/server.crt", config.cert_file
+    assert_equal "certificates/server.key", config.key_file
     assert_equal 10000, config.idle_timeout
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
     assert_equal 10, config.peer_bidi_stream_count
@@ -17,11 +14,16 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal "h3", config.alpn
   end
 
-  def test_initialization_with_custom_cert_files
-    config = Quicsilver::ServerConfiguration.new("custom.crt", "custom.key")
-    
-    assert_equal "custom.crt", config.cert_file
-    assert_equal "custom.key", config.key_file
+  def test_initialization_with_custom_cert_files_raises_no_error_when_certs_does_not_exist
+    assert_raises(Quicsilver::ServerConfigurationError) do
+      Quicsilver::ServerConfiguration.new("missing.crt", "missing.key")
+    end
+  end
+
+  def test_initialization_with_custom_cert_files_raises_no_error_when_key_does_not_exist
+    assert_raises(Quicsilver::ServerConfigurationError) do
+      Quicsilver::ServerConfiguration.new("certificates/server.crt", "missing.key")
+    end
   end
 
   def test_initialization_with_options
@@ -82,21 +84,8 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal false, config.alpn
   end
 
-  def test_initialization_with_empty_string_values
-    # Test that empty strings are preserved
-    options = {
-      alpn: ""
-    }
-    
-    config = Quicsilver::ServerConfiguration.new("", "", options)
-    
-    assert_equal "", config.cert_file
-    assert_equal "", config.key_file
-    assert_equal "", config.alpn
-  end
-
   def test_to_h_method
-    config = Quicsilver::ServerConfiguration.new("test.crt", "test.key", {
+    config = Quicsilver::ServerConfiguration.new("certificates/server.crt", "certificates/server.key", {
       idle_timeout: 5000,
       alpn: "h3-29"
     })
@@ -104,8 +93,8 @@ class ServerConfigurationTest < Minitest::Test
     hash = config.to_h
     
     assert_kind_of Hash, hash
-    assert_equal "test.crt", hash[:cert_file]
-    assert_equal "test.key", hash[:key_file]
+    assert_equal "certificates/server.crt", hash[:cert_file]
+    assert_equal "certificates/server.key", hash[:key_file]
     assert_equal 5000, hash[:idle_timeout]
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, hash[:server_resumption_level]
     assert_equal 10, hash[:peer_bidi_stream_count]

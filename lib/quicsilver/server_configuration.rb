@@ -10,14 +10,25 @@ module Quicsilver
     QUIC_SERVER_RESUME_AND_REUSE = 3
     QUIC_SERVER_RESUME_AND_REUSE_ZERORTT = 4
 
+    DEFAULT_CERT_FILE = "certificates/server.crt"
+    DEFAULT_KEY_FILE = "certificates/server.key"
+
     def initialize(cert_file = nil, key_file = nil, options = {})
-      @cert_file = cert_file.nil? ? "certs/server.crt" : cert_file
-      @key_file = key_file.nil? ? "certs/server.key" : key_file
       @idle_timeout = options[:idle_timeout].nil? ? 10000 : options[:idle_timeout]
       @server_resumption_level = options[:server_resumption_level].nil? ? QUIC_SERVER_RESUME_AND_ZERORTT : options[:server_resumption_level]
       @peer_bidi_stream_count = options[:peer_bidi_stream_count].nil? ? 10 : options[:peer_bidi_stream_count]
       @peer_unidi_stream_count = options[:peer_unidi_stream_count].nil? ? 10 : options[:peer_unidi_stream_count]
       @alpn = options[:alpn].nil? ? "h3" : options[:alpn]
+      @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
+      @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file
+
+      unless File.exist?(@cert_file)
+        raise ServerConfigurationError, "Certificate file not found: #{@cert_file}"
+      end
+
+      unless File.exist?(@key_file)
+        raise ServerConfigurationError, "Key file not found: #{@key_file}"
+      end
     end
 
     # Common HTTP/3 ALPN Values:
