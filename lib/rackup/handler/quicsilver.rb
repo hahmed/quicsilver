@@ -2,6 +2,7 @@
 
 require "quicsilver"
 require "rackup/handler"
+require "localhost"
 
 module Quicsilver
   module RackHandler
@@ -16,7 +17,26 @@ module Quicsilver
         port: (options[:Port] || options[:port] || DEFAULT_OPTIONS[:Port]).to_i,
       }
 
-      config = ::Quicsilver::ServerConfiguration.new(options[:cert_file], options[:key_file])
+      cert_file = options[:cert_file]
+      key_file = options[:key_file]
+
+      if cert_file.nil? && key_file.nil?
+        env = options[:environment] || ENV['RACK_ENV'] || ENV['RAILS_ENV'] || 'development'
+
+        if env == 'production'
+          raise ArgumentError, "cert_file and key_file are required in production"
+        else
+          require 'localhost/authority'
+          authority = Localhost::Authority.fetch
+          cert_file = authority.certificate_path
+          key_file = authority.key_path
+          puts "🔐 Using auto-generated certificates for localhost"
+          puts "   Cert: #{cert_file}"
+          puts "   Key: #{key_file}"
+        end
+      end
+
+      config = ::Quicsilver::ServerConfiguration.new(cert_file, key_file)
 
       server = ::Quicsilver::Server.new(
         normalized_options[:port],

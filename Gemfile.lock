@@ -2,12 +2,14 @@ PATH
   remote: .
   specs:
     quicsilver (0.1.0)
+      localhost (~> 1.6)
       rack (~> 3.0)
       rackup (~> 2.0)
 
 GEM
   remote: https://rubygems.org/
   specs:
+    localhost (1.6.0)
     minitest (5.25.5)
     minitest-focus (1.4.0)
       minitest (>= 4, < 6)
