@@ -94,10 +94,21 @@ class HTTP3Test < Minitest::Test
 
   def test_build_control_stream
     stream = Quicsilver::HTTP3.build_control_stream
+    bytes = stream.bytes
 
-    refute_empty stream
-    assert_equal 0x00, stream.bytes[0]
-    assert stream.bytesize > 1
+    # Control stream starts with stream type 0x00
+    assert_equal 0x00, bytes[0], "First byte must be control stream type (0x00)"
+
+    # Followed by SETTINGS frame
+    frame_type, type_len = Quicsilver::HTTP3.decode_varint(bytes, 1)
+    assert_equal 0x04, frame_type, "Frame type must be SETTINGS (0x04)"
+
+    # Empty SETTINGS frame (length = 0) per RFC 9114 - uses defaults
+    frame_length, length_len = Quicsilver::HTTP3.decode_varint(bytes, 1 + type_len)
+    assert_equal 0, frame_length, "SETTINGS frame should be empty (length 0)"
+
+    # Total: 1 byte stream type + 1 byte frame type + 1 byte length = 3 bytes
+    assert_equal 3, stream.bytesize
   end
 
   def test_decode_varint_insufficient_bytes

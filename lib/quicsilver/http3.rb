@@ -169,10 +169,7 @@ module Quicsilver
       # Build control stream data
       def build_control_stream
         stream_type = [0x00].pack('C')  # Control stream type
-        settings = build_settings_frame({
-          # 0x01 => 4096,  # QPACK_MAX_TABLE_CAPACITY (optional)
-          # 0x06 => 16384  # MAX_HEADER_LIST_SIZE (optional)
-        })
+        settings = build_settings_frame({})
 
         stream_type + settings
       end
