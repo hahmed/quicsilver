@@ -243,6 +243,8 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
+            // Notify Ruby to clean up connection resources
+            enqueue_callback_event(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC));
             break;
          case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
             // Client opened a stream

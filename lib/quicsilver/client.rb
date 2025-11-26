@@ -134,6 +134,12 @@ module Quicsilver
       ensure
         @connected = false
         @connection_start_time = nil
+
+        # Clean up any remaining response buffers
+        @mutex.synchronize do
+          @response_buffers.clear
+          @response_complete.clear
+        end
       end
     end
     
@@ -194,8 +200,7 @@ module Quicsilver
     def send_request(method, path, headers: {}, body: nil)
       raise Error, "Not connected" unless @connected
 
-      # Encode HTTP/3 request
-      encoder = Quicsilver::HTTP3::RequestEncoder.new(
+      request = Quicsilver::HTTP3::RequestEncoder.new(
         method: method,
         path: path,
         scheme: 'https',
@@ -204,15 +209,13 @@ module Quicsilver
         body: body
       )
 
-      # Open stream and send
       stream = open_stream
       unless stream
         raise Error, "Failed to open stream"
       end
 
       # Send data with FIN flag
-      encoded = encoder.encode
-      result = Quicsilver.send_stream(stream, encoded, true)
+      result = Quicsilver.send_stream(stream, request.encode, true)
 
       unless result
         raise Error, "Failed to send request"
