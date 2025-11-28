@@ -9,18 +9,10 @@ puts "=" * 40
 begin
   client = Quicsilver::Client.new("127.0.0.1", 4433, unsecure: true)
 
-  puts "📡 Connecting..."
   client.connect
-  puts "✅ Connected!"
 
-  puts "📤 Sending request..."
-  client.send_request("GET", "/posts")
-  puts "✅ Request sent"
+  response = client.get("/posts")
 
-  puts "📥 Waiting for response (30s timeout)..."
-  response = client.receive_response(timeout: 30000)
-
-  puts "✅ Response received!"
   puts "Status: #{response[:status]}"
   puts "Headers: #{response[:headers].inspect}"
   puts "Body: #{response[:body]}"
@@ -29,7 +21,6 @@ rescue => e
   puts "❌ Error: #{e.class} - #{e.message}"
   puts e.backtrace.first(10)
 ensure
-  puts "🔌 Disconnecting..."
   client&.disconnect
   puts "👋 Done"
 end

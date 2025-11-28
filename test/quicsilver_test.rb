@@ -18,10 +18,8 @@ class QuicsilverTest < Minitest::Test
   def test_server_creation
     server = Quicsilver::Server.new(4433)
     refute server.running?
-    info = server.server_info
-    assert_kind_of Hash, info
-    assert_equal 4433, info[:port]
-    assert_equal "0.0.0.0", info[:address]
+    assert_equal 4433, server.port
+    assert_equal "0.0.0.0", server.address
   end
   
   def test_connection_failure_on_invalid_host

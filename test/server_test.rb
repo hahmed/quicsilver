@@ -40,18 +40,6 @@ class ServerTest < Minitest::Test
     assert_instance_of Quicsilver::Server, server
   end
 
-  def test_server_info_returns_hash_with_details
-    server = create_server
-    info = server.server_info
-
-    assert_instance_of Hash, info
-    assert_equal "0.0.0.0", info[:address]
-    assert_equal 4433, info[:port]
-    assert_equal false, info[:running]
-    assert info.key?(:cert_file)
-    assert info.key?(:key_file)
-  end
-
   def test_stop_when_not_running
     server = create_server
 

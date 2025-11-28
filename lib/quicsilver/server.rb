@@ -10,27 +10,14 @@ module Quicsilver
     STREAM_EVENT_SEND_COMPLETE = "SEND_COMPLETE"
     STREAM_EVENT_CONNECTION_CLOSED = "CONNECTION_CLOSED"
 
+    ServerStopError = Class.new(StandardError)
+
     class << self
-      # Registry mapping connection_handle => Server instance
-      def server_registry
-        @server_registry ||= {}
-      end
+      attr_accessor :instance
 
-      # Callback from C extension - delegates to appropriate server instance
+      # Callback from C extension - delegates to server instance
       def handle_stream(connection_data, stream_id, event, data)
-        connection_handle = connection_data[0]
-        server = server_registry[connection_handle]
-
-        if event == STREAM_EVENT_CONNECTION_ESTABLISHED
-          # For new connections, use the most recently created server
-          # (In a single-server setup, there's only one anyway)
-          server = server_registry.values.last
-          server&.handle_stream_event(connection_data, stream_id, event, data)
-        elsif server
-          server.handle_stream_event(connection_data, stream_id, event, data)
-        else
-          puts "⚠️  Ruby: No server found for connection #{connection_handle}"
-        end
+        instance&.handle_stream_event(connection_data, stream_id, event, data)
       end
     end
 
@@ -43,94 +30,30 @@ module Quicsilver
       @listener_data = nil
       @connections = {}
 
-      # Register this server instance so handle_stream callback can find it
-      # When first connection arrives, it will be assigned to this server
-      self.class.server_registry[object_id] = self
-    end
-
-    def handle_stream_event(connection_data, stream_id, event, data)
-      connection_handle = connection_data[0]
-
-      case event
-      when STREAM_EVENT_CONNECTION_ESTABLISHED
-        @connections[connection_handle] = Connection.new(connection_handle, connection_data)
-
-        # Register this connection with this server instance
-        self.class.server_registry[connection_handle] = self
-
-        # Send control stream (required)
-        stream = Quicsilver.open_stream(connection_data, true)  # unidirectional
-        control_data = Quicsilver::HTTP3.build_control_stream
-        Quicsilver.send_stream(stream, control_data, false)  # no FIN
-
-        # Open QPACK encoder stream (required)
-        encoder_stream = Quicsilver.open_stream(connection_data, true)
-        encoder_type = [0x02].pack('C')  # QPACK encoder stream type
-        Quicsilver.send_stream(encoder_stream, encoder_type, false)
-
-        # Open QPACK decoder stream (required)
-        decoder_stream = Quicsilver.open_stream(connection_data, true)
-        decoder_type = [0x03].pack('C')  # QPACK decoder stream type
-        Quicsilver.send_stream(decoder_stream, decoder_type, false)
-      when STREAM_EVENT_CONNECTION_CLOSED
-        cleanup_connection(connection_handle)
-      when STREAM_EVENT_SEND_COMPLETE
-        puts "🔧 Ruby: Control stream sent to client"
-      when STREAM_EVENT_RECEIVE
-        connection = @connections[connection_handle]
-        return unless connection
-
-        # Get or create stream
-        stream = connection.get_stream(stream_id) || QuicStream.new(stream_id)
-        connection.add_stream(stream) unless connection.get_stream(stream_id)
-
-        # Accumulate data
-        stream.append_data(data)
-        puts "🔧 Ruby: Stream #{stream_id}: Buffering #{data.bytesize} bytes (total: #{stream.buffer.bytesize})"
-      when STREAM_EVENT_RECEIVE_FIN
-        connection = @connections[connection_handle]
-        return unless connection
-
-        # Extract stream handle from data (first 8 bytes)
-        stream_handle = data[0, 8].unpack1('Q')
-        actual_data = data[8..-1] || ""
-
-        # Get or create stream
-        stream = connection.get_stream(stream_id) || QuicStream.new(stream_id)
-        stream.stream_handle = stream_handle
-        stream.append_data(actual_data)
-
-        # Handle bidirectional streams (client requests)
-        if stream.bidirectional?
-          handle_request(connection, stream)
-        else
-          # Unidirectional stream (control/QPACK)
-          handle_unidirectional_stream(connection, stream)
-        end
-
-        # Clean up stream
-        connection.remove_stream(stream_id)
-      end
+      self.class.instance = self
     end
 
     def start
       raise ServerIsRunningError, "Server is already running" if @running
 
-      # Initialize MSQUIC if not already done
       Quicsilver.open_connection
-
       config = Quicsilver.create_server_configuration(@server_configuration.to_h)
-      unless config
-        raise ServerConfigurationError, "Failed to create server configuration"
-      end
+      raise ServerConfigurationError, "Failed to create server configuration" unless config
 
       # Create and start the listener
-      @listener_data = start_listener(config)
-      start_server(config)
+      result = Quicsilver.create_listener(config)
+      @listener_data = ListenerData.new(result[0], result[1])
+      raise ServerListenerError, "Failed to create listener #{@address}:#{@port}"  unless @listener_data
+
+      unless Quicsilver.start_listener(@listener_data.listener_handle, @address, @port)
+        Quicsilver.close_configuration(config)
+        cleanup_failed_server
+        raise ServerListenerError, "Failed to start listener on #{@address}:#{@port}"
+      end
 
       @running = true
 
-      puts "✅ QUIC server started successfully on #{@address}:#{@port}"
+      Quicsilver.event_loop.start
     rescue ServerConfigurationError, ServerListenerError => e
       cleanup_failed_server
       @running = false
@@ -154,53 +77,58 @@ module Quicsilver
     def stop
       return unless @running
 
-      puts "🛑 Stopping QUIC server..."
-
-      if @listener_data
-        listener_handle = @listener_data[0]
-        Quicsilver.stop_listener(listener_handle)
-        Quicsilver.close_listener(@listener_data)
-        @listener_data = nil
+      if @listener_data && @listener_data.listener_handle
+        Quicsilver.stop_listener(@listener_data.listener_handle)
+        Quicsilver.close_listener([@listener_data.listener_handle, @listener_data.context_handle])
       end
 
       @running = false
-      puts "👋 Server stopped"    
-    rescue
-      puts "⚠️  Error during server shutdown"
-      # Continue with cleanup even if there are errors
+      @listener_data = nil
+    rescue => e
       @listener_data = nil
       @running = false
+      raise ServerStopError, "Failed to stop server: #{e.message}"
     end
 
     def running?
       @running
     end
 
-    def server_info
-      {
-        address: @address,
-        port: @port,
-        running: @running,
-        cert_file: @cert_file,
-        key_file: @key_file
-      }
-    end
+    def handle_stream_event(connection_data, stream_id, event, data)
+      connection_handle = connection_data[0]
 
-    def wait_for_connections(timeout: nil)
-      if timeout
-        end_time = Time.now + timeout
-        while Time.now < end_time && @running
-          Quicsilver.process_events
-          sleep(0.01) # Poll every 10ms
+      case event
+      when STREAM_EVENT_CONNECTION_ESTABLISHED
+        @connections[connection_handle] = Connection.new(connection_handle, connection_data)
+        setup_http3_streams(connection_data)
+      when STREAM_EVENT_CONNECTION_CLOSED
+        @connections.delete(connection_handle)&.streams&.clear
+      when STREAM_EVENT_SEND_COMPLETE
+        # TODO...
+      when STREAM_EVENT_RECEIVE
+        return unless connection = @connections[connection_handle]
+
+        stream = connection.get_stream(stream_id) || QuicStream.new(stream_id)
+        connection.add_stream(stream) unless connection.get_stream(stream_id)
+        stream.append_data(data)
+      when STREAM_EVENT_RECEIVE_FIN
+        return unless connection = @connections[connection_handle]
+
+        # Extract stream handle from data (first 8 bytes)
+        stream_handle = data[0, 8].unpack1('Q')
+        actual_data = data[8..-1] || ""
+
+        stream = connection.get_stream(stream_id) || QuicStream.new(stream_id)
+        stream.stream_handle = stream_handle
+        stream.append_data(actual_data)
+
+        if stream.bidirectional?
+          handle_request(connection, stream)
+        else
+          handle_unidirectional_stream(connection, stream) # Unidirectional stream (control/QPACK)
         end
-      else
-        # Keep the server running indefinitely
-        # Process events from MSQUIC callbacks
-        loop do
-          Quicsilver.process_events
-          sleep(0.01) # Poll every 10ms
-          break unless @running
-        end
+
+        connection.remove_stream(stream_id)
       end
     end
 
@@ -214,32 +142,11 @@ module Quicsilver
       }
     end
 
-    def start_server(config)
-      result = Quicsilver.start_listener(@listener_data.listener_handle, @address, @port)
-      unless result
-        Quicsilver.close_configuration(config)
-        cleanup_failed_server
-        raise ServerListenerError, "Failed to start listener on #{@address}:#{@port}"
-      end
-    end
-
-    def start_listener(config)
-      result = Quicsilver.create_listener(config)
-      listener_data = ListenerData.new(result[0], result[1])
-
-      unless listener_data
-        Quicsilver.close_configuration(config)
-        raise ServerListenerError, "Failed to create listener on #{@address}:#{@port}"
-      end
-
-      listener_data
-    end
-
     def cleanup_failed_server
       if @listener_data
         begin
-          Quicsilver.stop_listener(@listener_data)
-          Quicsilver.close_listener(@listener_data)
+          Quicsilver.stop_listener(@listener_data.listener_handle) if @listener_data.listener_handle
+          Quicsilver.close_listener([@listener_data.listener_handle, @listener_data.context_handle]) if @listener_data.listener_handle
         rescue
           # Ignore cleanup errors
         ensure
@@ -248,16 +155,28 @@ module Quicsilver
       end
     end
 
-    def cleanup_connection(connection_handle)
-      connection = @connections[connection_handle]
-      return unless connection
+    def setup_http3_streams(connection_data)
+      # Send control stream (required)
+      stream = Quicsilver.open_stream(connection_data, true)
+      control_data = HTTP3.build_control_stream
+      Quicsilver.send_stream(stream, control_data, false)
 
-      # Clean up all streams in the connection
-      connection.streams.clear
+      # Open QPACK encoder/decoder streams (required)
+      [0x02, 0x03].each do |type|
+        stream = Quicsilver.open_stream(connection_data, true)
+        Quicsilver.send_stream(stream, [type].pack('C'), false)
+      end
+    end
 
-      # Remove connection from registry
-      @connections.delete(connection_handle)
-      self.class.server_registry.delete(connection_handle)
+
+    def handle_control_stream(connection, stream)
+      return if stream.buffer.empty?
+
+      case stream.buffer[0].ord
+      when 0x00 then connection.set_control_stream(stream.stream_id)
+      when 0x02 then connection.set_qpack_encoder_stream(stream.stream_id)
+      when 0x03 then connection.set_qpack_decoder_stream(stream.stream_id)
+      end
     end
 
     def handle_unidirectional_stream(connection, stream)
