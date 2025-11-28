@@ -6,12 +6,6 @@ require "quicsilver"
 puts "🚀 Rack HTTP/3 Server Example"
 puts "=" * 40
 
-# First, set up certificates if they don't exist
-unless File.exist?("certs/server.crt") && File.exist?("certs/server.key")
-  puts "📝 Setting up certificates..."
-  system("bash examples/setup_certs.sh")
-end
-
 # Define a simple Rack app
 app = ->(env) {
   path = env['PATH_INFO']

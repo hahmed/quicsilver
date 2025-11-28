@@ -2,6 +2,8 @@
 
 require_relative 'http3/request_encoder'
 require_relative 'http3/response_parser'
+require_relative "event_loop"
+require "timeout"
 
 module Quicsilver
   class Client
@@ -31,9 +33,9 @@ module Quicsilver
     def connect
       raise AlreadyConnectedError if @connected
 
+      puts "[Thread #{Thread.current.object_id}] #{object_id}: Starting connection..."
       Quicsilver.open_connection
       
-      # Create configuration
       config = Quicsilver.create_configuration(@unsecure)
       raise ConnectionError, "Failed to create configuration" if config.nil?
 
@@ -43,17 +45,20 @@ module Quicsilver
       raise ConnectionError, "Failed to create connection" if @connection_data.nil?
       
       connection_handle, context_handle = @connection_data
-      
+      puts "#{object_id}: Created connection handle=#{connection_handle}"
+
       # Start the connection
       success = Quicsilver.start_connection(connection_handle, config, @hostname, @port)
       unless success
+        puts "#{object_id}: start_connection failed"
         Quicsilver.close_configuration(config)
         cleanup_failed_connection
         raise ConnectionError, "Failed to start connection"
       end
 
-      # Wait for connection to establish or fail
+      puts "#{object_id}: Waiting for handshake..."
       result = Quicsilver.wait_for_connection(context_handle, @connection_timeout)
+      puts "#{object_id}: Handshake result: #{result.inspect}"
       handle_connection_result(result, config)
       
       @connected = true
@@ -62,8 +67,7 @@ module Quicsilver
       send_control_stream
       Quicsilver.close_configuration(config) # Clean up config since connection is established
 
-      start_event_loop
-
+      Quicsilver.event_loop.start
       self
     rescue => e
       cleanup_failed_connection
@@ -76,27 +80,23 @@ module Quicsilver
     end
     
     def disconnect
+      puts "[Thread #{Thread.current.object_id}] #{object_id}: disconnect called"
       return unless @connection_data
 
       @connected = false
-      @event_thread&.join(1)  # Wait max 1 second
-      @event_thread = nil
+      puts "#{object_id}: Pushing nil to #{@pending_requests.size} pending requests"
 
-      Quicsilver.close_connection_handle(@connection_data)
-      @connection_data = nil
-      @connection_start_time = nil
-
-      # Clean up any remaining response buffers
+      # Wake up pending requests
       @mutex.synchronize do
-        @response_buffers.clear
+        @pending_requests.each_value { |q| q.push(nil) }
         @pending_requests.clear
+        @response_buffers.clear
       end
-    rescue
-      # TODO: Ignore disconnect errors, maybe log
-    ensure
-      @connected = false
+
+      puts "#{object_id}: Closing connection handle"
+      Quicsilver.close_connection_handle(@connection_data) if @connection_data
       @connection_data = nil
-      @event_thread = nil
+      puts "#{object_id}: Disconnected"
     end
 
     def get(path, **opts)
@@ -121,10 +121,9 @@ module Quicsilver
 
     def request(method, path, headers: {}, body: nil, timeout: 5000)
       raise NotConnectedError unless @connected
-
       response_queue = Queue.new
 
-      request = Quicsilver::HTTP3::RequestEncoder.new(
+      request = HTTP3::RequestEncoder.new(
         method: method,
         path: path,
         scheme: "https",
@@ -148,12 +147,14 @@ module Quicsilver
         raise Error, "Failed to send request"
       end
 
-      Timeout.timeout(timeout / 1000.0) do
-        response_queue.pop
-      end
+      response = response_queue.pop(timeout: timeout / 1000.0)
+
+      raise ConnectionError, "Connection closed" if response.nil? && !@connected
+      raise TimeoutError, "Request timeout after #{timeout}ms" if response.nil?
+
+      response
     rescue Timeout::Error
-      @mutex.synchronize { @pending_requests.delete(stream) }
-      raise TimeoutError, "Request timeout after #{timeout}ms"
+      @mutex.synchronize { @pending_requests.delete(stream) } if stream
     end
 
     def connected?
@@ -206,7 +207,7 @@ module Quicsilver
             body: response_parser.body.read
           }
 
-          queue = @pending_requests.delete(stream_id)
+          queue = @pending_requests.delete(stream_handle)
           queue&.push(response)  # Unblocks request
         end
       end
@@ -229,17 +230,6 @@ module Quicsilver
 
     def open_unidirectional_stream
       Quicsilver.open_stream(@connection_data, true)
-    end
-
-    def start_event_loop
-      return if @event_thread&.alive?
-
-      @event_thread = Thread.new do
-        while @connected
-          Quicsilver.process_events
-          sleep 0.001
-        end
-      end
     end
 
     def send_control_stream

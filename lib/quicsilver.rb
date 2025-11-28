@@ -3,6 +3,7 @@
 require_relative "quicsilver/version"
 require_relative "quicsilver/client"
 require_relative "quicsilver/connection"
+require_relative "quicsilver/event_loop"
 require_relative "quicsilver/quic_stream"
 require_relative "quicsilver/listener_data"
 require_relative "quicsilver/server"
