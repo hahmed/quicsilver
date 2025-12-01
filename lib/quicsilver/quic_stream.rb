@@ -8,7 +8,7 @@ module Quicsilver
     def initialize(stream_id, is_unidirectional: nil)
       @stream_id = stream_id
       @is_unidirectional = is_unidirectional.nil? ? !bidirectional? : is_unidirectional
-      @buffer = ""
+      @buffer = StringIO.new.tap { |io| io.set_encoding(Encoding::ASCII_8BIT) }
       @stream_handle = nil
     end
 
@@ -21,11 +21,12 @@ module Quicsilver
     end
 
     def append_data(data)
-      @buffer += data
+      @buffer.write(data)
     end
 
     def clear_buffer
-      @buffer = ""
+      @buffer.truncate(0)
+      @buffer.rewind
     end
   end
 end

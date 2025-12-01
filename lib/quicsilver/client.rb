@@ -175,14 +175,15 @@ module Quicsilver
       @mutex.synchronize do
         case event
         when "RECEIVE"
-          @response_buffers[stream_id] ||= ""
-          @response_buffers[stream_id] += data # Buffer incoming response data
+          @response_buffers[stream_id] ||= StringIO.new
+          @response_buffers[stream_id].write(data) # Buffer incoming response data
         when "RECEIVE_FIN"
           stream_handle = data[0, 8].unpack1('Q') if data.bytesize >= 8
           actual_data = data[8..-1] || ""
 
           # Get all buffered data
-          full_data = (@response_buffers.delete(stream_id) || "") + actual_data
+          buffer = @response_buffers.delete(stream_id)
+          full_data = ( buffer&.string || "") + actual_data
 
           # TODO: needed for streaming later
           @stream_handles ||= {}
