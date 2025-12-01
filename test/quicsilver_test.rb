@@ -16,7 +16,7 @@ class QuicsilverTest < Minitest::Test
   end
   
   def test_server_creation
-    server = Quicsilver::Server.new(4433)
+    server = Quicsilver::Server.new(4433, server_configuration: default_server_config)
     refute server.running?
     assert_equal 4433, server.port
     assert_equal "0.0.0.0", server.address
@@ -48,12 +48,7 @@ class QuicsilverTest < Minitest::Test
   end
 
   def test_client_server_communication
-    # Set up certificates if they don't exist
-    unless File.exist?("certs/server.crt") && File.exist?("certs/server.key")
-      system("bash examples/setup_certs.sh")
-    end
-
-    server = Quicsilver::Server.new(4434) # Use different port to avoid conflicts
+    server = Quicsilver::Server.new(4434, server_configuration: default_server_config) # Use different port to avoid conflicts
     client = Quicsilver::Client.new("localhost", 4434, connection_timeout: 5000)
     
     # Start server in a separate thread
@@ -93,12 +88,7 @@ class QuicsilverTest < Minitest::Test
   end
 
   def test_multiple_clients_connecting
-    # Set up certificates if they don't exist
-    unless File.exist?("certs/server.crt") && File.exist?("certs/server.key")
-      system("bash examples/setup_certs.sh")
-    end
-
-    server = Quicsilver::Server.new(4435) # Use different port
+    server = Quicsilver::Server.new(4435, server_configuration: default_server_config) # Use different port
     clients = []
     
     # Create multiple clients
@@ -144,7 +134,7 @@ class QuicsilverTest < Minitest::Test
   end
 
   def test_server_restart_after_stop
-    server = Quicsilver::Server.new(4436) # Use different port
+    server = Quicsilver::Server.new(4436, server_configuration: default_server_config) # Use different port
     
     # First start
     begin
@@ -181,5 +171,14 @@ class QuicsilverTest < Minitest::Test
     ensure
       server.stop if server.running?
     end
+  end
+
+  private
+
+  def default_server_config
+    Quicsilver::ServerConfiguration.new(
+      cert_file_path,
+      key_file_path,
+    )
   end
 end

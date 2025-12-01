@@ -33,7 +33,6 @@ module Quicsilver
     def connect
       raise AlreadyConnectedError if @connected
 
-      puts "[Thread #{Thread.current.object_id}] #{object_id}: Starting connection..."
       Quicsilver.open_connection
       
       config = Quicsilver.create_configuration(@unsecure)
@@ -45,20 +44,16 @@ module Quicsilver
       raise ConnectionError, "Failed to create connection" if @connection_data.nil?
       
       connection_handle, context_handle = @connection_data
-      puts "#{object_id}: Created connection handle=#{connection_handle}"
 
       # Start the connection
       success = Quicsilver.start_connection(connection_handle, config, @hostname, @port)
       unless success
-        puts "#{object_id}: start_connection failed"
         Quicsilver.close_configuration(config)
         cleanup_failed_connection
         raise ConnectionError, "Failed to start connection"
       end
 
-      puts "#{object_id}: Waiting for handshake..."
       result = Quicsilver.wait_for_connection(context_handle, @connection_timeout)
-      puts "#{object_id}: Handshake result: #{result.inspect}"
       handle_connection_result(result, config)
       
       @connected = true
@@ -80,11 +75,9 @@ module Quicsilver
     end
     
     def disconnect
-      puts "[Thread #{Thread.current.object_id}] #{object_id}: disconnect called"
       return unless @connection_data
 
       @connected = false
-      puts "#{object_id}: Pushing nil to #{@pending_requests.size} pending requests"
 
       # Wake up pending requests
       @mutex.synchronize do
@@ -93,10 +86,8 @@ module Quicsilver
         @response_buffers.clear
       end
 
-      puts "#{object_id}: Closing connection handle"
       Quicsilver.close_connection_handle(@connection_data) if @connection_data
       @connection_data = nil
-      puts "#{object_id}: Disconnected"
     end
 
     def get(path, **opts)

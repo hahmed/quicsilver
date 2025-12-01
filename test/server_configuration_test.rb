@@ -3,10 +3,10 @@ require_relative "../lib/quicsilver/server_configuration"
 
 class ServerConfigurationTest < Minitest::Test
   def test_default_initialization
-    config = Quicsilver::ServerConfiguration.new
+    config = fetch_server_configuration_with_certs
     
-    assert_equal "certificates/server.crt", config.cert_file
-    assert_equal "certificates/server.key", config.key_file
+    assert_equal cert_data_path + "/server.crt", config.cert_file
+    assert_equal cert_data_path + "/server.key", config.key_file
     assert_equal 10000, config.idle_timeout
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
     assert_equal 10, config.peer_bidi_stream_count
@@ -35,7 +35,7 @@ class ServerConfigurationTest < Minitest::Test
       alpn: "h3-29"
     }
     
-    config = Quicsilver::ServerConfiguration.new(nil, nil, options)
+    config = fetch_server_configuration_with_certs(options)
     
     assert_equal 5000, config.idle_timeout
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_ONLY, config.server_resumption_level
@@ -54,7 +54,7 @@ class ServerConfigurationTest < Minitest::Test
       alpn: nil
     }
     
-    config = Quicsilver::ServerConfiguration.new(nil, nil, options)
+    config = fetch_server_configuration_with_certs(options)
     
     # Should use defaults when nil is explicitly passed
     assert_equal 10000, config.idle_timeout
@@ -74,7 +74,7 @@ class ServerConfigurationTest < Minitest::Test
       alpn: false
     }
     
-    config = Quicsilver::ServerConfiguration.new(nil, nil, options)
+    config = fetch_server_configuration_with_certs(options)
     
     # Should preserve false values (not use defaults)
     assert_equal false, config.idle_timeout
@@ -85,7 +85,7 @@ class ServerConfigurationTest < Minitest::Test
   end
 
   def test_to_h_method
-    config = Quicsilver::ServerConfiguration.new("certificates/server.crt", "certificates/server.key", {
+    config = fetch_server_configuration_with_certs({
       idle_timeout: 5000,
       alpn: "h3-29"
     })
@@ -93,8 +93,8 @@ class ServerConfigurationTest < Minitest::Test
     hash = config.to_h
     
     assert_kind_of Hash, hash
-    assert_equal "certificates/server.crt", hash[:cert_file]
-    assert_equal "certificates/server.key", hash[:key_file]
+    assert_equal cert_data_path + "/server.crt", hash[:cert_file]
+    assert_equal cert_data_path + "/server.key", hash[:key_file]
     assert_equal 5000, hash[:idle_timeout]
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, hash[:server_resumption_level]
     assert_equal 10, hash[:peer_bidi_stream_count]
@@ -103,7 +103,7 @@ class ServerConfigurationTest < Minitest::Test
   end
 
   def test_to_h_returns_symbol_keys
-    config = Quicsilver::ServerConfiguration.new
+    config = fetch_server_configuration_with_certs
     hash = config.to_h
     
     # Ensure all keys are symbols (important for C extension compatibility)
@@ -121,7 +121,7 @@ class ServerConfigurationTest < Minitest::Test
   end
 
   def test_to_h_no_nil_values
-    config = Quicsilver::ServerConfiguration.new
+    config = fetch_server_configuration_with_certs
     hash = config.to_h
     
     # Ensure no nil values in the hash (critical for C extension)
@@ -138,12 +138,12 @@ class ServerConfigurationTest < Minitest::Test
   end
 
   def test_alpn_getter_method
-    config = Quicsilver::ServerConfiguration.new(nil, nil, { alpn: "custom-protocol" })
+    config = fetch_server_configuration_with_certs({ alpn: "custom-protocol" })
     assert_equal "custom-protocol", config.alpn
   end
 
   def test_attr_readers_exist
-    config = Quicsilver::ServerConfiguration.new
+    config = fetch_server_configuration_with_certs
     
     # Test that all expected attributes are readable
     assert_respond_to config, :cert_file
@@ -153,5 +153,11 @@ class ServerConfigurationTest < Minitest::Test
     assert_respond_to config, :peer_bidi_stream_count
     assert_respond_to config, :peer_unidi_stream_count
     assert_respond_to config, :alpn
+  end
+
+  private
+
+  def fetch_server_configuration_with_certs(options={})
+    Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path, options)
   end
 end

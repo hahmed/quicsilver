@@ -35,7 +35,7 @@ class ServerTest < Minitest::Test
 
   def test_initialize_with_custom_rack_app
     app = ->(env) { [200, {}, ["custom"]] }
-    server = Quicsilver::Server.new(4433, app: app)
+    server = create_server(4433, {}, app)
 
     assert_instance_of Quicsilver::Server, server
   end
@@ -91,16 +91,16 @@ class ServerTest < Minitest::Test
 
   private
 
-  def create_server(port=4433, options={})
+  def create_server(port=4433, options={}, app=nil)
     defaults = {
-      cert_file: "certificates/server.crt",
-      key_file: "certificates/server.key"
+      cert_file: cert_data_path + "/server.crt",
+      key_file: cert_data_path + "/server.key"
     }
 
     normalized_cert_file = options.delete(:cert_file) || defaults[:cert_file]
     normalized_key_file = options.delete(:key_file) || defaults[:key_file]
 
     server_config = options.delete(:server_configuration) || Quicsilver::ServerConfiguration.new(normalized_cert_file, normalized_key_file)
-    Quicsilver::Server.new(port, server_configuration: server_config, **options)
+    Quicsilver::Server.new(port, server_configuration: server_config, app: app, **options)
   end
 end
