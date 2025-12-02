@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "logger"
 require_relative "quicsilver/version"
 require_relative "quicsilver/client"
 require_relative "quicsilver/connection"
@@ -23,4 +24,20 @@ module Quicsilver
   class ServerError < Error; end
   class ConnectionError < Error; end
   class TimeoutError < Error; end
+
+  class << self
+    attr_writer :logger
+
+    def logger
+      @logger ||= default_logger
+    end
+
+    private
+
+    def default_logger
+      Logger.new($stdout, level: Logger::INFO).tap do |log|
+        log.progname = "Quicsilver"
+      end
+    end
+  end
 end

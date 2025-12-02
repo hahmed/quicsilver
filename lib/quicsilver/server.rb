@@ -258,8 +258,8 @@ module Quicsilver
         end
       end
     rescue => e
-      puts "❌ Ruby: Error handling request: #{e.class} - #{e.message}"
-      puts e.backtrace.first(5)
+      Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
+      Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
       error_response = encode_error_response(500, "Internal Server Error")
 
       Quicsilver.send_stream(stream.stream_handle, error_response, true) if stream.ready_to_send?

@@ -204,8 +204,8 @@ module Quicsilver
         end
       end
     rescue => e
-      puts "❌ Ruby: Error handling client stream: #{e.class} - #{e.message}"
-      puts e.backtrace.first(5)
+      Quicsilver.logger.error("Error handling client stream: #{e.class} - #{e.message}")
+      Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
     end
     
     private

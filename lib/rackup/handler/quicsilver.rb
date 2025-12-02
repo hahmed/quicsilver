@@ -30,9 +30,9 @@ module Quicsilver
           authority = Localhost::Authority.fetch
           cert_file = authority.certificate_path
           key_file = authority.key_path
-          puts "🔐 Using auto-generated certificates for localhost"
-          puts "   Cert: #{cert_file}"
-          puts "   Key: #{key_file}"
+          Quicsilver.logger.info("Using auto-generated certificates for localhost")
+          Quicsilver.logger.info("  Cert: #{cert_file}")
+          Quicsilver.logger.info("  Key: #{key_file}")
         end
       end
 
