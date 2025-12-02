@@ -11,13 +11,19 @@ class QuicStreamTest < Minitest::Test
   def test_append_data_uses_write_not_concatenation
     stream = Quicsilver::QuicStream.new(0)
 
-    # Append multiple chunks
     stream.append_data("chunk1")
     stream.append_data("chunk2")
     stream.append_data("chunk3")
 
-    stream.buffer.rewind
-    assert_equal "chunk1chunk2chunk3", stream.buffer.read
+    assert_equal "chunk1chunk2chunk3", stream.data
+  end
+
+  def test_data_returns_buffer_as_string
+    stream = Quicsilver::QuicStream.new(0)
+    stream.append_data("hello")
+
+    assert_instance_of String, stream.data
+    assert_equal "hello", stream.data
   end
 
   def test_append_data_handles_binary_data
@@ -27,8 +33,7 @@ class QuicStreamTest < Minitest::Test
     stream.append_data(binary)
     stream.append_data(binary)
 
-    stream.buffer.rewind
-    assert_equal binary + binary, stream.buffer.read
+    assert_equal binary + binary, stream.data
   end
 
   def test_clear_buffer_resets_position_and_content
@@ -48,8 +53,7 @@ class QuicStreamTest < Minitest::Test
     # Simulate 1000 chunks (1MB total) - should not create 1000 intermediate strings
     1000.times { stream.append_data(chunk) }
 
-    stream.buffer.rewind
-    assert_equal 1024 * 1000, stream.buffer.read.bytesize
+    assert_equal 1024 * 1000, stream.data.bytesize
   end
 
   def test_bidirectional_stream_detection

@@ -60,7 +60,7 @@ class ServerTest < Minitest::Test
     Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "test data")
 
     stream = server.connections[connection_handle].get_stream(stream_id)
-    assert_equal "test data", stream.buffer.string
+    assert_equal "test data", stream.data
   end
 
   def test_handle_stream_accumulates_data
@@ -79,7 +79,7 @@ class ServerTest < Minitest::Test
   
     connection = server.connections[connection_handle]
     stream = connection.get_stream(stream_id)
-    assert_equal "chunk1chunk2chunk3", stream.buffer.string
+    assert_equal "chunk1chunk2chunk3", stream.data
   end
 
   private

@@ -170,9 +170,9 @@ module Quicsilver
 
 
     def handle_control_stream(connection, stream)
-      return if stream.buffer.empty?
+      return if stream.data.empty?
 
-      case stream.buffer[0].ord
+      case stream.data[0].ord
       when 0x00 then connection.set_control_stream(stream.stream_id)
       when 0x02 then connection.set_qpack_encoder_stream(stream.stream_id)
       when 0x03 then connection.set_qpack_decoder_stream(stream.stream_id)
@@ -180,7 +180,7 @@ module Quicsilver
     end
 
     def handle_unidirectional_stream(connection, stream)
-      data = stream.buffer
+      data = stream.data
       return if data.empty?
 
       stream_type = data[0].ord
@@ -232,7 +232,7 @@ module Quicsilver
     end
 
     def handle_request(connection, stream)
-      parser = HTTP3::RequestParser.new(stream.buffer)
+      parser = HTTP3::RequestParser.new(stream.data)
       parser.parse
       env = parser.to_rack_env
 
