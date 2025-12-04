@@ -418,7 +418,10 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     VALUE peer_bidi_stream_count_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("peer_bidi_stream_count")));
     VALUE peer_unidi_stream_count_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("peer_unidi_stream_count")));
     VALUE alpn_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("alpn")));
-    
+    VALUE stream_recv_window_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("stream_recv_window")));
+    VALUE stream_recv_buffer_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("stream_recv_buffer")));
+    VALUE conn_flow_control_window_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("conn_flow_control_window")));
+
     QUIC_STATUS Status;
     HQUIC Configuration = NULL;
 
@@ -429,9 +432,12 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     uint32_t peer_bidi_stream_count = NUM2INT(peer_bidi_stream_count_val);
     uint32_t peer_unidi_stream_count = NUM2INT(peer_unidi_stream_count_val);
     const char* alpn_str = StringValueCStr(alpn_val);
+    uint32_t stream_recv_window = NUM2UINT(stream_recv_window_val);
+    uint32_t stream_recv_buffer = NUM2UINT(stream_recv_buffer_val);
+    uint32_t conn_flow_control_window = NUM2UINT(conn_flow_control_window_val);
 
     QUIC_SETTINGS Settings = {0};
-    Settings.IdleTimeoutMs = idle_timeout_ms; 
+    Settings.IdleTimeoutMs = idle_timeout_ms;
     Settings.IsSet.IdleTimeoutMs = TRUE;
     Settings.ServerResumptionLevel = server_resumption_level;
     Settings.IsSet.ServerResumptionLevel = TRUE;
@@ -439,6 +445,14 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     Settings.IsSet.PeerBidiStreamCount = TRUE;
     Settings.PeerUnidiStreamCount = peer_unidi_stream_count;
     Settings.IsSet.PeerUnidiStreamCount = TRUE;
+
+    // Flow control / backpressure settings
+    Settings.StreamRecvWindowDefault = stream_recv_window;
+    Settings.IsSet.StreamRecvWindowDefault = TRUE;
+    Settings.StreamRecvBufferDefault = stream_recv_buffer;
+    Settings.IsSet.StreamRecvBufferDefault = TRUE;
+    Settings.ConnFlowControlWindow = conn_flow_control_window;
+    Settings.IsSet.ConnFlowControlWindow = TRUE;
 
     QUIC_BUFFER Alpn = { (uint32_t)strlen(alpn_str), (uint8_t*)alpn_str };
     

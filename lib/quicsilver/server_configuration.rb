@@ -4,8 +4,8 @@ require "localhost"
 
 module Quicsilver
   class ServerConfiguration
-    attr_reader :cert_file, :key_file, :idle_timeout, :server_resumption_level, :peer_bidi_stream_count, 
-      :peer_unidi_stream_count
+    attr_reader :cert_file, :key_file, :idle_timeout, :server_resumption_level, :peer_bidi_stream_count,
+      :peer_unidi_stream_count, :stream_recv_window, :stream_recv_buffer, :conn_flow_control_window
 
     QUIC_SERVER_RESUME_AND_ZERORTT = 1
     QUIC_SERVER_RESUME_ONLY = 2
@@ -16,12 +16,24 @@ module Quicsilver
     DEFAULT_KEY_FILE = "certificates/server.key"
     DEFAULT_ALPN = "h3"
 
+    # Flow control defaults (msquic defaults)
+    # See: https://github.com/microsoft/msquic/blob/main/docs/Settings.md
+    DEFAULT_STREAM_RECV_WINDOW = 65_536        # 64KB - initial stream receive window
+    DEFAULT_STREAM_RECV_BUFFER = 4_096         # 4KB - stream buffer size
+    DEFAULT_CONN_FLOW_CONTROL_WINDOW = 16_777_216  # 16MB - connection-wide flow control
+
     def initialize(cert_file = nil, key_file = nil, options = {})
       @idle_timeout = options[:idle_timeout].nil? ? 10000 : options[:idle_timeout]
       @server_resumption_level = options[:server_resumption_level].nil? ? QUIC_SERVER_RESUME_AND_ZERORTT : options[:server_resumption_level]
       @peer_bidi_stream_count = options[:peer_bidi_stream_count].nil? ? 10 : options[:peer_bidi_stream_count]
       @peer_unidi_stream_count = options[:peer_unidi_stream_count].nil? ? 10 : options[:peer_unidi_stream_count]
       @alpn = options[:alpn].nil? ? DEFAULT_ALPN : options[:alpn]
+
+      # Flow control / backpressure settings
+      @stream_recv_window = options[:stream_recv_window].nil? ? DEFAULT_STREAM_RECV_WINDOW : options[:stream_recv_window]
+      @stream_recv_buffer = options[:stream_recv_buffer].nil? ? DEFAULT_STREAM_RECV_BUFFER : options[:stream_recv_buffer]
+      @conn_flow_control_window = options[:conn_flow_control_window].nil? ? DEFAULT_CONN_FLOW_CONTROL_WINDOW : options[:conn_flow_control_window]
+
       @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
       @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file
 
@@ -56,7 +68,10 @@ module Quicsilver
         server_resumption_level: @server_resumption_level,
         peer_bidi_stream_count: @peer_bidi_stream_count,
         peer_unidi_stream_count: @peer_unidi_stream_count,
-        alpn: alpn
+        alpn: alpn,
+        stream_recv_window: @stream_recv_window,
+        stream_recv_buffer: @stream_recv_buffer,
+        conn_flow_control_window: @conn_flow_control_window
       }
     end
   end

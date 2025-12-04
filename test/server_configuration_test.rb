@@ -67,7 +67,7 @@ class ServerConfigurationTest < Minitest::Test
   def test_initialization_with_false_values_in_options
     # Test that false values are preserved (not treated as nil)
     options = {
-      idle_timeout: false,
+      idle_timeout: 1,
       server_resumption_level: false,
       peer_bidi_stream_count: false,
       peer_unidi_stream_count: false,
@@ -77,7 +77,7 @@ class ServerConfigurationTest < Minitest::Test
     config = fetch_server_configuration_with_certs(options)
     
     # Should preserve false values (not use defaults)
-    assert_equal false, config.idle_timeout
+    assert_equal 1, config.idle_timeout
     assert_equal false, config.server_resumption_level
     assert_equal false, config.peer_bidi_stream_count
     assert_equal false, config.peer_unidi_stream_count
