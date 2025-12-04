@@ -60,6 +60,7 @@ typedef struct {
 } StreamContext;
 
 // Enqueue a callback event (thread-safe)
+// NOTE: Called from QUIC callback threads without GVL - cannot use Ruby API here
 static void
 enqueue_callback_event(HQUIC connection, void* connection_ctx, VALUE client_obj, const char* event_type, uint64_t stream_id, const char* data, size_t data_len)
 {
@@ -86,6 +87,16 @@ enqueue_callback_event(HQUIC connection, void* connection_ctx, VALUE client_obj,
         event_queue_tail = event;
     }
     pthread_mutex_unlock(&queue_mutex);
+}
+
+// Free a single event
+static void
+free_event(CallbackEvent* event)
+{
+    if (event == NULL) return;
+    free(event->event_type);
+    free(event->data);
+    free(event);
 }
 
 // Process all pending callback events (called from Ruby)
@@ -139,21 +150,22 @@ quicsilver_process_events(VALUE self)
                 handled = 1;
             }
         } else {
-            // Client event - call instance method directly
-            rb_funcall(event->client_obj, rb_intern("handle_stream_event"), 3,
-                ULL2NUM(event->stream_id),
-                rb_str_new_cstr(event->event_type),
-                rb_str_new(event->data, event->data_len));
-            handled = 1;
+            // Client event - validate object is a real Ruby object before calling
+            // This catches use-after-free when connection was closed but events still queued
+            if (RB_TYPE_P(event->client_obj, T_OBJECT)) {
+                rb_funcall(event->client_obj, rb_intern("handle_stream_event"), 3,
+                    ULL2NUM(event->stream_id),
+                    rb_str_new_cstr(event->event_type),
+                    rb_str_new(event->data, event->data_len));
+                handled = 1;
+            }
         }
 
         if (handled) {
             processed++;
         }
 
-        free(event->event_type);
-        free(event->data);
-        free(event);
+        free_event(event);
     }
 
     return INT2NUM(processed);
