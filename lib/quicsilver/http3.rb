@@ -174,6 +174,19 @@ module Quicsilver
         stream_type + settings
       end
 
+      # Build GOAWAY frame (RFC 9114 Section 7.2.6)
+      # stream_id: The last client-initiated bidirectional stream ID the server will process
+      def build_goaway_frame(stream_id)
+        frame_type = encode_varint(FRAME_GOAWAY)
+        payload = encode_varint(stream_id)
+        frame_length = encode_varint(payload.bytesize)
+
+        frame_type + frame_length + payload
+      end
+
+      # Maximum stream ID for initial GOAWAY (2^62 - 4, per RFC 9114)
+      MAX_STREAM_ID = (2**62) - 4
+
       # Decode variable-length integer (RFC 9000)
       # Returns [value, bytes_consumed]
       def decode_varint(bytes, offset = 0)

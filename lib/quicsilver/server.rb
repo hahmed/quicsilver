@@ -2,7 +2,7 @@
 
 module Quicsilver
   class Server
-    attr_reader :address, :port, :server_configuration, :running, :connections
+    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down
 
     STREAM_EVENT_RECEIVE = "RECEIVE"
     STREAM_EVENT_RECEIVE_FIN = "RECEIVE_FIN"
@@ -27,8 +27,10 @@ module Quicsilver
       @app = app || default_rack_app
       @server_configuration = server_configuration || ServerConfiguration.new
       @running = false
+      @shutting_down = false
       @listener_data = nil
       @connections = {}
+      @request_registry = RequestRegistry.new
 
       self.class.instance = self
     end
@@ -94,13 +96,61 @@ module Quicsilver
       @running
     end
 
+    # Graceful shutdown: send GOAWAY, wait for in-flight requests, then stop
+    def shutdown(timeout: 30)
+      return unless @running
+      return if @shutting_down
+
+      @shutting_down = true
+      Quicsilver.logger.info("Initiating graceful shutdown (timeout: #{timeout}s)")
+
+      # Phase 1: Send GOAWAY with max stream ID to all connections
+      # This tells clients to stop sending new requests
+      @connections.each_value do |connection|
+        send_goaway(connection, HTTP3::MAX_STREAM_ID)
+      end
+
+      # Phase 2: Wait for in-flight requests to drain
+      deadline = Time.now + timeout
+      until @request_registry.empty? || Time.now > deadline
+        sleep 0.1
+      end
+
+      # Log any requests that didn't complete
+      unless @request_registry.empty?
+        @request_registry.active_requests.each do |stream_id, req|
+          elapsed = Time.now - req[:started_at]
+          Quicsilver.logger.warn("Force-closing request: #{req[:method]} #{req[:path]} (stream: #{stream_id}, elapsed: #{elapsed.round(2)}s)")
+        end
+      end
+
+      # Phase 3: Send final GOAWAY with actual last stream ID and shutdown connections
+      @connections.each_value do |connection|
+        last_stream_id = connection.streams.keys.select { |id| (id & 0x02) == 0 }.max || 0
+        send_goaway(connection, last_stream_id)
+
+        # Graceful QUIC shutdown (sends CONNECTION_CLOSE to peer)
+        Quicsilver.connection_shutdown(connection.handle, 0, false)
+      end
+
+      # Give connections a moment to close gracefully
+      sleep 0.1
+
+      # Phase 4: Hard stop
+      stop
+      @shutting_down = false
+
+      Quicsilver.logger.info("Graceful shutdown complete")
+    end
+
     def handle_stream_event(connection_data, stream_id, event, data)
       connection_handle = connection_data[0]
 
       case event
       when STREAM_EVENT_CONNECTION_ESTABLISHED
-        @connections[connection_handle] = Connection.new(connection_handle, connection_data)
-        setup_http3_streams(connection_data)
+        connection = Connection.new(connection_handle, connection_data)
+        @connections[connection_handle] = connection
+        setup_http3_streams(connection)
       when STREAM_EVENT_CONNECTION_CLOSED
         @connections.delete(connection_handle)&.streams&.clear
       when STREAM_EVENT_SEND_COMPLETE
@@ -155,11 +205,14 @@ module Quicsilver
       end
     end
 
-    def setup_http3_streams(connection_data)
-      # Send control stream (required)
-      stream = Quicsilver.open_stream(connection_data, true)
+    def setup_http3_streams(connection)
+      connection_data = connection.data
+
+      # Send control stream (required) - store handle for GOAWAY
+      control_stream = Quicsilver.open_stream(connection_data, true)
       control_data = HTTP3.build_control_stream
-      Quicsilver.send_stream(stream, control_data, false)
+      Quicsilver.send_stream(control_stream, control_data, false)
+      connection.server_control_stream = control_stream
 
       # Open QPACK encoder/decoder streams (required)
       [0x02, 0x03].each do |type|
@@ -237,6 +290,14 @@ module Quicsilver
       env = parser.to_rack_env
 
       if env && @app
+        # Track request
+        @request_registry.track(
+          stream.stream_id,
+          connection.handle,
+          path: env["PATH_INFO"] || "/",
+          method: env["REQUEST_METHOD"] || "GET"
+        )
+
         # Call Rack app
         status, headers, body = @app.call(env)
 
@@ -248,8 +309,11 @@ module Quicsilver
         if stream.ready_to_send?
           Quicsilver.send_stream(stream.stream_handle, response_data, true)
         else
-          raise "❌ Ruby: Stream handle not found for stream #{stream.stream_id}"
+          raise "Stream handle not found for stream #{stream.stream_id}"
         end
+
+        # Mark request complete
+        @request_registry.complete(stream.stream_id)
       else
         # failed to parse request
         if stream.ready_to_send?
@@ -263,12 +327,24 @@ module Quicsilver
       error_response = encode_error_response(500, "Internal Server Error")
 
       Quicsilver.send_stream(stream.stream_handle, error_response, true) if stream.ready_to_send?
+    ensure
+      # Always complete the request, even on error
+      @request_registry.complete(stream.stream_id) if @request_registry.include?(stream.stream_id)
     end
 
     def encode_error_response(status, message)
       body = ["#{status} #{message}"]
       encoder = HTTP3::ResponseEncoder.new(status, {"content-type" => "text/plain"}, body)
       encoder.encode
+    end
+
+    def send_goaway(connection, stream_id)
+      return unless connection.server_control_stream
+
+      goaway_frame = HTTP3.build_goaway_frame(stream_id)
+      Quicsilver.send_stream(connection.server_control_stream, goaway_frame, false)
+    rescue => e
+      Quicsilver.logger.error("Failed to send GOAWAY to connection #{connection.handle}: #{e.message}")
     end
   end
 end

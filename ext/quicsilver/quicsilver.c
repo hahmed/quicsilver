@@ -68,8 +68,8 @@ enqueue_callback_event(HQUIC connection, void* connection_ctx, VALUE client_obj,
     if (event == NULL) return;
 
     event->connection = connection;
-    event->connection_ctx = connection_ctx;  // Store context pointer
-    event->client_obj = client_obj;          // Can be Qnil for server events
+    event->connection_ctx = connection_ctx;
+    event->client_obj = client_obj;  // Store raw VALUE - will validate before use
     event->event_type = strdup(event_type);
     event->stream_id = stream_id;
     event->data = (char*)malloc(data_len);
@@ -305,13 +305,14 @@ ListenerCallback(HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event)
 
                 // Set the connection callback
                 MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, (void*)ConnectionCallback, conn_ctx);
-                
+
                 // Accept the new connection with the server configuration
                 QUIC_STATUS Status = MsQuic->ConnectionSetConfiguration(Event->NEW_CONNECTION.Connection, ctx->Configuration);
                 if (QUIC_FAILED(Status)) {
                     free(conn_ctx);
                     return Status;
                 }
+
             } else {
                 // Reject the connection if we can't allocate context
                 return QUIC_STATUS_OUT_OF_MEMORY;
@@ -593,15 +594,14 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
     if (MsQuic == NULL) {
         return Qnil;
     }
-    
+
     // Extract connection handle and context from array
     VALUE connection_handle = rb_ary_entry(connection_data, 0);
     VALUE context_handle = rb_ary_entry(connection_data, 1);
-    
+
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
     ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
-    
-    // Only close if connection is valid
+
     if (Connection != NULL) {
         MsQuic->ConnectionClose(Connection);
     }
@@ -614,8 +614,33 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
         }
         free(ctx);
     }
-    
+
     return Qnil;
+}
+
+// Gracefully shutdown a QUIC connection (sends CONNECTION_CLOSE frame to peer)
+// silent = true: immediate shutdown without notifying peer
+// silent = false: graceful shutdown with CONNECTION_CLOSE frame
+static VALUE
+quicsilver_connection_shutdown(VALUE self, VALUE connection_handle, VALUE error_code, VALUE silent)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
+    uint64_t ErrorCode = NUM2ULL(error_code);
+
+    if (Connection != NULL) {
+        QUIC_CONNECTION_SHUTDOWN_FLAGS flags = RTEST(silent)
+            ? QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT
+            : QUIC_CONNECTION_SHUTDOWN_FLAG_NONE;
+
+        MsQuic->ConnectionShutdown(Connection, flags, ErrorCode);
+    }
+
+    return Qtrue;
 }
 
 // Close a QUIC configuration
@@ -870,11 +895,12 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "create_server_configuration", quicsilver_create_server_configuration, 1);
     rb_define_singleton_method(mQuicsilver, "close_configuration", quicsilver_close_configuration, 1);
     
-    // Connection management  
+    // Connection management
     rb_define_singleton_method(mQuicsilver, "create_connection", quicsilver_create_connection, 1);
     rb_define_singleton_method(mQuicsilver, "start_connection", quicsilver_start_connection, 4);
     rb_define_singleton_method(mQuicsilver, "wait_for_connection", quicsilver_wait_for_connection, 2);
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
+    rb_define_singleton_method(mQuicsilver, "connection_shutdown", quicsilver_connection_shutdown, 3);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
     
     // Listener management

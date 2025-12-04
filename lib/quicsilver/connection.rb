@@ -4,6 +4,7 @@ module Quicsilver
   class Connection
     attr_reader :handle, :data, :control_stream_id, :qpack_encoder_stream_id, :qpack_decoder_stream_id
     attr_reader :streams
+    attr_accessor :server_control_stream  # Handle for server's outbound control stream (used to send GOAWAY)
 
     def initialize(handle, data)
       @handle = handle
