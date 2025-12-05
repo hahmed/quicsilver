@@ -55,10 +55,16 @@ module Quicsilver
           env['HTTP_HOST'] = @headers[':authority']
         end
 
-        # Add regular headers as HTTP_*
         @headers.each do |name, value|
           next if name.start_with?(':')
-          env["HTTP_#{name.upcase.tr('-', '_')}"] = value
+          key = name.upcase.tr('-', '_')
+          if key == 'CONTENT_TYPE'
+            env['CONTENT_TYPE'] = value
+          elsif key == 'CONTENT_LENGTH'
+            env['CONTENT_LENGTH'] = value
+          else
+            env["HTTP_#{key}"] = value
+          end
         end
 
         env

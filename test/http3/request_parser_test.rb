@@ -60,7 +60,7 @@ class RequestParserTest < Minitest::Test
     assert_equal "HTTP/3", env["SERVER_PROTOCOL"]
     assert_equal "https", env["rack.url_scheme"]
     assert_equal body.bytesize.to_s, env["CONTENT_LENGTH"]
-    assert_equal "application/json", env["HTTP_CONTENT_TYPE"]
+    assert_equal "application/json", env["CONTENT_TYPE"]
     assert_equal body, env["rack.input"].read
 
   end
