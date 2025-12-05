@@ -300,16 +300,19 @@ module Quicsilver
 
         # Call Rack app
         status, headers, body = @app.call(env)
-
-        # Stream response - send frames as they're ready
         encoder = HTTP3::ResponseEncoder.new(status, headers, body)
 
-        if stream.ready_to_send?
+        raise "Stream handle not found for stream #{stream.stream_id}" unless stream.ready_to_send?
+
+        # Rack convention: body.to_ary means bufferable, otherwise stream
+        if body.respond_to?(:to_ary)
+          # Buffer mode - small responses (Arrays), send all at once
+          Quicsilver.send_stream(stream.stream_handle, encoder.encode, true)
+        else
+          # Stream mode - lazy bodies (ActionController::Live, SSE), send incrementally
           encoder.stream_encode do |frame_data, fin|
             Quicsilver.send_stream(stream.stream_handle, frame_data, fin) unless frame_data.empty? && !fin
           end
-        else
-          raise "Stream handle not found for stream #{stream.stream_id}"
         end
 
         # Mark request complete
