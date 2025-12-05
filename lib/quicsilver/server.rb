@@ -56,6 +56,7 @@ module Quicsilver
       @running = true
 
       Quicsilver.event_loop.start
+      Quicsilver.event_loop.join  # Block until shutdown
     rescue ServerConfigurationError, ServerListenerError => e
       cleanup_failed_server
       @running = false
@@ -84,6 +85,7 @@ module Quicsilver
         Quicsilver.close_listener([@listener_data.listener_handle, @listener_data.context_handle])
       end
 
+      Quicsilver.event_loop.stop  # Stop event loop so start unblocks
       @running = false
       @listener_data = nil
     rescue => e

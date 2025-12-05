@@ -48,7 +48,6 @@ module Quicsilver
       yield server if block_given?
 
       server.start
-      server.wait_for_connections
     end
 
     def self.valid_options

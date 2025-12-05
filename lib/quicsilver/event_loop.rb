@@ -26,6 +26,10 @@ module Quicsilver
       @running = false
       @thread&.join(2)
     end
+
+    def join
+      @thread&.join
+    end
   end
 
   def self.event_loop

@@ -52,14 +52,7 @@ class QuicsilverTest < Minitest::Test
     client = Quicsilver::Client.new("localhost", 4434, connection_timeout: 5000)
     
     # Start server in a separate thread
-    server_thread = Thread.new do
-      begin
-        server.start
-        server.wait_for_connections(timeout: 2)
-      rescue => e
-        # Server errors are expected in test environment
-      end
-    end
+    server_thread = Thread.new { server.start }
     
     # Give server time to start
     sleep(0.5)
@@ -97,14 +90,7 @@ class QuicsilverTest < Minitest::Test
     end
     
     # Start server in a separate thread
-    server_thread = Thread.new do
-      begin
-        server.start
-        server.wait_for_connections(timeout: 3)
-      rescue => e
-        # Server errors are expected in test environment
-      end
-    end
+    server_thread = Thread.new { server.start }
     
     # Give server time to start
     sleep(0.5)
@@ -134,43 +120,19 @@ class QuicsilverTest < Minitest::Test
   end
 
   def test_server_restart_after_stop
-    server = Quicsilver::Server.new(4436, server_configuration: default_server_config) # Use different port
-    
-    # First start
-    begin
-      server.start
-      assert server.running?, "Server should be running after start"
-      
-      # Stop server
-      server.stop
-      assert !server.running?, "Server should not be running after stop"
-      
-      # Wait a moment for cleanup
-      sleep(0.2)
-      
-      # Restart server
-      server.start
-      assert server.running?, "Server should be running after restart"
-      
-    rescue Quicsilver::ServerError, Quicsilver::ServerConfigurationError => e
-      # Server errors are expected in test environment without proper setup
-      # We're mainly testing that the restart logic doesn't crash
-      assert_kind_of StandardError, e
-    ensure
-      # Final cleanup
-      server.stop if server.running?
-    end
-    
-    # Test that server can be started again after final stop
-    begin
-      server.start
-      assert server.running?, "Server should be running after final restart"
-    rescue Quicsilver::ServerError, Quicsilver::ServerConfigurationError => e
-      # Expected in test environment
-      assert_kind_of StandardError, e
-    ensure
-      server.stop if server.running?
-    end
+    server = Quicsilver::Server.new(4436, server_configuration: default_server_config)
+
+    # Start server in thread (since start blocks)
+    server_thread = Thread.new { server.start }
+    sleep 0.3
+
+    assert server.running?, "Server should be running after start"
+
+    # Stop server
+    server.stop
+    server_thread.join(2)
+
+    refute server.running?, "Server should not be running after stop"
   end
 
   private

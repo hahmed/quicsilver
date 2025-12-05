@@ -36,7 +36,6 @@ server = ::Quicsilver::Server.new(
 )
 
 puts "Starting Quicsilver on port #{port}..."
-server.start
 
 trap("INT") do
   puts "\nStopping server..."
@@ -44,4 +43,4 @@ trap("INT") do
   exit
 end
 
-sleep
+server.start  # Blocks until shutdown
