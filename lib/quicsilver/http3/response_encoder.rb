@@ -9,38 +9,50 @@ module Quicsilver
         @body = body
       end
 
+      # Buffered encode - returns all frames at once (legacy)
       def encode
         frames = "".b
-
-        # HEADERS frame
         frames << encode_headers_frame
-
-        # DATA frame(s)
         @body.each do |chunk|
           frames << encode_data_frame(chunk) unless chunk.empty?
         end
+        @body.close if @body.respond_to?(:close)
+        frames
+      end
+
+      # Streaming encode - yields frames as they're ready
+      def stream_encode
+        yield encode_headers_frame, false
+
+        last_chunk = nil
+        @body.each do |chunk|
+          yield encode_data_frame(last_chunk), false if last_chunk && !last_chunk.empty?
+          last_chunk = chunk
+        end
+
+        # Send final chunk with FIN=true
+        if last_chunk && !last_chunk.empty?
+          yield encode_data_frame(last_chunk), true
+        else
+          yield "".b, true  # Empty frame to signal FIN
+        end
 
         @body.close if @body.respond_to?(:close)
-
-        frames
       end
 
       private
 
       def encode_headers_frame
         payload = encode_qpack_response
-
         frame_type = HTTP3.encode_varint(HTTP3::FRAME_HEADERS)
         frame_length = HTTP3.encode_varint(payload.bytesize)
-
         frame_type + frame_length + payload
       end
 
       def encode_data_frame(data)
         frame_type = HTTP3.encode_varint(HTTP3::FRAME_DATA)
-        data_bytes = data.to_s.b  # Force to binary
+        data_bytes = data.to_s.b
         frame_length = HTTP3.encode_varint(data_bytes.bytesize)
-
         frame_type + frame_length + data_bytes
       end
 

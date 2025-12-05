@@ -222,6 +222,37 @@ class ResponseEncoderTest < Minitest::Test
     assert_equal '{"data":"test"}', parse_body(data)
   end
 
+  # Streaming tests
+  def test_stream_encode_yields_frames_with_fin_flags
+    enc = encoder(200, { "content-type" => "text/plain" }, ["Hello"])
+    frames = []
+    enc.stream_encode { |data, fin| frames << [data, fin] }
+
+    assert_equal 2, frames.size
+    assert_equal false, frames[0][1], "HEADERS should have FIN=false"
+    assert_equal true, frames[1][1], "Last DATA should have FIN=true"
+  end
+
+  def test_stream_encode_produces_same_result_as_buffered
+    body = ["chunk1", "chunk2", "chunk3"]
+    headers = { "content-type" => "text/plain" }
+
+    buffered = encoder(200, headers, body.dup).encode
+
+    streamed = "".b
+    encoder(200, headers, body.dup).stream_encode { |data, _fin| streamed << data }
+
+    assert_equal buffered, streamed, "Streaming should produce identical output"
+  end
+
+  def test_stream_encode_handles_empty_body
+    enc = encoder(204, {}, [])
+    frames = []
+    enc.stream_encode { |data, fin| frames << [data, fin] }
+
+    assert frames.last[1], "Should end with FIN=true"
+  end
+
   private
 
   def request(method, path, headers = {}, body = [])

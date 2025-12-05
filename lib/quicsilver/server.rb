@@ -301,13 +301,13 @@ module Quicsilver
         # Call Rack app
         status, headers, body = @app.call(env)
 
-        # Encode response
+        # Stream response - send frames as they're ready
         encoder = HTTP3::ResponseEncoder.new(status, headers, body)
-        response_data = encoder.encode
 
-        # Send response using stream handle
         if stream.ready_to_send?
-          Quicsilver.send_stream(stream.stream_handle, response_data, true)
+          encoder.stream_encode do |frame_data, fin|
+            Quicsilver.send_stream(stream.stream_handle, frame_data, fin) unless frame_data.empty? && !fin
+          end
         else
           raise "Stream handle not found for stream #{stream.stream_id}"
         end
