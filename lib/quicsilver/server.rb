@@ -156,7 +156,7 @@ module Quicsilver
       when STREAM_EVENT_CONNECTION_CLOSED
         @connections.delete(connection_handle)&.streams&.clear
       when STREAM_EVENT_SEND_COMPLETE
-        # TODO...
+        # Buffer cleanup handled in C extension
       when STREAM_EVENT_RECEIVE
         return unless connection = @connections[connection_handle]
 

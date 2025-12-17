@@ -209,6 +209,10 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             }
             break;
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
+            // Free the send buffer that was allocated in quicsilver_send_stream
+            if (Event->SEND_COMPLETE.ClientContext != NULL) {
+                free(Event->SEND_COMPLETE.ClientContext);
+            }
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
             ctx->shutdown = 1;
