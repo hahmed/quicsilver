@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    quicsilver (0.1.0)
+    quicsilver (0.2.0)
       localhost (~> 1.6)
       rack (~> 3.0)
       rackup (~> 2.0)
