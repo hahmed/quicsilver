@@ -15,8 +15,12 @@ task :setup do
 end
 
 task :build_msquic => :setup do
-  # Build MSQUIC using CMake with proper macOS framework linking
-  sh 'cd vendor/msquic && cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-framework CoreServices" -DCMAKE_SHARED_LINKER_FLAGS="-framework CoreServices"'
+  cmake_args = ['-B build', '-DCMAKE_BUILD_TYPE=Release']
+  if RUBY_PLATFORM =~ /darwin/
+    cmake_args << '-DCMAKE_EXE_LINKER_FLAGS="-framework CoreServices"'
+    cmake_args << '-DCMAKE_SHARED_LINKER_FLAGS="-framework CoreServices"'
+  end
+  sh "cd vendor/msquic && cmake #{cmake_args.join(' ')}"
   sh 'cd vendor/msquic && cmake --build build --config Release'
 end
 
