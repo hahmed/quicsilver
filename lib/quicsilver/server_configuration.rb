@@ -16,26 +16,22 @@ module Quicsilver
     DEFAULT_KEY_FILE = "certificates/server.key"
     DEFAULT_ALPN = "h3"
 
-    # Flow control defaults (msquic defaults)
-    # See: https://github.com/microsoft/msquic/blob/main/docs/Settings.md
-    DEFAULT_STREAM_RECV_WINDOW = 65_536        # 64KB - initial stream receive window
-    DEFAULT_STREAM_RECV_BUFFER = 4_096         # 4KB - stream buffer size
-    DEFAULT_CONN_FLOW_CONTROL_WINDOW = 16_777_216  # 16MB - connection-wide flow control
-
     def initialize(cert_file = nil, key_file = nil, options = {})
-      @idle_timeout = options[:idle_timeout].nil? ? 10000 : options[:idle_timeout]
-      @server_resumption_level = options[:server_resumption_level].nil? ? QUIC_SERVER_RESUME_AND_ZERORTT : options[:server_resumption_level]
-      @peer_bidi_stream_count = options[:peer_bidi_stream_count].nil? ? 10 : options[:peer_bidi_stream_count]
-      @peer_unidi_stream_count = options[:peer_unidi_stream_count].nil? ? 10 : options[:peer_unidi_stream_count]
-      @alpn = options[:alpn].nil? ? DEFAULT_ALPN : options[:alpn]
+      defaults = Quicsilver.config
+
+      @idle_timeout = option_or_default(options, :idle_timeout, defaults.idle_timeout)
+      @server_resumption_level = option_or_default(options, :server_resumption_level, QUIC_SERVER_RESUME_AND_ZERORTT)
+      @peer_bidi_stream_count = option_or_default(options, :peer_bidi_stream_count, defaults.max_streams)
+      @peer_unidi_stream_count = option_or_default(options, :peer_unidi_stream_count, defaults.max_streams)
+      @alpn = option_or_default(options, :alpn, DEFAULT_ALPN)
 
       # Flow control / backpressure settings
-      @stream_recv_window = options[:stream_recv_window].nil? ? DEFAULT_STREAM_RECV_WINDOW : options[:stream_recv_window]
-      @stream_recv_buffer = options[:stream_recv_buffer].nil? ? DEFAULT_STREAM_RECV_BUFFER : options[:stream_recv_buffer]
-      @conn_flow_control_window = options[:conn_flow_control_window].nil? ? DEFAULT_CONN_FLOW_CONTROL_WINDOW : options[:conn_flow_control_window]
+      @stream_recv_window = option_or_default(options, :stream_window_size, defaults.stream_window_size)
+      @stream_recv_buffer = option_or_default(options, :stream_buffer_size, defaults.stream_buffer_size)
+      @conn_flow_control_window = option_or_default(options, :connection_window_size, defaults.connection_window_size)
 
-      @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
-      @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file
+      @cert_file = cert_file || DEFAULT_CERT_FILE
+      @key_file = key_file || DEFAULT_KEY_FILE
 
       unless File.exist?(@cert_file)
         raise ServerConfigurationError, "Certificate file not found: #{@cert_file}"
@@ -73,6 +69,14 @@ module Quicsilver
         stream_recv_buffer: @stream_recv_buffer,
         conn_flow_control_window: @conn_flow_control_window
       }
+    end
+
+    private
+
+    # Returns option value if present and non-nil, otherwise default.
+    # Preserves explicit false values.
+    def option_or_default(options, key, default)
+      options.key?(key) && !options[key].nil? ? options[key] : default
     end
   end
 end

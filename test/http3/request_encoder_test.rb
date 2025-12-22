@@ -166,24 +166,28 @@ class RequestEncoderTest < Minitest::Test
   private
 
   def encoder(method, path, scheme: "https", authority: "localhost:4433", headers: {}, body: nil)
+    codec = Quicsilver::HTTP3::StaticQPACKCodec.new(nil)
     Quicsilver::HTTP3::RequestEncoder.new(
       method: method,
       path: path,
       scheme: scheme,
       authority: authority,
       headers: headers,
-      body: body
+      body: body,
+      codec: codec
     )
   end
 
   def assert_encoded_header(data, name, value)
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    codec = Quicsilver::HTTP3::StaticQPACKCodec.new(nil)
+    parser = Quicsilver::HTTP3::RequestParser.new(data, codec: codec)
     parser.parse
     assert_equal value, parser.headers[name], "Expected header #{name} to be #{value}"
   end
 
   def parse_body(data)
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    codec = Quicsilver::HTTP3::StaticQPACKCodec.new(nil)
+    parser = Quicsilver::HTTP3::RequestParser.new(data, codec: codec)
     parser.parse
     parser.body.read
   end

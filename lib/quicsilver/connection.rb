@@ -3,8 +3,8 @@
 module Quicsilver
   class Connection
     attr_reader :handle, :data, :control_stream_id, :qpack_encoder_stream_id, :qpack_decoder_stream_id
-    attr_reader :streams
-    attr_accessor :server_control_stream  # Handle for server's outbound control stream (used to send GOAWAY)
+    attr_reader :streams, :qpack_codec
+    attr_accessor :server_control_stream
 
     def initialize(handle, data)
       @handle = handle
@@ -13,6 +13,7 @@ module Quicsilver
       @control_stream_id = nil
       @qpack_encoder_stream_id = nil
       @qpack_decoder_stream_id = nil
+      @qpack_codec = Quicsilver.config.qpack_codec.new(self)
     end
 
     def set_qpack_encoder_stream(stream_id)

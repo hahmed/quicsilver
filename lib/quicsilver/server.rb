@@ -287,12 +287,12 @@ module Quicsilver
     end
 
     def handle_request(connection, stream)
-      parser = HTTP3::RequestParser.new(stream.data)
+      codec = connection.qpack_codec
+      parser = HTTP3::RequestParser.new(stream.data, codec: codec)
       parser.parse
       env = parser.to_rack_env
 
       if env && @app
-        # Track request
         @request_registry.track(
           stream.stream_id,
           connection.handle,
@@ -300,9 +300,8 @@ module Quicsilver
           method: env["REQUEST_METHOD"] || "GET"
         )
 
-        # Call Rack app
         status, headers, body = @app.call(env)
-        encoder = HTTP3::ResponseEncoder.new(status, headers, body)
+        encoder = HTTP3::ResponseEncoder.new(status, headers, body, codec: codec)
 
         raise "Stream handle not found for stream #{stream.stream_id}" unless stream.ready_to_send?
 
@@ -320,26 +319,24 @@ module Quicsilver
         # Mark request complete
         @request_registry.complete(stream.stream_id)
       else
-        # failed to parse request
         if stream.ready_to_send?
-          error_response = encode_error_response(400, "Bad Request")
+          error_response = encode_error_response(400, "Bad Request", codec)
           Quicsilver.send_stream(stream.stream_handle, error_response, true)
         end
       end
     rescue => e
       Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
       Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
-      error_response = encode_error_response(500, "Internal Server Error")
+      error_response = encode_error_response(500, "Internal Server Error", codec)
 
       Quicsilver.send_stream(stream.stream_handle, error_response, true) if stream.ready_to_send?
     ensure
-      # Always complete the request, even on error
       @request_registry.complete(stream.stream_id) if @request_registry.include?(stream.stream_id)
     end
 
-    def encode_error_response(status, message)
+    def encode_error_response(status, message, codec)
       body = ["#{status} #{message}"]
-      encoder = HTTP3::ResponseEncoder.new(status, {"content-type" => "text/plain"}, body)
+      encoder = HTTP3::ResponseEncoder.new(status, {"content-type" => "text/plain"}, body, codec: codec)
       encoder.encode
     end
 

@@ -259,12 +259,16 @@ class ResponseEncoderTest < Minitest::Test
     ecoder(status, headers, body).encode
   end
 
+  def codec
+    @codec ||= Quicsilver::HTTP3::StaticQPACKCodec.new(nil)
+  end
+
   def encoder(status, headers, body)
-    Quicsilver::HTTP3::ResponseEncoder.new(status, headers, body)
+    Quicsilver::HTTP3::ResponseEncoder.new(status, headers, body, codec: codec)
   end
 
   def parse_response(data)
-    parser = Quicsilver::HTTP3::ResponseParser.new(data)
+    parser = Quicsilver::HTTP3::ResponseParser.new(data, codec: codec)
     parser.parse
     parser
   end

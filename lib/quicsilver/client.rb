@@ -24,8 +24,9 @@ module Quicsilver
       @connection_data = nil
       @connected = false
       @connection_start_time = nil
+      @qpack_codec = Quicsilver.config.qpack_codec.new(nil)
 
-      @response_buffers = {}  # stream_id => accumulated data
+      @response_buffers = {}
       @pending_requests = {}
       @mutex = Mutex.new
     end
@@ -120,7 +121,8 @@ module Quicsilver
         scheme: "https",
         authority: authority,
         headers: headers,
-        body: body
+        body: body,
+        codec: @qpack_codec
       )
 
       stream = open_stream
@@ -189,7 +191,7 @@ module Quicsilver
           @stream_handles ||= {}
           @stream_handles[stream_id] = stream_handle if stream_handle
 
-          response_parser = Quicsilver::HTTP3::ResponseParser.new(full_data)
+          response_parser = HTTP3::ResponseParser.new(full_data, codec: @qpack_codec)
           response_parser.parse
 
           # Store complete response with body as string

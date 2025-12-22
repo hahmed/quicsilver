@@ -5,6 +5,10 @@ require_relative "../../lib/quicsilver/http3"
 require_relative "../../lib/quicsilver/http3/request_parser"
 
 class RequestParserTest < Minitest::Test
+  def codec
+    @codec ||= Quicsilver::HTTP3::StaticQPACKCodec.new(nil)
+  end
+
   def test_parses_get
     headers_payload = build_qpack_headers(
       ":method" => "GET",
@@ -13,7 +17,7 @@ class RequestParserTest < Minitest::Test
       ":path" => "/test",
       "user-agent" => "Quicsilver/1.0"
     )
-    parser = Quicsilver::HTTP3::RequestParser.new(build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload))
+    parser = Quicsilver::HTTP3::RequestParser.new(build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload), codec: codec)
     parser.parse
 
     assert_equal "GET", parser.headers[":method"]
@@ -30,7 +34,7 @@ class RequestParserTest < Minitest::Test
       ":path" => "/api"
     )
     data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload) + build_frame(Quicsilver::HTTP3::FRAME_DATA, "body content")
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::HTTP3::RequestParser.new(data, codec: codec)
     parser.parse
 
     assert_equal "POST", parser.headers[":method"]
@@ -47,7 +51,7 @@ class RequestParserTest < Minitest::Test
     )
     body = "test body".b
     data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload) + build_frame(Quicsilver::HTTP3::FRAME_DATA, body)
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::HTTP3::RequestParser.new(data, codec: codec)
     parser.parse
 
     env = parser.to_rack_env
@@ -62,15 +66,14 @@ class RequestParserTest < Minitest::Test
     assert_equal body.bytesize.to_s, env["CONTENT_LENGTH"]
     assert_equal "application/json", env["CONTENT_TYPE"]
     assert_equal body, env["rack.input"].read
-
   end
 
   def test_to_rack_env_returns_nil_when_no_headers
-    assert_nil Quicsilver::HTTP3::RequestParser.new("").tap(&:parse).to_rack_env
+    assert_nil Quicsilver::HTTP3::RequestParser.new("", codec: codec).tap(&:parse).to_rack_env
   end
 
   def test_parse_empty_data
-    parser = Quicsilver::HTTP3::RequestParser.new("")
+    parser = Quicsilver::HTTP3::RequestParser.new("", codec: codec)
     parser.parse
 
     assert_empty parser.frames
@@ -91,7 +94,7 @@ class RequestParserTest < Minitest::Test
     data += build_frame(Quicsilver::HTTP3::FRAME_DATA, "chunk2")
     data += build_frame(Quicsilver::HTTP3::FRAME_DATA, "chunk3")
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::HTTP3::RequestParser.new(data, codec: codec)
     parser.parse
 
     assert_equal "chunk1chunk2chunk3", parser.body.read
@@ -109,7 +112,7 @@ class RequestParserTest < Minitest::Test
     data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload)
     data += build_frame(Quicsilver::HTTP3::FRAME_DATA, body_data)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::HTTP3::RequestParser.new(data, codec: codec)
     parser.parse
 
     assert_equal 2, parser.frames.length

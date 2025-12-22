@@ -2,6 +2,7 @@
 
 require "logger"
 require_relative "quicsilver/version"
+require_relative "quicsilver/configuration"
 require_relative "quicsilver/client"
 require_relative "quicsilver/connection"
 require_relative "quicsilver/event_loop"
@@ -11,9 +12,11 @@ require_relative "quicsilver/request_registry"
 require_relative "quicsilver/server"
 require_relative "quicsilver/server_configuration"
 require_relative "quicsilver/http3"
+require_relative "quicsilver/http3/static_qpack_codec"
 require_relative "quicsilver/http3/request_parser"
 require_relative "quicsilver/http3/request_encoder"
 require_relative "quicsilver/http3/response_encoder"
+require_relative "quicsilver/http3/response_parser"
 require_relative "quicsilver/quicsilver"
 require_relative "rackup/handler/quicsilver"
 
@@ -28,6 +31,14 @@ module Quicsilver
 
   class << self
     attr_writer :logger
+
+    def config
+      @config ||= Configuration.new
+    end
+
+    def configure
+      yield(config)
+    end
 
     def logger
       @logger ||= default_logger
