@@ -110,6 +110,10 @@ module Quicsilver
       request("HEAD", path, **opts)
     end
 
+    def put(path, **opts)
+      request("PUT", path, **opts)
+    end
+
     def request(method, path, headers: {}, body: nil, timeout: 5000)
       raise NotConnectedError unless @connected
       response_queue = Queue.new

@@ -114,6 +114,22 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  def test_put_request
+    app = ->(env) { [200, {}, ["Updated"]] }
+
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    client.connect
+
+    response = client.put("/resource/123", body: '{"name":"updated"}')
+
+    assert_equal 200, response[:status]
+    assert_equal "Updated", response[:body]
+  ensure
+    client&.disconnect
+  end
+
   private
 
   def start_server(app)
