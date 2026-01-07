@@ -104,7 +104,7 @@ class HTTP3Test < Minitest::Test
     assert_equal 0x04, frame_type, "Frame type must be SETTINGS (0x04)"
 
     # Empty SETTINGS frame (length = 0) per RFC 9114 - uses defaults
-    frame_length, length_len = Quicsilver::HTTP3.decode_varint(bytes, 1 + type_len)
+    frame_length, _ = Quicsilver::HTTP3.decode_varint(bytes, 1 + type_len)
     assert_equal 0, frame_length, "SETTINGS frame should be empty (length 0)"
 
     # Total: 1 byte stream type + 1 byte frame type + 1 byte length = 3 bytes
