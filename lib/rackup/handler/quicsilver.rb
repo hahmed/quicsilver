@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-require "quicsilver"
 require "rackup/handler"
 require "localhost"
 
