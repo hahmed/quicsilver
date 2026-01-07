@@ -136,10 +136,11 @@ class RequestParserTest < Minitest::Test
         case name
         when ":method"
           index = value == "GET" ? Quicsilver::HTTP3::QPACK_METHOD_GET : Quicsilver::HTTP3::QPACK_METHOD_POST
-          payload += [0x80 | index].pack('C')
+          # RFC 9204: 0xC0 pattern for static table indexed field (T=1)
+          payload += [0xC0 | index].pack('C')
         when ":scheme"
           index = value == "https" ? Quicsilver::HTTP3::QPACK_SCHEME_HTTPS : Quicsilver::HTTP3::QPACK_SCHEME_HTTP
-          payload += [0x80 | index].pack('C')
+          payload += [0xC0 | index].pack('C')
         when ":authority"
           payload += [0x40 | Quicsilver::HTTP3::QPACK_AUTHORITY].pack('C')
           payload += Quicsilver::HTTP3.encode_varint(value.bytesize)
@@ -161,8 +162,9 @@ class RequestParserTest < Minitest::Test
 
   def encode_literal_header(name, value)
     result = "".b
-    result += [0x20 | (name.bytesize & 0x1F)].pack('C')
-    result += name.b
+    name_bytes = name.b
+    result += Quicsilver::HTTP3.encode_prefix_integer(name_bytes.bytesize, prefix_bits: 3, pattern: 0x20)
+    result += name_bytes
     result += Quicsilver::HTTP3.encode_varint(value.bytesize)
     result += value.b
     result

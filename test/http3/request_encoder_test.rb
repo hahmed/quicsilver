@@ -116,18 +116,18 @@ class RequestEncoderTest < Minitest::Test
   end
 
   def test_uses_indexed_field_for_common_methods
-    # GET and POST should use 0x80 | index (indexed field line)
+    # GET and POST should use 0xC0 | index (indexed field line, static table)
     data = encoder("GET", "/").encode
     bytes = data.bytes
 
-    # Skip frame header and QPACK prefix, first header byte should be 0x80 | 17
-    # This is a brittle test but verifies correct QPACK pattern
+    # Skip frame header and QPACK prefix, first header byte should be 0xC0 | 17
+    # RFC 9204: pattern 11xxxxxx (0xC0) for static table indexed field
     qpack_start = find_qpack_start(bytes)
     assert qpack_start, "Could not find QPACK prefix"
 
     first_header_byte = bytes[qpack_start + 2]
-    assert_equal 0x80 | Quicsilver::HTTP3::QPACK_METHOD_GET, first_header_byte,
-      "Should use indexed field line (0x80 | index) for :method GET"
+    assert_equal 0xC0 | Quicsilver::HTTP3::QPACK_METHOD_GET, first_header_byte,
+      "Should use indexed field line (0xC0 | index) for :method GET"
   end
 
   def test_uses_literal_with_name_ref_for_authority

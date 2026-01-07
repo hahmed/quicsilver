@@ -216,6 +216,54 @@ module Quicsilver
             bytes[offset + 6] << 8 | bytes[offset + 7], 8]
         end
       end
+
+      # Encode QPACK prefix integer (RFC 7541 Section 5.1)
+      # Used for encoding indices and lengths with N-bit prefixes
+      def encode_prefix_integer(value, prefix_bits:, pattern:)
+        max_prefix = (1 << prefix_bits) - 1
+
+        if value < max_prefix
+          [pattern | value].pack('C')
+        else
+          result = [pattern | max_prefix].pack('C')
+          remaining = value - max_prefix
+
+          while remaining >= 128
+            result << [(remaining & 0x7F) | 0x80].pack('C')
+            remaining >>= 7
+          end
+          result << [remaining].pack('C')
+
+          result
+        end
+      end
+
+      # Decode QPACK prefix integer (RFC 7541 Section 5.1)
+      # Returns [value, bytes_consumed]
+      def decode_prefix_integer(bytes, offset, prefix_bits)
+        max_prefix = (1 << prefix_bits) - 1
+
+        first_byte = bytes[offset]
+        value = first_byte & max_prefix
+        bytes_consumed = 1
+
+        if value == max_prefix
+          multiplier = 1
+          loop do
+            return [value, bytes_consumed] if offset + bytes_consumed >= bytes.size
+
+            next_byte = bytes[offset + bytes_consumed]
+            bytes_consumed += 1
+
+            value += (next_byte & 0x7F) * multiplier
+            break if (next_byte & 0x80) == 0
+
+            multiplier *= 128
+          end
+        end
+
+        [value, bytes_consumed]
+      end
     end
   end
 end
