@@ -34,44 +34,21 @@ module Quicsilver
       raise AlreadyConnectedError if @connected
 
       Quicsilver.open_connection
-      
       config = Quicsilver.create_configuration(@unsecure)
       raise ConnectionError, "Failed to create configuration" if config.nil?
 
-      # Create connection (returns [handle, context])
-      # Pass self so C extension can route callbacks to this instance
-      @connection_data = Quicsilver.create_connection(self)
-      raise ConnectionError, "Failed to create connection" if @connection_data.nil?
-      
-      connection_handle, context_handle = @connection_data
-
-      # Start the connection
-      success = Quicsilver.start_connection(connection_handle, config, @hostname, @port)
-      unless success
-        Quicsilver.close_configuration(config)
-        cleanup_failed_connection
-        raise ConnectionError, "Failed to start connection"
-      end
-
-      result = Quicsilver.wait_for_connection(context_handle, @connection_timeout)
-      handle_connection_result(result, config)
-      
+      start_connection(config)
       @connected = true
       @connection_start_time = Time.now
-
       send_control_stream
-      Quicsilver.close_configuration(config) # Clean up config since connection is established
-
       Quicsilver.event_loop.start
+
       self
     rescue => e
       cleanup_failed_connection
-      
-      if e.is_a?(ConnectionError) || e.is_a?(TimeoutError)
-        raise e
-      else
-        raise ConnectionError, "Connection failed: #{e.message}"
-      end
+      raise e.is_a?(ConnectionError) || e.is_a?(TimeoutError) ? e : ConnectionError.new("Connection failed: #{e.message}")
+    ensure
+      Quicsilver.close_configuration(config)
     end
     
     def disconnect
@@ -193,6 +170,26 @@ module Quicsilver
     end
     
     private
+
+    def start_connection(config)
+      connection_handle, context_handle = create_connection
+      unless Quicsilver.start_connection(connection_handle, config, @hostname, @port)
+        cleanup_failed_connection
+        raise ConnectionError, "Failed to start connection"
+      end
+
+      result = Quicsilver.wait_for_connection(context_handle, @connection_timeout)
+      handle_connection_result(result)
+    end
+
+    # Create connection (returns [handle, context])
+    # Pass self so C extension can route callbacks to this instance
+    def create_connection
+      @connection_data = Quicsilver.create_connection(self)
+      raise ConnectionError, "Failed to create connection" if @connection_data.nil?
+      
+      @connection_data
+    end
     
     def cleanup_failed_connection
       Quicsilver.close_connection_handle(@connection_data) if @connection_data
@@ -219,19 +216,13 @@ module Quicsilver
       @control_stream = stream
     end
 
-    def handle_connection_result(result, config)
-      if result.key?("error")
-        error_status = result["status"]
-        error_code = result["code"]
-        Quicsilver.close_configuration(config)
-        cleanup_failed_connection
-        error_msg = "Connection failed with status: 0x#{error_status.to_s(16)}, code: #{error_code}"
-        raise ConnectionError, error_msg
-      elsif result.key?("timeout")
-        Quicsilver.close_configuration(config)
-        cleanup_failed_connection
-        error_msg = "Connection timed out after #{@connection_timeout}ms"
-        raise TimeoutError, error_msg
+    def handle_connection_result(result)
+      if result.key?("error")                                                                                                                                                
+        cleanup_failed_connection                                                                                                                                            
+        raise ConnectionError, "Connection failed: status 0x#{result['status'].to_s(16)}, code: #{result['code']}"                                                           
+      elsif result.key?("timeout")                                                                                                                                           
+        cleanup_failed_connection                                                                                                                                            
+        raise TimeoutError, "Connection timed out after #{@connection_timeout}ms"                                                                                            
       end
     end
 
