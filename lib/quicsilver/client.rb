@@ -90,28 +90,8 @@ module Quicsilver
       @connection_data = nil
     end
 
-    def get(path, **opts)
-      request("GET", path, **opts)
-    end
-
-    def post(path, **opts)
-      request("POST", path, **opts)
-    end
-
-    def patch(path, **opts)
-      request("PATCH", path, **opts)
-    end
-
-    def delete(path, **opts)
-      request("DELETE", path, **opts)
-    end
-
-    def head(path, **opts)
-      request("HEAD", path, **opts)
-    end
-
-    def put(path, **opts)
-      request("PUT", path, **opts)
+    %i[get post patch delete head put].each do |method|                                                                                                                      
+      define_method(method) { |path, **opts| request(method.to_s.upcase, path, **opts) }                                                                                     
     end
 
     def request(method, path, headers: {}, body: nil, timeout: 5000)
