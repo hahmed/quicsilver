@@ -73,33 +73,16 @@ module Quicsilver
 
     def request(method, path, headers: {}, body: nil, timeout: 5000)
       raise NotConnectedError unless @connected
-      response_queue = Queue.new
-
-      request = HTTP3::RequestEncoder.new(
-        method: method,
-        path: path,
-        scheme: "https",
-        authority: authority,
-        headers: headers,
-        body: body
-      )
-
+      
       stream = open_stream
       raise StreamFailedToOpenError unless stream
 
-      @mutex.synchronize do
-        @pending_requests[stream] = response_queue
-      end
+      queue = Queue.new
+      @mutex.synchronize { @pending_requests[stream] = queue }
 
-      # Send data with FIN flag
-      result = Quicsilver.send_stream(stream, request.encode, true)
+      send_to_stream(method, path, headers, body, stream)
 
-      unless result
-        @mutex.synchronize { @pending_requests.delete(stream) }
-        raise Error, "Failed to send request"
-      end
-
-      response = response_queue.pop(timeout: timeout / 1000.0)
+      response = queue.pop(timeout: timeout / 1000.0)
 
       raise ConnectionError, "Connection closed" if response.nil? && !@connected
       raise TimeoutError, "Request timeout after #{timeout}ms" if response.nil?
@@ -231,6 +214,25 @@ module Quicsilver
       info["connected"] && !info["failed"]
     rescue
       false
+    end
+
+    def send_to_stream(stream, method, path, headers, body)
+      encoded_response = HTTP3::RequestEncoder.new(
+        method: method,
+        path: path,
+        scheme: "https",
+        authority: authority,
+        headers: headers,
+        body: body
+      ).encode
+
+      # Send data with FIN flag
+      result = Quicsilver.send_stream(stream, encoded_response, true)
+
+      unless result
+        @mutex.synchronize { @pending_requests.delete(stream) }
+        raise Error, "Failed to send request"
+      end
     end
   end
 end
