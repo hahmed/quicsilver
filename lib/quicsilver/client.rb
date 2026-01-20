@@ -80,7 +80,7 @@ module Quicsilver
       queue = Queue.new
       @mutex.synchronize { @pending_requests[stream] = queue }
 
-      send_to_stream(method, path, headers, body, stream)
+      send_to_stream(stream, method, path, headers, body)
 
       response = queue.pop(timeout: timeout / 1000.0)
 
