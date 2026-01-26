@@ -145,7 +145,7 @@ module Quicsilver
       Quicsilver.logger.info("Graceful shutdown complete")
     end
 
-    def handle_stream_event(connection_data, stream_id, event, data)
+    def handle_stream_event(connection_data, stream_id, event, data) # :nodoc:
       connection_handle = connection_data[0]
 
       case event

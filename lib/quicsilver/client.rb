@@ -113,7 +113,7 @@ module Quicsilver
     # Called directly by C extension via process_events
     # C extension routes to this instance based on client_obj stored in connection context
     # Clients should never call this method directly.
-    def handle_stream_event(stream_id, event, data)
+    def handle_stream_event(stream_id, event, data) # :nodoc:
       return unless FINISHED_EVENTS.include?(event)
 
       @mutex.synchronize do
