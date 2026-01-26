@@ -27,10 +27,5 @@ module Quicsilver
     def data
       @buffer.string
     end
-
-    def clear_buffer
-      @buffer.truncate(0)
-      @buffer.rewind
-    end
   end
 end

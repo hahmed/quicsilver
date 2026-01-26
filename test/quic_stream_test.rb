@@ -36,16 +36,6 @@ class QuicStreamTest < Minitest::Test
     assert_equal binary + binary, stream.data
   end
 
-  def test_clear_buffer_resets_position_and_content
-    stream = Quicsilver::QuicStream.new(0)
-    stream.append_data("some data")
-
-    stream.clear_buffer
-
-    assert_equal 0, stream.buffer.pos
-    assert_equal 0, stream.buffer.size
-  end
-
   def test_large_buffer_accumulation_no_memory_explosion
     stream = Quicsilver::QuicStream.new(0)
     chunk = "x" * 1024  # 1KB chunk
