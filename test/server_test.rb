@@ -76,10 +76,46 @@ class ServerTest < Minitest::Test
     Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk1")
     Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk2")
     Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk3")
-  
+
     connection = server.connections[connection_handle]
     stream = connection.get_stream(stream_id)
     assert_equal "chunk1chunk2chunk3", stream.data
+  end
+
+  def test_stats_returns_initial_values
+    server = create_server
+
+    stats = server.stats
+
+    assert_equal 0, stats[:connections][:active]
+    assert_equal 0, stats[:connections][:total]
+    assert_equal 0, stats[:requests][:active]
+    assert_equal 0, stats[:requests][:total]
+    assert_equal 0, stats[:requests][:failed]
+    assert_equal 0, stats[:streams][:active]
+    assert_equal 0, stats[:bytes][:sent]
+    assert_equal 0, stats[:bytes][:received]
+    assert_equal 0, stats[:uptime]
+    assert_nil stats[:started_at]
+  end
+
+  def test_stats_tracks_bytes_received
+    server = create_server(4433, app: ->(env) { [200, {}, ["OK"]] })
+    connection_handle = 12345
+    connection_data = [connection_handle, 67890]
+
+    server.connections[connection_handle] = Quicsilver::Connection.new(connection_handle, connection_data)
+
+    Quicsilver::Server.handle_stream(connection_data, 1, Quicsilver::Server::STREAM_EVENT_RECEIVE, "hello")
+    Quicsilver::Server.handle_stream(connection_data, 1, Quicsilver::Server::STREAM_EVENT_RECEIVE, "world")
+
+    assert_equal 10, server.stats[:bytes][:received]
+  end
+
+  def test_stats_string_format
+    server = create_server
+
+    assert_match(/^C=\d+\/\d+ R=\d+\/\d+ S=\d+ U=/, server.stats_string)
   end
 
   private

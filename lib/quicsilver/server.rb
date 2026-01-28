@@ -32,6 +32,15 @@ module Quicsilver
       @connections = {}
       @request_registry = RequestRegistry.new
 
+      # Stats tracking
+      @stats_mutex = Mutex.new
+      @started_at = nil
+      @stats_connections_total = 0
+      @stats_requests_total = 0
+      @stats_requests_failed = 0
+      @stats_bytes_sent = 0
+      @stats_bytes_received = 0
+
       self.class.instance = self
     end
 
@@ -54,6 +63,7 @@ module Quicsilver
       end
 
       @running = true
+      @started_at = Time.now
 
       Quicsilver.event_loop.start
       Quicsilver.event_loop.join  # Block until shutdown
@@ -145,6 +155,40 @@ module Quicsilver
       Quicsilver.logger.info("Graceful shutdown complete")
     end
 
+    def stats
+      @stats_mutex.synchronize do
+        {
+          connections: {
+            active: @connections.size,
+            total: @stats_connections_total
+          },
+          requests: {
+            active: @request_registry.active_count,
+            total: @stats_requests_total,
+            failed: @stats_requests_failed
+          },
+          streams: {
+            active: @connections.values.sum { |c| c.streams.size }
+          },
+          bytes: {
+            sent: @stats_bytes_sent,
+            received: @stats_bytes_received
+          },
+          uptime: @started_at ? Time.now - @started_at : 0,
+          started_at: @started_at&.iso8601
+        }
+      end
+    end
+
+    # Formatted stats string (like Puma's output)
+    def stats_string
+      s = stats
+      "C=#{s[:connections][:active]}/#{s[:connections][:total]} " \
+        "R=#{s[:requests][:active]}/#{s[:requests][:total]} " \
+        "S=#{s[:streams][:active]} " \
+        "U=#{format_uptime(s[:uptime])}"
+    end
+
     def handle_stream_event(connection_data, stream_id, event, data) # :nodoc:
       connection_handle = connection_data[0]
 
@@ -153,6 +197,7 @@ module Quicsilver
         connection = Connection.new(connection_handle, connection_data)
         @connections[connection_handle] = connection
         setup_http3_streams(connection)
+        track_connection_opened
       when STREAM_EVENT_CONNECTION_CLOSED
         @connections.delete(connection_handle)&.streams&.clear
       when STREAM_EVENT_SEND_COMPLETE
@@ -163,6 +208,7 @@ module Quicsilver
         stream = connection.get_stream(stream_id) || QuicStream.new(stream_id)
         connection.add_stream(stream) unless connection.get_stream(stream_id)
         stream.append_data(data)
+        track_bytes_received(data.bytesize)
       when STREAM_EVENT_RECEIVE_FIN
         return unless connection = @connections[connection_handle]
 
@@ -173,6 +219,7 @@ module Quicsilver
         stream = connection.get_stream(stream_id) || QuicStream.new(stream_id)
         stream.stream_handle = stream_handle
         stream.append_data(actual_data)
+        track_bytes_received(actual_data.bytesize) if actual_data.bytesize > 0
 
         if stream.bidirectional?
           handle_request(connection, stream)
@@ -287,6 +334,8 @@ module Quicsilver
     end
 
     def handle_request(connection, stream)
+      track_request_started
+
       parser = HTTP3::RequestParser.new(stream.data)
       parser.parse
       env = parser.to_rack_env
@@ -309,11 +358,16 @@ module Quicsilver
         # Rack convention: body.to_ary means bufferable, otherwise stream
         if body.respond_to?(:to_ary)
           # Buffer mode - small responses (Arrays), send all at once
-          Quicsilver.send_stream(stream.stream_handle, encoder.encode, true)
+          response_data = encoder.encode
+          Quicsilver.send_stream(stream.stream_handle, response_data, true)
+          track_bytes_sent(response_data.bytesize)
         else
           # Stream mode - lazy bodies (ActionController::Live, SSE), send incrementally
           encoder.stream_encode do |frame_data, fin|
-            Quicsilver.send_stream(stream.stream_handle, frame_data, fin) unless frame_data.empty? && !fin
+            unless frame_data.empty? && !fin
+              Quicsilver.send_stream(stream.stream_handle, frame_data, fin)
+              track_bytes_sent(frame_data.bytesize)
+            end
           end
         end
 
@@ -321,17 +375,23 @@ module Quicsilver
         @request_registry.complete(stream.stream_id)
       else
         # failed to parse request
+        track_request_failed
         if stream.ready_to_send?
           error_response = encode_error_response(400, "Bad Request")
           Quicsilver.send_stream(stream.stream_handle, error_response, true)
+          track_bytes_sent(error_response.bytesize)
         end
       end
     rescue => e
+      track_request_failed
       Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
       Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
       error_response = encode_error_response(500, "Internal Server Error")
 
-      Quicsilver.send_stream(stream.stream_handle, error_response, true) if stream.ready_to_send?
+      if stream.ready_to_send?
+        Quicsilver.send_stream(stream.stream_handle, error_response, true)
+        track_bytes_sent(error_response.bytesize)
+      end
     ensure
       # Always complete the request, even on error
       @request_registry.complete(stream.stream_id) if @request_registry.include?(stream.stream_id)
@@ -350,6 +410,43 @@ module Quicsilver
       Quicsilver.send_stream(connection.server_control_stream, goaway_frame, false)
     rescue => e
       Quicsilver.logger.error("Failed to send GOAWAY to connection #{connection.handle}: #{e.message}")
+    end
+
+    # Stats tracking helpers (thread-safe)
+    def track_connection_opened
+      @stats_mutex.synchronize { @stats_connections_total += 1 }
+    end
+
+    def track_request_started
+      @stats_mutex.synchronize { @stats_requests_total += 1 }
+    end
+
+    def track_request_failed
+      @stats_mutex.synchronize { @stats_requests_failed += 1 }
+    end
+
+    def track_bytes_sent(bytes)
+      @stats_mutex.synchronize { @stats_bytes_sent += bytes }
+    end
+
+    def track_bytes_received(bytes)
+      @stats_mutex.synchronize { @stats_bytes_received += bytes }
+    end
+
+    def format_uptime(seconds)
+      return "0s" unless seconds.positive?
+
+      days, remainder = seconds.divmod(86400)
+      hours, remainder = remainder.divmod(3600)
+      minutes, secs = remainder.divmod(60)
+
+      parts = []
+      parts << "#{days.to_i}d" if days >= 1
+      parts << "#{hours.to_i}h" if hours >= 1
+      parts << "#{minutes.to_i}m" if minutes >= 1
+      parts << "#{secs.to_i}s" if parts.empty? || secs >= 1
+
+      parts.join
     end
   end
 end
