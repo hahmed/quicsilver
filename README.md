@@ -75,7 +75,7 @@ server = Quicsilver::Server.new(4433,
 
 ```bash
 rake compile  # Build C extension
-rake test     # Run tests (122 passing)
+rake test     # Run tests
 rake clean    # Clean build artifacts
 ```
 
