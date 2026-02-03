@@ -13,7 +13,17 @@ module Quicsilver
     NotConnectedError = Class.new(StandardError)
     StreamFailedToOpenError = Class.new(StandardError)
 
-    FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE].freeze
+    # Raised when a stream is reset by the peer
+    class StreamResetError < StandardError
+      attr_reader :error_code
+
+      def initialize(message, error_code = 0)
+        @error_code = error_code
+        super("#{message} (error code: 0x#{error_code.to_s(16)})")
+      end
+    end
+
+    FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING].freeze
 
     def initialize(hostname, port = 4433, options = {})
       @hostname = hostname
@@ -73,12 +83,16 @@ module Quicsilver
 
     def request(method, path, headers: {}, body: nil, timeout: 5000)
       raise NotConnectedError unless @connected
-      
+
       stream = open_stream
       raise StreamFailedToOpenError unless stream
 
       queue = Queue.new
-      @mutex.synchronize { @pending_requests[stream] = queue }
+      @mutex.synchronize do
+        @pending_requests[stream] = queue
+        @stream_handles ||= {}
+        @stream_handles[queue.object_id] = stream  # Track for potential cancellation
+      end
 
       send_to_stream(stream, method, path, headers, body)
 
@@ -87,9 +101,28 @@ module Quicsilver
       raise ConnectionError, "Connection closed" if response.nil? && !@connected
       raise TimeoutError, "Request timeout after #{timeout}ms" if response.nil?
 
+      # Handle stream error responses
+      if response.is_a?(Hash) && response[:error]
+        case response[:error]
+        when :stream_reset
+          raise StreamResetError.new("Stream reset by server", response[:error_code])
+        when :stop_sending
+          raise StreamResetError.new("Server sent STOP_SENDING", response[:error_code])
+        end
+      end
+
       response
     rescue Timeout::Error
       @mutex.synchronize { @pending_requests.delete(stream) } if stream
+    end
+
+    # Cancel a pending request by resetting its stream
+    # @param stream_handle [Integer] the stream handle from open_stream
+    # @param error_code [Integer] HTTP/3 error code (default: H3_REQUEST_CANCELLED)
+    def cancel_request(stream_handle, error_code = HTTP3::H3_REQUEST_CANCELLED)
+      raise NotConnectedError unless @connected
+
+      Quicsilver.stream_reset(stream_handle, error_code)
     end
 
     def connected?
@@ -127,9 +160,9 @@ module Quicsilver
 
           # Get all buffered data
           buffer = @response_buffers.delete(stream_id)
-          full_data = ( buffer&.string || "") + actual_data
+          full_data = (buffer&.string || "") + actual_data
 
-          # TODO: needed for streaming later
+          # Store handle for potential stream operations
           @stream_handles ||= {}
           @stream_handles[stream_id] = stream_handle if stream_handle
 
@@ -145,6 +178,28 @@ module Quicsilver
 
           queue = @pending_requests.delete(stream_handle)
           queue&.push(response)  # Unblocks request
+        when "STREAM_RESET"
+          # Server reset the stream - extract error code and notify waiting request
+          error_code = data.unpack1("Q<")
+          Quicsilver.logger.debug { "Stream #{stream_id} reset by server with error code 0x#{error_code.to_s(16)}" }
+
+          @response_buffers.delete(stream_id)
+
+          # Find and notify any pending request
+          @stream_handles ||= {}
+          stream_handle = @stream_handles.delete(stream_id)
+          queue = @pending_requests.delete(stream_handle) if stream_handle
+          queue&.push({ error: :stream_reset, error_code: error_code })
+        when "STOP_SENDING"
+          # Server doesn't want our data - typically means request was rejected
+          error_code = data.unpack1("Q<")
+          Quicsilver.logger.debug { "Stream #{stream_id} received STOP_SENDING with error code 0x#{error_code.to_s(16)}" }
+
+          @response_buffers.delete(stream_id)
+          @stream_handles ||= {}
+          stream_handle = @stream_handles.delete(stream_id)
+          queue = @pending_requests.delete(stream_handle) if stream_handle
+          queue&.push({ error: :stop_sending, error_code: error_code })
         end
       end
     rescue => e

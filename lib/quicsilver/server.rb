@@ -9,6 +9,8 @@ module Quicsilver
     STREAM_EVENT_CONNECTION_ESTABLISHED = "CONNECTION_ESTABLISHED"
     STREAM_EVENT_SEND_COMPLETE = "SEND_COMPLETE"
     STREAM_EVENT_CONNECTION_CLOSED = "CONNECTION_CLOSED"
+    STREAM_EVENT_STREAM_RESET = "STREAM_RESET"
+    STREAM_EVENT_STOP_SENDING = "STOP_SENDING"
 
     ServerStopError = Class.new(StandardError)
 
@@ -181,6 +183,25 @@ module Quicsilver
         end
 
         connection.remove_stream(stream_id)
+      when STREAM_EVENT_STREAM_RESET
+        # Peer aborted the stream - clean up any pending request
+        return unless connection = @connections[connection_handle]
+
+        error_code = data.unpack1("Q<")
+        Quicsilver.logger.debug { "Stream #{stream_id} reset by peer with error code 0x#{error_code.to_s(16)}" }
+
+        @request_registry.complete(stream_id)
+        connection.remove_stream(stream_id)
+      when STREAM_EVENT_STOP_SENDING
+        # Peer doesn't want our data anymore - stop sending on this stream
+        return unless connection = @connections[connection_handle]
+
+        error_code = data.unpack1("Q<")
+        Quicsilver.logger.debug { "Stream #{stream_id} received STOP_SENDING with error code 0x#{error_code.to_s(16)}" }
+
+        # If we have a stream handle, we could abort our send here
+        # For now just log and clean up
+        connection.remove_stream(stream_id)
       end
     end
 
@@ -341,6 +362,30 @@ module Quicsilver
       body = ["#{status} #{message}"]
       encoder = HTTP3::ResponseEncoder.new(status, {"content-type" => "text/plain"}, body)
       encoder.encode
+    end
+
+    # Reset a stream with an HTTP/3 error code
+    # @param stream [QuicStream] the stream to reset
+    # @param error_code [Integer] HTTP/3 error code (default: H3_REQUEST_CANCELLED)
+    def reset_stream(stream, error_code = HTTP3::H3_REQUEST_CANCELLED)
+      return unless stream.stream_handle
+
+      Quicsilver.stream_reset(stream.stream_handle, error_code)
+      Quicsilver.logger.debug { "Reset stream #{stream.stream_id} with error code 0x#{error_code.to_s(16)}" }
+    rescue => e
+      Quicsilver.logger.error("Failed to reset stream #{stream.stream_id}: #{e.message}")
+    end
+
+    # Send STOP_SENDING on a stream (tell peer to stop sending data)
+    # @param stream [QuicStream] the stream
+    # @param error_code [Integer] HTTP/3 error code (default: H3_REQUEST_CANCELLED)
+    def stop_sending(stream, error_code = HTTP3::H3_REQUEST_CANCELLED)
+      return unless stream.stream_handle
+
+      Quicsilver.stream_stop_sending(stream.stream_handle, error_code)
+      Quicsilver.logger.debug { "Sent STOP_SENDING on stream #{stream.stream_id} with error code 0x#{error_code.to_s(16)}" }
+    rescue => e
+      Quicsilver.logger.error("Failed to send STOP_SENDING on stream #{stream.stream_id}: #{e.message}")
     end
 
     def send_goaway(connection, stream_id)
