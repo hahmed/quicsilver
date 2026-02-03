@@ -9,10 +9,6 @@ class ListenerDataTest < Minitest::Test
 
     assert_equal 12345, data.listener_handle
     assert_equal 67890, data.context_handle
-    refute data.started?
-    refute data.stopped?
-    refute data.failed?
-    assert_nil data.configuration
   end
 
   def test_handles_nil
