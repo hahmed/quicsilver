@@ -5,8 +5,8 @@ class ServerConfigurationTest < Minitest::Test
   def test_default_initialization
     config = fetch_server_configuration_with_certs
     
-    assert_equal cert_data_path + "/server.crt", config.cert_file
-    assert_equal cert_data_path + "/server.key", config.key_file
+    assert_equal cert_file_path, config.cert_file
+    assert_equal key_file_path, config.key_file
     assert_equal 10000, config.idle_timeout
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
     assert_equal 10, config.peer_bidi_stream_count
@@ -93,8 +93,8 @@ class ServerConfigurationTest < Minitest::Test
     hash = config.to_h
     
     assert_kind_of Hash, hash
-    assert_equal cert_data_path + "/server.crt", hash[:cert_file]
-    assert_equal cert_data_path + "/server.key", hash[:key_file]
+    assert_equal cert_file_path, hash[:cert_file]
+    assert_equal key_file_path, hash[:key_file]
     assert_equal 5000, hash[:idle_timeout]
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, hash[:server_resumption_level]
     assert_equal 10, hash[:peer_bidi_stream_count]

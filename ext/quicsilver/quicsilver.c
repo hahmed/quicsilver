@@ -219,8 +219,24 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
             break;
-        case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
+        case QUIC_STREAM_EVENT_PEER_SEND_ABORTED: {
+            // Peer sent RESET_STREAM - notify Ruby
+            uint64_t stream_id = 0;
+            uint32_t stream_id_len = sizeof(stream_id);
+            MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
+            uint64_t error_code = Event->PEER_SEND_ABORTED.ErrorCode;
+            enqueue_callback_event(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", stream_id, (const char*)&error_code, sizeof(error_code));
             break;
+        }
+        case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
+            // Peer sent STOP_SENDING - notify Ruby
+            uint64_t stream_id = 0;
+            uint32_t stream_id_len = sizeof(stream_id);
+            MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
+            uint64_t error_code = Event->PEER_RECEIVE_ABORTED.ErrorCode;
+            enqueue_callback_event(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", stream_id, (const char*)&error_code, sizeof(error_code));
+            break;
+        }
     }
 
     return QUIC_STATUS_SUCCESS;
@@ -746,9 +762,16 @@ quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALU
     // Setup address - properly initialize the entire structure
     QUIC_ADDR Address;
     memset(&Address, 0, sizeof(Address));
-    
-    // Set up for localhost/any address
-    QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_INET);
+
+    // Parse address string to determine family
+    const char* addr_str = StringValueCStr(address);
+    if (strchr(addr_str, ':') != NULL) {
+        // IPv6 address (contains ':')
+        QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_INET6);
+    } else {
+        // IPv4 address or unspecified - use UNSPEC for dual-stack
+        QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_UNSPEC);
+    }
     QuicAddrSetPort(&Address, Port);
     
     QUIC_STATUS Status;
@@ -896,7 +919,41 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data, VALUE send_f
     }
     
     return Qtrue;
-}  
+}
+
+// Reset a QUIC stream (RESET_STREAM frame - abruptly terminates sending)
+static VALUE
+quicsilver_stream_reset(VALUE self, VALUE stream_handle, VALUE error_code)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+
+    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    uint64_t ErrorCode = NUM2ULL(error_code);
+
+    MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND, ErrorCode);
+
+    return Qtrue;
+}
+
+// Stop sending on a QUIC stream (STOP_SENDING frame - requests peer to stop)
+static VALUE
+quicsilver_stream_stop_sending(VALUE self, VALUE stream_handle, VALUE error_code)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+
+    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    uint64_t ErrorCode = NUM2ULL(error_code);
+
+    MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, ErrorCode);
+
+    return Qtrue;
+}
 
 // Initialize the extension
 void
@@ -930,6 +987,8 @@ Init_quicsilver(void)
     // Stream management
     rb_define_singleton_method(mQuicsilver, "open_stream", quicsilver_open_stream, 2);
     rb_define_singleton_method(mQuicsilver, "send_stream", quicsilver_send_stream, 3);
+    rb_define_singleton_method(mQuicsilver, "stream_reset", quicsilver_stream_reset, 2);
+    rb_define_singleton_method(mQuicsilver, "stream_stop_sending", quicsilver_stream_stop_sending, 2);
 
     // Event processing
     rb_define_singleton_method(mQuicsilver, "process_events", quicsilver_process_events, 0);

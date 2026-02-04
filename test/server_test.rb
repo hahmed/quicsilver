@@ -54,13 +54,14 @@ class ServerTest < Minitest::Test
     connection_data = [connection_handle, 67890]
 
     # Manually create connection
-    server.connections[connection_handle] = Quicsilver::Connection.new(connection_handle, connection_data)
+    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    server.connections[connection_handle] = connection
 
-    # Now test receive
+    # Now test receive - data is buffered in Connection
     Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "test data")
 
-    stream = server.connections[connection_handle].get_stream(stream_id)
-    assert_equal "test data", stream.data
+    # Verify buffered data via complete_stream
+    assert_equal "test data", connection.complete_stream(stream_id, "")
   end
 
   def test_handle_stream_accumulates_data
@@ -70,28 +71,23 @@ class ServerTest < Minitest::Test
     connection_data = [connection_handle, 67890]
 
     # Manually create connection
-    server.connections[connection_handle] = Quicsilver::Connection.new(connection_handle, connection_data)
+    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    server.connections[connection_handle] = connection
 
-    # Send multiple chunks
+    # Send multiple chunks - data is buffered in Connection
     Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk1")
     Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk2")
     Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk3")
-  
-    connection = server.connections[connection_handle]
-    stream = connection.get_stream(stream_id)
-    assert_equal "chunk1chunk2chunk3", stream.data
+
+    # Verify accumulated data via complete_stream
+    assert_equal "chunk1chunk2chunk3", connection.complete_stream(stream_id, "")
   end
 
   private
 
   def create_server(port=4433, options={}, app=nil)
-    defaults = {
-      cert_file: cert_data_path + "/server.crt",
-      key_file: cert_data_path + "/server.key"
-    }
-
-    normalized_cert_file = options.delete(:cert_file) || defaults[:cert_file]
-    normalized_key_file = options.delete(:key_file) || defaults[:key_file]
+    normalized_cert_file = options.delete(:cert_file) || cert_file_path
+    normalized_key_file = options.delete(:key_file) || key_file_path
 
     server_config = options.delete(:server_configuration) || Quicsilver::ServerConfiguration.new(normalized_cert_file, normalized_key_file)
     Quicsilver::Server.new(port, server_configuration: server_config, app: app, **options)
