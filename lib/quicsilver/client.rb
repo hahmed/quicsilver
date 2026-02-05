@@ -8,7 +8,7 @@ require "timeout"
 
 module Quicsilver
   class Client
-    attr_reader :hostname, :port, :unsecure, :connection_timeout
+    attr_reader :hostname, :port, :unsecure, :connection_timeout, :request_timeout
 
     AlreadyConnectedError = Class.new(StandardError)
     NotConnectedError = Class.new(StandardError)
@@ -16,11 +16,15 @@ module Quicsilver
 
     FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING].freeze
 
+    DEFAULT_REQUEST_TIMEOUT = 30  # seconds
+    DEFAULT_CONNECTION_TIMEOUT = 5000  # ms
+
     def initialize(hostname, port = 4433, options = {})
       @hostname = hostname
       @port = port
       @unsecure = options.fetch(:unsecure, true)
-      @connection_timeout = options.fetch(:connection_timeout, 5000)
+      @connection_timeout = options.fetch(:connection_timeout, DEFAULT_CONNECTION_TIMEOUT)
+      @request_timeout = options.fetch(:request_timeout, DEFAULT_REQUEST_TIMEOUT)
 
       @connection_data = nil
       @connected = false
@@ -68,23 +72,26 @@ module Quicsilver
       @connection_data = nil
     end
 
-    # Blocking request methods
+    # HTTP methods - block gives you request control, no block returns response directly
+    #
+    #   # Simple (blocking)
+    #   response = client.get("/users")
+    #
+    #   # With control
+    #   client.get("/users") do |req|
+    #     req.cancel if should_abort?
+    #     req.response
+    #   end
+    #
     %i[get post patch delete head put].each do |method|
-      define_method(method) { |path, **opts| request(method.to_s.upcase, path, **opts) }
+      define_method(method) do |path, headers: {}, body: nil, &block|
+        req = build_request(method.to_s.upcase, path, headers: headers, body: body)
+        block ? block.call(req) : req.response
+      end
     end
 
-    # Async request methods - return Request object immediately
-    %i[get post patch delete head put].each do |method|
-      define_method(:"async_#{method}") { |path, **opts| async_request(method.to_s.upcase, path, **opts) }
-    end
-
-    # Blocking request - waits for response
-    def request(method, path, headers: {}, body: nil, timeout: 5000)
-      async_request(method, path, headers: headers, body: body).response(timeout: timeout / 1000.0)
-    end
-
-    # Async request - returns Request object immediately
-    def async_request(method, path, headers: {}, body: nil)
+    # Build and send request, returns Request object for lifecycle control
+    def build_request(method, path, headers: {}, body: nil)
       raise NotConnectedError unless @connected
 
       stream = open_stream

@@ -5,6 +5,7 @@ require "test_helper"
 class RequestTest < Minitest::Test
   def setup
     @mock_client = Object.new
+    def @mock_client.request_timeout; 30; end
     @stream_handle = 12345
     @request = Quicsilver::Request.new(@mock_client, @stream_handle)
   end

@@ -27,7 +27,8 @@ module Quicsilver
     # Block until response arrives or timeout
     # Returns response hash { status:, headers:, body: }
     # Raises TimeoutError, CancelledError, or ResetError
-    def response(timeout: 5)
+    def response(timeout: nil)
+      timeout ||= @client.request_timeout
       return @response if @status == :completed
 
       result = @queue.pop(timeout: timeout)
