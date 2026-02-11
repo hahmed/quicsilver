@@ -11,6 +11,30 @@ module Quicsilver
     FRAME_GOAWAY = 0x07
     FRAME_MAX_PUSH_ID = 0x0d
 
+    # HTTP/3 Error Codes (RFC 9114 Section 8.1)
+    H3_NO_ERROR = 0x100
+    H3_GENERAL_PROTOCOL_ERROR = 0x101
+    H3_INTERNAL_ERROR = 0x102
+    H3_STREAM_CREATION_ERROR = 0x103
+    H3_CLOSED_CRITICAL_STREAM = 0x104
+    H3_FRAME_UNEXPECTED = 0x105
+    H3_FRAME_ERROR = 0x106
+    H3_EXCESSIVE_LOAD = 0x107
+    H3_ID_ERROR = 0x108
+    H3_SETTINGS_ERROR = 0x109
+    H3_MISSING_SETTINGS = 0x10a
+    H3_REQUEST_REJECTED = 0x10b
+    H3_REQUEST_CANCELLED = 0x10c
+    H3_REQUEST_INCOMPLETE = 0x10d
+    H3_MESSAGE_ERROR = 0x10e
+    H3_CONNECT_ERROR = 0x10f
+    H3_VERSION_FALLBACK = 0x110
+
+    # QPACK Error Codes (RFC 9204 Section 6)
+    QPACK_DECOMPRESSION_FAILED = 0x200
+    QPACK_ENCODER_STREAM_ERROR = 0x201
+    QPACK_DECODER_STREAM_ERROR = 0x202
+
     # QPACK Static Table Indices (RFC 9204 Appendix A)
     STATIC_TABLE = [
       [':authority', ''],                                      # 0
@@ -134,6 +158,9 @@ module Quicsilver
     QPACK_CONTENT_TYPE_JSON = 46
     QPACK_CONTENT_TYPE_PLAIN = 53
 
+    # Maximum stream ID for initial GOAWAY (2^62 - 4, per RFC 9114)
+    MAX_STREAM_ID = (2**62) - 4
+
     class << self
       # Encode variable-length integer
       def encode_varint(value)
@@ -183,9 +210,6 @@ module Quicsilver
 
         frame_type + frame_length + payload
       end
-
-      # Maximum stream ID for initial GOAWAY (2^62 - 4, per RFC 9114)
-      MAX_STREAM_ID = (2**62) - 4
 
       # Decode variable-length integer (RFC 9000)
       # Returns [value, bytes_consumed]
