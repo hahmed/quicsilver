@@ -119,6 +119,30 @@ class StreamControlIntegrationTest < Minitest::Test
     assert slow_req.cancelled?
   end
 
+  def test_shutdown_with_stuck_request_drains_cleanly
+    request_started = Queue.new
+
+    app = ->(env) {
+      request_started.push(true)
+      sleep 999  # Intentionally blocks forever
+      [200, {}, ["never"]]
+    }
+
+    start_server_and_client(app)
+
+    # Fire a request that will never complete
+    response_thread = Thread.new { @client.get("/stuck") }
+    response_thread.report_on_exception = false
+    request_started.pop(timeout: 2)
+
+    # Shutdown with a short drain timeout — forces DrainTimeoutError
+    shutdown_thread = Thread.new { @server.shutdown(timeout: 2) }
+    shutdown_thread.join(10)
+
+    refute @server.running?, "Server should be stopped after shutdown"
+    assert @server.request_registry.empty?, "Request registry should be cleaned up"
+  end
+
   private
 
   def start_server_and_client(app)

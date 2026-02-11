@@ -13,6 +13,7 @@ module Quicsilver
     STREAM_EVENT_STOP_SENDING = "STOP_SENDING"
 
     ServerStopError = Class.new(StandardError)
+    DrainTimeoutError = Class.new(StandardError)
 
     class << self
       attr_accessor :instance
@@ -104,7 +105,7 @@ module Quicsilver
       @running
     end
 
-    # Wait for in-flight request handler threads to finish, then kill stragglers
+    # Wait for in-flight request handler threads to finish, then interrupt stragglers
     def drain(timeout: 5)
       threads = @handler_mutex.synchronize { @handler_threads.dup }
       return if threads.empty?
@@ -118,9 +119,9 @@ module Quicsilver
         t.join(remaining)
       end
 
-      # Kill anything still alive
+      # Raise into anything still alive — Thread.raise lets threads unwind
       @handler_mutex.synchronize do
-        @handler_threads.each { |t| t.kill if t.alive? }
+        @handler_threads.each { |t| t.raise(DrainTimeoutError, "drain timeout") if t.alive? }
         @handler_threads.clear
       end
     end
@@ -267,6 +268,8 @@ module Quicsilver
       else
         connection.send_error(stream, 400, "Bad Request") if stream.ready_to_send?
       end
+    rescue DrainTimeoutError
+      Quicsilver.logger.debug("Request interrupted by drain: stream #{stream.stream_id}")
     rescue => e
       Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
       Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
