@@ -4,7 +4,7 @@ require "localhost"
 
 module Quicsilver
   class ServerConfiguration
-    attr_reader :cert_file, :key_file, :idle_timeout, :server_resumption_level, :peer_bidi_stream_count,
+    attr_reader :cert_file, :key_file, :idle_timeout, :server_resumption_level, :max_concurrent_requests,
       :peer_unidi_stream_count, :stream_recv_window, :stream_recv_buffer, :conn_flow_control_window
 
     QUIC_SERVER_RESUME_AND_ZERORTT = 1
@@ -25,7 +25,7 @@ module Quicsilver
     def initialize(cert_file = nil, key_file = nil, options = {})
       @idle_timeout = options[:idle_timeout].nil? ? 10000 : options[:idle_timeout]
       @server_resumption_level = options[:server_resumption_level].nil? ? QUIC_SERVER_RESUME_AND_ZERORTT : options[:server_resumption_level]
-      @peer_bidi_stream_count = options[:peer_bidi_stream_count].nil? ? 10 : options[:peer_bidi_stream_count]
+      @max_concurrent_requests = options[:max_concurrent_requests].nil? ? 10 : options[:max_concurrent_requests]
       @peer_unidi_stream_count = options[:peer_unidi_stream_count].nil? ? 10 : options[:peer_unidi_stream_count]
       @alpn = options[:alpn].nil? ? DEFAULT_ALPN : options[:alpn]
 
@@ -66,7 +66,7 @@ module Quicsilver
         key_file: @key_file,
         idle_timeout: @idle_timeout,
         server_resumption_level: @server_resumption_level,
-        peer_bidi_stream_count: @peer_bidi_stream_count,
+        peer_bidi_stream_count: @max_concurrent_requests,
         peer_unidi_stream_count: @peer_unidi_stream_count,
         alpn: alpn,
         stream_recv_window: @stream_recv_window,

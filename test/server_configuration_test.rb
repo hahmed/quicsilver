@@ -9,7 +9,7 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal key_file_path, config.key_file
     assert_equal 10000, config.idle_timeout
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
-    assert_equal 10, config.peer_bidi_stream_count
+    assert_equal 10, config.max_concurrent_requests
     assert_equal 10, config.peer_unidi_stream_count
     assert_equal "h3", config.alpn
   end
@@ -30,7 +30,7 @@ class ServerConfigurationTest < Minitest::Test
     options = {
       idle_timeout: 5000,
       server_resumption_level: Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_ONLY,
-      peer_bidi_stream_count: 20,
+      max_concurrent_requests: 20,
       peer_unidi_stream_count: 15,
       alpn: "h3-29"
     }
@@ -39,7 +39,7 @@ class ServerConfigurationTest < Minitest::Test
     
     assert_equal 5000, config.idle_timeout
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_ONLY, config.server_resumption_level
-    assert_equal 20, config.peer_bidi_stream_count
+    assert_equal 20, config.max_concurrent_requests
     assert_equal 15, config.peer_unidi_stream_count
     assert_equal "h3-29", config.alpn
   end
@@ -49,7 +49,7 @@ class ServerConfigurationTest < Minitest::Test
     options = {
       idle_timeout: nil,
       server_resumption_level: nil,
-      peer_bidi_stream_count: nil,
+      max_concurrent_requests: nil,
       peer_unidi_stream_count: nil,
       alpn: nil
     }
@@ -59,7 +59,7 @@ class ServerConfigurationTest < Minitest::Test
     # Should use defaults when nil is explicitly passed
     assert_equal 10000, config.idle_timeout
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
-    assert_equal 10, config.peer_bidi_stream_count
+    assert_equal 10, config.max_concurrent_requests
     assert_equal 10, config.peer_unidi_stream_count
     assert_equal "h3", config.alpn
   end
@@ -69,7 +69,7 @@ class ServerConfigurationTest < Minitest::Test
     options = {
       idle_timeout: 1,
       server_resumption_level: false,
-      peer_bidi_stream_count: false,
+      max_concurrent_requests: false,
       peer_unidi_stream_count: false,
       alpn: false
     }
@@ -79,7 +79,7 @@ class ServerConfigurationTest < Minitest::Test
     # Should preserve false values (not use defaults)
     assert_equal 1, config.idle_timeout
     assert_equal false, config.server_resumption_level
-    assert_equal false, config.peer_bidi_stream_count
+    assert_equal false, config.max_concurrent_requests
     assert_equal false, config.peer_unidi_stream_count
     assert_equal false, config.alpn
   end
@@ -150,7 +150,7 @@ class ServerConfigurationTest < Minitest::Test
     assert_respond_to config, :key_file
     assert_respond_to config, :idle_timeout
     assert_respond_to config, :server_resumption_level
-    assert_respond_to config, :peer_bidi_stream_count
+    assert_respond_to config, :max_concurrent_requests
     assert_respond_to config, :peer_unidi_stream_count
     assert_respond_to config, :alpn
   end

@@ -143,6 +143,33 @@ class StreamControlIntegrationTest < Minitest::Test
     assert @server.request_registry.empty?, "Request registry should be cleaned up"
   end
 
+  def test_max_concurrent_requests_limits_concurrency
+    request_count = Queue.new
+
+    app = ->(env) {
+      request_count.push(true)
+      sleep 0.3
+      [200, {}, ["OK"]]
+    }
+
+    # Server allows only 2 concurrent bidi streams
+    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path, max_concurrent_requests: 2)
+    @server = Quicsilver::Server.new(@port, server_configuration: config, app: app)
+    @server_thread = Thread.new { @server.start }
+    sleep 0.5
+
+    @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 5000, request_timeout: 10)
+    @client.connect
+
+    # Fire 3 requests concurrently — MsQuic should queue the 3rd
+    threads = 3.times.map { |i| Thread.new { @client.get("/req#{i}") } }
+
+    # All 3 should eventually complete (3rd waits for a slot)
+    responses = threads.map { |t| t.value }
+    assert_equal 3, responses.size
+    responses.each { |r| assert_equal 200, r[:status] }
+  end
+
   def test_cancel_after_disconnect_does_not_crash
     app = ->(env) {
       sleep 2

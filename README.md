@@ -60,14 +60,15 @@ rackup -s quicsilver -p 4433
 ## Configuration
 
 ```ruby
+config = Quicsilver::ServerConfiguration.new("/path/to/cert.pem", "/path/to/key.pem",
+  idle_timeout: 10_000,           # Connection idle timeout (ms)
+  max_concurrent_requests: 100    # Max concurrent requests per connection
+)
+
 server = Quicsilver::Server.new(4433,
   app: app,
   address: "0.0.0.0",
-  idle_timeout: 10_000,           # Connection idle timeout (ms)
-  initial_window_size: 65536,     # Flow control window
-  max_streams_bidi: 100,          # Max concurrent requests
-  cert_path: "/path/to/cert.pem", # TLS certificate
-  key_path: "/path/to/key.pem"    # TLS private key
+  server_configuration: config
 )
 ```
 
