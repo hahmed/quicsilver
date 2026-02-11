@@ -83,8 +83,9 @@ module Quicsilver
       @queue.push(response)
     end
 
-    # Called by Client on stream reset from peer
+    # Called by Client on stream reset from peer or connection close
     def fail(error_code, message = nil) # :nodoc:
+      @status = :error
       @queue.push({ error: true, error_code: error_code, message: message })
     end
   end

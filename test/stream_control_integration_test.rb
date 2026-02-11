@@ -143,6 +143,25 @@ class StreamControlIntegrationTest < Minitest::Test
     assert @server.request_registry.empty?, "Request registry should be cleaned up"
   end
 
+  def test_cancel_after_disconnect_does_not_crash
+    app = ->(env) {
+      sleep 2
+      [200, {}, ["OK"]]
+    }
+
+    start_server_and_client(app)
+
+    request = @client.build_request("GET", "/slow")
+    sleep 0.1
+
+    # Disconnect first — stream handle becomes stale
+    @client.disconnect
+
+    # Cancel on a stale handle should not segfault
+    result = request.cancel
+    refute result, "Cancel should return false on stale handle"
+  end
+
   private
 
   def start_server_and_client(app)

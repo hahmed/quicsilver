@@ -931,6 +931,8 @@ quicsilver_stream_reset(VALUE self, VALUE stream_handle, VALUE error_code)
     }
 
     HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    if (Stream == NULL) return Qnil;
+
     uint64_t ErrorCode = NUM2ULL(error_code);
 
     MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND, ErrorCode);
@@ -948,6 +950,8 @@ quicsilver_stream_stop_sending(VALUE self, VALUE stream_handle, VALUE error_code
     }
 
     HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    if (Stream == NULL) return Qnil;
+
     uint64_t ErrorCode = NUM2ULL(error_code);
 
     MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, ErrorCode);
