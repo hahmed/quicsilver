@@ -6,6 +6,12 @@
 #include <string.h>
 #include <unistd.h>
 
+#if __linux__
+#include <sys/epoll.h>
+#elif __APPLE__ || __FreeBSD__
+#include <sys/event.h>
+#endif
+
 static VALUE mQuicsilver;
 
 // Custom execution: app owns the event loop, MsQuic spawns no threads
@@ -80,21 +86,38 @@ dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
     }
 }
 
-// kevent wait — called without GVL so other Ruby threads can run
+// Platform I/O wait — called without GVL so other Ruby threads can run
 struct poll_args {
-    QUIC_EVENTQ kq;
+    QUIC_EVENTQ eq;
     QUIC_CQE events[64];
     int max_events;
-    struct timespec timeout;
+    int timeout_ms;
     int count;
 };
 
 static void*
-kevent_wait_nogvl(void* arg)
+eventq_wait_nogvl(void* arg)
 {
     struct poll_args* a = (struct poll_args*)arg;
-    a->count = kevent(a->kq, NULL, 0, a->events, a->max_events, &a->timeout);
+#if __linux__
+    a->count = epoll_wait(a->eq, a->events, a->max_events, a->timeout_ms);
+#elif __APPLE__ || __FreeBSD__
+    struct timespec ts;
+    ts.tv_sec = a->timeout_ms / 1000;
+    ts.tv_nsec = (a->timeout_ms % 1000) * 1000000;
+    a->count = kevent(a->eq, NULL, 0, a->events, a->max_events, &ts);
+#endif
     return NULL;
+}
+
+static inline QUIC_SQE*
+cqe_get_sqe(QUIC_CQE* cqe)
+{
+#if __linux__
+    return (QUIC_SQE*)cqe->data.ptr;
+#elif __APPLE__ || __FreeBSD__
+    return (QUIC_SQE*)cqe->udata;
+#endif
 }
 
 // Drive MsQuic execution: poll internal timers, wait for I/O, fire completions.
@@ -107,20 +130,19 @@ quicsilver_poll(VALUE self)
     // 1. ExecutionPoll — process MsQuic timers/state, may fire callbacks (has GVL)
     uint32_t wait_ms = MsQuic->ExecutionPoll(ExecContext);
 
-    // 2. kevent — wait for I/O completions (releases GVL)
+    // 2. Wait for I/O completions (releases GVL)
     struct poll_args args;
-    args.kq = EventQ;
+    args.eq = EventQ;
     args.max_events = 64;
     uint32_t actual_wait = (wait_ms == UINT32_MAX) ? 100 : (wait_ms > 100 ? 100 : wait_ms);
-    args.timeout.tv_sec = actual_wait / 1000;
-    args.timeout.tv_nsec = (actual_wait % 1000) * 1000000;
+    args.timeout_ms = (int)actual_wait;
     args.count = 0;
 
-    rb_thread_call_without_gvl(kevent_wait_nogvl, &args, RUBY_UBF_IO, NULL);
+    rb_thread_call_without_gvl(eventq_wait_nogvl, &args, RUBY_UBF_IO, NULL);
 
     // 3. Fire completions — MsQuic callbacks run here (has GVL)
     for (int i = 0; i < args.count; i++) {
-        QUIC_SQE* sqe = (QUIC_SQE*)args.events[i].udata;
+        QUIC_SQE* sqe = cqe_get_sqe(&args.events[i]);
         if (sqe && sqe->Completion) {
             sqe->Completion(&args.events[i]);
         }
@@ -139,13 +161,16 @@ poll_inline(int timeout_ms)
     MsQuic->ExecutionPoll(ExecContext);
 
     QUIC_CQE events[8];
+#if __linux__
+    int count = epoll_wait(EventQ, events, 8, timeout_ms);
+#elif __APPLE__ || __FreeBSD__
     struct timespec ts;
     ts.tv_sec = timeout_ms / 1000;
     ts.tv_nsec = (timeout_ms % 1000) * 1000000;
-
     int count = kevent(EventQ, NULL, 0, events, 8, &ts);
+#endif
     for (int i = 0; i < count; i++) {
-        QUIC_SQE* sqe = (QUIC_SQE*)events[i].udata;
+        QUIC_SQE* sqe = cqe_get_sqe(&events[i]);
         if (sqe && sqe->Completion) {
             sqe->Completion(&events[i]);
         }
@@ -351,11 +376,15 @@ quicsilver_open(VALUE self)
     // Custom execution MUST be set up BEFORE RegistrationOpen.
     // RegistrationOpen triggers MsQuic lazy init (LazyInitComplete=TRUE),
     // after which ExecutionCreate returns QUIC_STATUS_INVALID_STATE.
+#if __linux__
+    EventQ = epoll_create1(0);
+#elif __APPLE__ || __FreeBSD__
     EventQ = kqueue();
+#endif
     if (EventQ == -1) {
         MsQuicClose(MsQuic);
         MsQuic = NULL;
-        rb_raise(rb_eRuntimeError, "Failed to create kqueue for custom execution");
+        rb_raise(rb_eRuntimeError, "Failed to create event queue for custom execution");
         return Qfalse;
     }
 
