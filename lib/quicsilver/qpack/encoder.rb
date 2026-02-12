@@ -1,9 +1,14 @@
 # frozen_string_literal: true
+require_relative "huffman_code"
 
 module Quicsilver
   module Qpack
     class Encoder
       STATIC_TABLE = HTTP3::STATIC_TABLE
+
+      def initialize(huffman: true)
+        @huffman = huffman
+      end
 
       def encode(headers)
         out = encode_prefix
@@ -66,15 +71,31 @@ module Quicsilver
 
       # Pattern 5: Literal with Literal Name (001xxxxx)
       def encode_literal(name, value)
-        out = [0x20 | (name.bytesize & 0x1F)].pack("C")
-        out << name.b
+        name_str = name.to_s.b
+        if @huffman
+          huffman_name = HuffmanCode.encode(name_str)
+          if huffman_name.bytesize < name_str.bytesize
+            out = encode_prefixed_int(huffman_name.bytesize, 3, 0x28) # 001 H=1 xxx
+            out << huffman_name
+            out << encode_str(value)
+            return out
+          end
+        end
+        out = encode_prefixed_int(name_str.bytesize, 3, 0x20) # 001 H=0 xxx
+        out << name_str
         out << encode_str(value)
         out
       end
 
       def encode_str(value)
         value = value.to_s.b
-        [value.bytesize].pack("C") + value
+        if @huffman
+          huffman = HuffmanCode.encode(value)
+          if huffman.bytesize < value.bytesize
+            return encode_prefixed_int(huffman.bytesize, 7, 0x80) + huffman # H=1
+          end
+        end
+        encode_prefixed_int(value.bytesize, 7, 0x00) + value # H=0
       end
 
       # RFC 7541 prefix integer encoding

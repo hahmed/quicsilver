@@ -5,13 +5,6 @@ require_relative "../../lib/quicsilver/http3"
 require_relative "../../lib/quicsilver/http3/response_parser"
 
 class ResponseParserTest < Minitest::Test
-  # Static table indices for status codes (from RFC 9204 Appendix A)
-  STATUS_INDICES = {
-    103 => 24, 200 => 25, 304 => 26, 404 => 27, 503 => 28,
-    100 => 63, 204 => 64, 206 => 65, 302 => 66, 400 => 67,
-    403 => 68, 421 => 69, 425 => 70, 500 => 71
-  }.freeze
-
   def test_parses_200_response
     headers_payload = build_qpack_response_headers(200, {
       "content-type" => "text/plain"
@@ -55,25 +48,22 @@ class ResponseParserTest < Minitest::Test
 
   # Header patterns
   def test_parses_literal_with_name_reference
-    # Pattern 3: 0x40 | index, then value length + value
-    # content-disposition is at index 3 with empty value (name-only entry)
-    headers_payload = "\x00\x00".b
-    headers_payload += build_indexed_status(200)
-    headers_payload += [0x40 | 3].pack('C')  # content-disposition index
-    headers_payload += encode_varint("attachment".bytesize)
-    headers_payload += "attachment"
-
+    # content-disposition has a name-only entry in static table (index 3),
+    # so the encoder uses Pattern 3 (literal with name reference)
+    headers_payload = build_qpack_response_headers(200, {
+      "content-disposition" => "attachment"
+    })
     parser = parse(build_frame(HEADERS, headers_payload))
 
     assert_equal "attachment", parser.headers["content-disposition"]
   end
 
   def test_parses_literal_with_literal_name
-    # Pattern 5: 0x20 | name_len, name, value_len, value
-    headers_payload = "\x00\x00".b
-    headers_payload += build_indexed_status(200)
-    headers_payload += encode_literal_header("x-custom-header", "custom-value")
-
+    # x-custom-header has no static table entry,
+    # so the encoder uses Pattern 5 (fully literal)
+    headers_payload = build_qpack_response_headers(200, {
+      "x-custom-header" => "custom-value"
+    })
     parser = parse(build_frame(HEADERS, headers_payload))
 
     assert_equal "custom-value", parser.headers["x-custom-header"]
@@ -261,53 +251,17 @@ class ResponseParserTest < Minitest::Test
   end
 
   def build_qpack_response_headers(status, headers)
-    payload = "\x00\x00".b  # QPACK prefix (required insert count + delta base)
-
-    # Encode status
-    payload += build_status(status)
-
-    # Encode headers
-    headers.each do |name, value|
-      payload += encode_literal_header(name, value)
-    end
-
-    payload
-  end
-
-  def build_status(status)
-    index = STATUS_INDICES[status]
-
-    if index
-      build_indexed_status(status)
-    else
-      # Literal with name reference - :status first appears at index 24
-      result = [0x40 | 24].pack('C')
-      status_str = status.to_s
-      result += encode_varint(status_str.bytesize)
-      result += status_str
-      result
-    end
+    Quicsilver::Qpack::Encoder.new.encode(
+      { ":status" => status.to_s }.merge(headers)
+    )
   end
 
   def build_indexed_status(status)
-    index = STATUS_INDICES[status]
-    raise "No indexed status for #{status}" unless index
-
-    # For indices < 63, fits in 6-bit prefix
-    if index < 63
-      [0xC0 | index].pack('C')
-    else
-      # 0xC0 | 0x3F = 0xFF (all prefix bits set), then (index - 63) as continuation
-      "\xFF".b + [(index - 63)].pack('C')
-    end
+    # For tests that need just a status in the payload (no prefix)
+    encoder = Quicsilver::Qpack::Encoder.new
+    full = encoder.encode({ ":status" => status.to_s })
+    # Strip the 2-byte QPACK prefix
+    full[2..]
   end
 
-  def encode_literal_header(name, value)
-    result = "".b
-    result += [0x20 | (name.bytesize & 0x1F)].pack('C')
-    result += name.b
-    result += encode_varint(value.bytesize)
-    result += value.b
-    result
-  end
 end

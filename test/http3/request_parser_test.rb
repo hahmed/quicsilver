@@ -126,42 +126,6 @@ class RequestParserTest < Minitest::Test
   end
 
   def build_qpack_headers(headers)
-    payload = "\x00\x00".b # QPACK prefix
-
-    headers.each do |name, value|
-      if name.start_with?(":")
-        case name
-        when ":method"
-          index = value == "GET" ? Quicsilver::HTTP3::QPACK_METHOD_GET : Quicsilver::HTTP3::QPACK_METHOD_POST
-          payload += [0x80 | index].pack('C')
-        when ":scheme"
-          index = value == "https" ? Quicsilver::HTTP3::QPACK_SCHEME_HTTPS : Quicsilver::HTTP3::QPACK_SCHEME_HTTP
-          payload += [0x80 | index].pack('C')
-        when ":authority"
-          payload += [0x40 | Quicsilver::HTTP3::QPACK_AUTHORITY].pack('C')
-          payload += Quicsilver::HTTP3.encode_varint(value.bytesize)
-          payload += value.b
-        when ":path"
-          payload += [0x40 | Quicsilver::HTTP3::QPACK_PATH].pack('C')
-          payload += Quicsilver::HTTP3.encode_varint(value.bytesize)
-          payload += value.b
-        else
-          payload += encode_literal_header(name, value)
-        end
-      else
-        payload += encode_literal_header(name, value)
-      end
-    end
-
-    payload
-  end
-
-  def encode_literal_header(name, value)
-    result = "".b
-    result += [0x20 | (name.bytesize & 0x1F)].pack('C')
-    result += name.b
-    result += Quicsilver::HTTP3.encode_varint(value.bytesize)
-    result += value.b
-    result
+    Quicsilver::Qpack::Encoder.new.encode(headers)
   end
 end

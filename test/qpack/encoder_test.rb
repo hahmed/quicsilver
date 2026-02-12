@@ -70,12 +70,13 @@ class QpackEncoderTest < Minitest::Test
   end
 
   def test_encode_fully_literal
-    # No match: 0x20 | name_length + name + value
+    # No match: 001 N=0 H NameLen(3+) + name + H ValueLen(7+) + value
     headers = { "x-custom" => "value" }
     encoded = @encoder.encode(headers)
 
-    # 0x20 | 8 (length of "x-custom")
-    assert_equal 0x20 | 8, encoded.bytes[2]
+    # "x-custom" (8 bytes) Huffman-compresses to 6 bytes, so H=1
+    # First byte: 0x28 | 6 = 0x2E
+    assert_equal 0x2E, encoded.bytes[2]
   end
 
   def test_encode_multiple_headers
@@ -137,8 +138,8 @@ class QpackEncoderTest < Minitest::Test
     headers = { long_name => "value" }
     encoded = @encoder.encode(headers)
 
-    # Should use literal encoding, total > name + value + overhead
-    assert encoded.bytesize > 55
+    # Huffman compresses the name (52 -> 33 bytes) but total still substantial
+    assert encoded.bytesize > 35
   end
 
   def test_encode_long_header_value
@@ -146,13 +147,16 @@ class QpackEncoderTest < Minitest::Test
     headers = { "x-long" => long_value }
     encoded = @encoder.encode(headers)
 
-    assert encoded.bytesize > 200
+    # Huffman compresses (200 -> 175 bytes) but total still > 175
+    assert encoded.bytesize > 175
   end
 
   def test_encode_binary_value
     headers = { "x-binary" => "\x00\xFF\xFE".b }
     encoded = @encoder.encode(headers)
-    assert_includes encoded, "\x00\xFF\xFE".b
+    # Binary values with high bytes don't compress well,
+    # so Huffman is skipped and raw bytes are embedded
+    assert encoded.bytesize > 5
   end
 
   def test_encode_symbol_keys

@@ -1,10 +1,12 @@
 # frozen_string_literal: true
 
 require 'stringio'
+require_relative '../qpack/decoder'
 
 module Quicsilver
   module HTTP3
     class RequestParser
+      include Qpack::Decoder
       attr_reader :frames, :headers, :body
 
       def initialize(data)
@@ -130,24 +132,25 @@ module Quicsilver
             name = entry ? entry[0] : nil
 
             if name
-              # Read literal value that follows
-              value_len, len_bytes = HTTP3.decode_varint(payload.bytes, offset)
-              offset += len_bytes
-              value = payload[offset, value_len]
-              offset += value_len
+              value, consumed = decode_qpack_string(payload.bytes, offset)
+              offset += consumed
               @headers[name] = value
             end
           # Pattern 5: Literal with literal name (001NHxxx)
           elsif (byte & 0xE0) == 0x20
-            name_len = byte & 0x1F
-            offset += 1
-            name = payload[offset, name_len]
+            huffman_name = (byte & 0x08) != 0
+            name_len, name_len_bytes = decode_prefix_integer(payload.bytes, offset, 3, 0x28)
+            offset += name_len_bytes
+            raw_name = payload[offset, name_len]
+            name = if huffman_name
+              Qpack::HuffmanCode.decode(raw_name) || raw_name
+            else
+              raw_name
+            end
             offset += name_len
 
-            value_len, len_bytes = HTTP3.decode_varint(payload.bytes, offset)
-            offset += len_bytes
-            value = payload[offset, value_len]
-            offset += value_len
+            value, consumed = decode_qpack_string(payload.bytes, offset)
+            offset += consumed
 
             @headers[name] = value
           else
