@@ -447,19 +447,24 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     }
     VALUE cert_file_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("cert_file")));
     VALUE key_file_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("key_file")));
-    VALUE idle_timeout_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("idle_timeout")));
+    VALUE idle_timeout_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("idle_timeout_ms")));
     VALUE server_resumption_level_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("server_resumption_level")));
-    VALUE peer_bidi_stream_count_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("peer_bidi_stream_count")));
-    VALUE peer_unidi_stream_count_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("peer_unidi_stream_count")));
+    VALUE max_concurrent_requests_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("max_concurrent_requests")));
+    VALUE max_unidirectional_streams_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("max_unidirectional_streams")));
     VALUE alpn_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("alpn")));
-    VALUE stream_recv_window_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("stream_recv_window")));
-    VALUE stream_recv_buffer_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("stream_recv_buffer")));
-    VALUE conn_flow_control_window_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("conn_flow_control_window")));
+    VALUE stream_receive_window_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("stream_receive_window")));
+    VALUE stream_receive_buffer_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("stream_receive_buffer")));
+    VALUE connection_flow_control_window_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("connection_flow_control_window")));
     VALUE pacing_enabled_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("pacing_enabled")));
     VALUE send_buffering_enabled_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("send_buffering_enabled")));
     VALUE initial_rtt_ms_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("initial_rtt_ms")));
     VALUE initial_window_packets_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("initial_window_packets")));
     VALUE max_ack_delay_ms_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("max_ack_delay_ms")));
+    VALUE keep_alive_interval_ms_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("keep_alive_interval_ms")));
+    VALUE congestion_control_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("congestion_control_algorithm")));
+    VALUE migration_enabled_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("migration_enabled")));
+    VALUE disconnect_timeout_ms_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("disconnect_timeout_ms")));
+    VALUE handshake_idle_timeout_ms_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("handshake_idle_timeout_ms")));
 
     QUIC_STATUS Status;
     HQUIC Configuration = NULL;
@@ -468,34 +473,39 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     const char* key_path = StringValueCStr(key_file_val);
     uint32_t idle_timeout_ms = NUM2INT(idle_timeout_val);
     uint32_t server_resumption_level = NUM2INT(server_resumption_level_val);
-    uint32_t peer_bidi_stream_count = NUM2INT(peer_bidi_stream_count_val);
-    uint32_t peer_unidi_stream_count = NUM2INT(peer_unidi_stream_count_val);
+    uint32_t max_concurrent_requests = NUM2INT(max_concurrent_requests_val);
+    uint32_t max_unidirectional_streams = NUM2INT(max_unidirectional_streams_val);
     const char* alpn_str = StringValueCStr(alpn_val);
-    uint32_t stream_recv_window = NUM2UINT(stream_recv_window_val);
-    uint32_t stream_recv_buffer = NUM2UINT(stream_recv_buffer_val);
-    uint32_t conn_flow_control_window = NUM2UINT(conn_flow_control_window_val);
+    uint32_t stream_receive_window = NUM2UINT(stream_receive_window_val);
+    uint32_t stream_receive_buffer = NUM2UINT(stream_receive_buffer_val);
+    uint32_t connection_flow_control_window = NUM2UINT(connection_flow_control_window_val);
     uint8_t pacing_enabled = (uint8_t)NUM2INT(pacing_enabled_val);
     uint8_t send_buffering_enabled = (uint8_t)NUM2INT(send_buffering_enabled_val);
     uint32_t initial_rtt_ms = NUM2UINT(initial_rtt_ms_val);
     uint32_t initial_window_packets = NUM2UINT(initial_window_packets_val);
     uint32_t max_ack_delay_ms = NUM2UINT(max_ack_delay_ms_val);
+    uint32_t keep_alive_interval_ms = NUM2UINT(keep_alive_interval_ms_val);
+    uint16_t congestion_control = (uint16_t)NUM2INT(congestion_control_val);
+    uint8_t migration_enabled = (uint8_t)NUM2INT(migration_enabled_val);
+    uint32_t disconnect_timeout_ms = NUM2UINT(disconnect_timeout_ms_val);
+    uint64_t handshake_idle_timeout_ms = NUM2ULL(handshake_idle_timeout_ms_val);
 
     QUIC_SETTINGS Settings = {0};
     Settings.IdleTimeoutMs = idle_timeout_ms;
     Settings.IsSet.IdleTimeoutMs = TRUE;
     Settings.ServerResumptionLevel = server_resumption_level;
     Settings.IsSet.ServerResumptionLevel = TRUE;
-    Settings.PeerBidiStreamCount = peer_bidi_stream_count;
+    Settings.PeerBidiStreamCount = max_concurrent_requests;
     Settings.IsSet.PeerBidiStreamCount = TRUE;
-    Settings.PeerUnidiStreamCount = peer_unidi_stream_count;
+    Settings.PeerUnidiStreamCount = max_unidirectional_streams;
     Settings.IsSet.PeerUnidiStreamCount = TRUE;
 
     // Flow control / backpressure settings
-    Settings.StreamRecvWindowDefault = stream_recv_window;
+    Settings.StreamRecvWindowDefault = stream_receive_window;
     Settings.IsSet.StreamRecvWindowDefault = TRUE;
-    Settings.StreamRecvBufferDefault = stream_recv_buffer;
+    Settings.StreamRecvBufferDefault = stream_receive_buffer;
     Settings.IsSet.StreamRecvBufferDefault = TRUE;
-    Settings.ConnFlowControlWindow = conn_flow_control_window;
+    Settings.ConnFlowControlWindow = connection_flow_control_window;
     Settings.IsSet.ConnFlowControlWindow = TRUE;
 
     // Throughput settings
@@ -509,6 +519,18 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     Settings.IsSet.InitialWindowPackets = TRUE;
     Settings.MaxAckDelayMs = max_ack_delay_ms;
     Settings.IsSet.MaxAckDelayMs = TRUE;
+
+    // Connection management
+    Settings.KeepAliveIntervalMs = keep_alive_interval_ms;
+    Settings.IsSet.KeepAliveIntervalMs = TRUE;
+    Settings.CongestionControlAlgorithm = congestion_control;
+    Settings.IsSet.CongestionControlAlgorithm = TRUE;
+    Settings.MigrationEnabled = migration_enabled;
+    Settings.IsSet.MigrationEnabled = TRUE;
+    Settings.DisconnectTimeoutMs = disconnect_timeout_ms;
+    Settings.IsSet.DisconnectTimeoutMs = TRUE;
+    Settings.HandshakeIdleTimeoutMs = handshake_idle_timeout_ms;
+    Settings.IsSet.HandshakeIdleTimeoutMs = TRUE;
 
     QUIC_BUFFER Alpn = { (uint32_t)strlen(alpn_str), (uint8_t*)alpn_str };
     

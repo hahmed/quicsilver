@@ -7,16 +7,21 @@ class ServerConfigurationTest < Minitest::Test
 
     assert_equal cert_file_path, config.cert_file
     assert_equal key_file_path, config.key_file
-    assert_equal 10000, config.idle_timeout
+    assert_equal 10000, config.idle_timeout_ms
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
-    assert_equal 10, config.max_concurrent_requests
-    assert_equal 10, config.peer_unidi_stream_count
+    assert_equal 100, config.max_concurrent_requests
+    assert_equal 10, config.max_unidirectional_streams
     assert_equal "h3", config.alpn
     assert_equal true, config.pacing_enabled
     assert_equal true, config.send_buffering_enabled
-    assert_equal 333, config.initial_rtt_ms
+    assert_equal 100, config.initial_rtt_ms
     assert_equal 10, config.initial_window_packets
     assert_equal 25, config.max_ack_delay_ms
+    assert_equal 0, config.keep_alive_interval_ms
+    assert_equal Quicsilver::ServerConfiguration::CONGESTION_CONTROL_CUBIC, config.congestion_control_algorithm
+    assert_equal true, config.migration_enabled
+    assert_equal 16_000, config.disconnect_timeout_ms
+    assert_equal 10_000, config.handshake_idle_timeout_ms
   end
 
   def test_initialization_with_custom_cert_files_raises_no_error_when_certs_does_not_exist
@@ -33,97 +38,107 @@ class ServerConfigurationTest < Minitest::Test
 
   def test_initialization_with_options
     options = {
-      idle_timeout: 5000,
+      idle_timeout_ms: 5000,
       server_resumption_level: Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_ONLY,
       max_concurrent_requests: 20,
-      peer_unidi_stream_count: 15,
+      max_unidirectional_streams: 15,
       alpn: "h3-29"
     }
     
     config = fetch_server_configuration_with_certs(options)
     
-    assert_equal 5000, config.idle_timeout
+    assert_equal 5000, config.idle_timeout_ms
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_ONLY, config.server_resumption_level
     assert_equal 20, config.max_concurrent_requests
-    assert_equal 15, config.peer_unidi_stream_count
+    assert_equal 15, config.max_unidirectional_streams
     assert_equal "h3-29", config.alpn
   end
 
   def test_initialization_with_nil_values_in_options
     # Test that explicit nil values in options don't break the defaults
     options = {
-      idle_timeout: nil,
+      idle_timeout_ms: nil,
       server_resumption_level: nil,
       max_concurrent_requests: nil,
-      peer_unidi_stream_count: nil,
-      alpn: nil
+      max_unidirectional_streams: nil,
+      alpn: nil,
+      keep_alive_interval_ms: nil,
+      congestion_control_algorithm: nil,
+      migration_enabled: nil
     }
-    
+
     config = fetch_server_configuration_with_certs(options)
-    
+
     # Should use defaults when nil is explicitly passed
-    assert_equal 10000, config.idle_timeout
+    assert_equal 10000, config.idle_timeout_ms
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
-    assert_equal 10, config.max_concurrent_requests
-    assert_equal 10, config.peer_unidi_stream_count
+    assert_equal 100, config.max_concurrent_requests
+    assert_equal 10, config.max_unidirectional_streams
     assert_equal "h3", config.alpn
+    assert_equal 0, config.keep_alive_interval_ms
+    assert_equal Quicsilver::ServerConfiguration::CONGESTION_CONTROL_CUBIC, config.congestion_control_algorithm
+    assert_equal true, config.migration_enabled
   end
 
   def test_initialization_with_false_values_in_options
     # Test that false values are preserved (not treated as nil)
     options = {
-      idle_timeout: 1,
+      idle_timeout_ms: 1,
       server_resumption_level: false,
       max_concurrent_requests: false,
-      peer_unidi_stream_count: false,
+      max_unidirectional_streams: false,
       alpn: false
     }
     
     config = fetch_server_configuration_with_certs(options)
     
     # Should preserve false values (not use defaults)
-    assert_equal 1, config.idle_timeout
+    assert_equal 1, config.idle_timeout_ms
     assert_equal false, config.server_resumption_level
     assert_equal false, config.max_concurrent_requests
-    assert_equal false, config.peer_unidi_stream_count
+    assert_equal false, config.max_unidirectional_streams
     assert_equal false, config.alpn
   end
 
   def test_to_h_method
     config = fetch_server_configuration_with_certs({
-      idle_timeout: 5000,
-      alpn: "h3-29"
+      idle_timeout_ms: 5000,
+      alpn: "h3-29",
+      keep_alive_interval_ms: 20000,
+      congestion_control_algorithm: Quicsilver::ServerConfiguration::CONGESTION_CONTROL_BBR,
+      migration_enabled: false
     })
-    
+
     hash = config.to_h
-    
+
     assert_kind_of Hash, hash
     assert_equal cert_file_path, hash[:cert_file]
     assert_equal key_file_path, hash[:key_file]
-    assert_equal 5000, hash[:idle_timeout]
+    assert_equal 5000, hash[:idle_timeout_ms]
     assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, hash[:server_resumption_level]
-    assert_equal 10, hash[:peer_bidi_stream_count]
-    assert_equal 10, hash[:peer_unidi_stream_count]
+    assert_equal 100, hash[:max_concurrent_requests]
+    assert_equal 10, hash[:max_unidirectional_streams]
     assert_equal "h3-29", hash[:alpn]
+    assert_equal 20000, hash[:keep_alive_interval_ms]
+    assert_equal Quicsilver::ServerConfiguration::CONGESTION_CONTROL_BBR, hash[:congestion_control_algorithm]
+    assert_equal 0, hash[:migration_enabled]
   end
 
   def test_to_h_returns_symbol_keys
     config = fetch_server_configuration_with_certs
     hash = config.to_h
 
-    # Ensure all keys are symbols (important for C extension compatibility)
-    assert hash.key?(:cert_file)
-    assert hash.key?(:key_file)
-    assert hash.key?(:idle_timeout)
-    assert hash.key?(:server_resumption_level)
-    assert hash.key?(:peer_bidi_stream_count)
-    assert hash.key?(:peer_unidi_stream_count)
-    assert hash.key?(:alpn)
-    assert hash.key?(:pacing_enabled)
-    assert hash.key?(:send_buffering_enabled)
-    assert hash.key?(:initial_rtt_ms)
-    assert hash.key?(:initial_window_packets)
-    assert hash.key?(:max_ack_delay_ms)
+    expected_keys = %i[
+      cert_file key_file idle_timeout_ms server_resumption_level
+      max_concurrent_requests max_unidirectional_streams alpn
+      stream_receive_window stream_receive_buffer connection_flow_control_window
+      pacing_enabled send_buffering_enabled initial_rtt_ms
+      initial_window_packets max_ack_delay_ms
+      keep_alive_interval_ms congestion_control_algorithm migration_enabled
+      disconnect_timeout_ms handshake_idle_timeout_ms
+    ]
+
+    expected_keys.each { |k| assert hash.key?(k), "Missing key: #{k}" }
 
     # Ensure no string keys
     refute hash.key?("cert_file")
@@ -155,19 +170,17 @@ class ServerConfigurationTest < Minitest::Test
   def test_attr_readers_exist
     config = fetch_server_configuration_with_certs
 
-    # Test that all expected attributes are readable
-    assert_respond_to config, :cert_file
-    assert_respond_to config, :key_file
-    assert_respond_to config, :idle_timeout
-    assert_respond_to config, :server_resumption_level
-    assert_respond_to config, :max_concurrent_requests
-    assert_respond_to config, :peer_unidi_stream_count
-    assert_respond_to config, :alpn
-    assert_respond_to config, :pacing_enabled
-    assert_respond_to config, :send_buffering_enabled
-    assert_respond_to config, :initial_rtt_ms
-    assert_respond_to config, :initial_window_packets
-    assert_respond_to config, :max_ack_delay_ms
+    expected_attrs = %i[
+      cert_file key_file idle_timeout_ms server_resumption_level
+      max_concurrent_requests max_unidirectional_streams alpn
+      stream_receive_window stream_receive_buffer connection_flow_control_window
+      pacing_enabled send_buffering_enabled initial_rtt_ms
+      initial_window_packets max_ack_delay_ms
+      keep_alive_interval_ms congestion_control_algorithm migration_enabled
+      disconnect_timeout_ms handshake_idle_timeout_ms
+    ]
+
+    expected_attrs.each { |a| assert_respond_to config, a, "Missing attr_reader: #{a}" }
   end
 
   private

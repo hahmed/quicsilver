@@ -4,50 +4,70 @@ require "localhost"
 
 module Quicsilver
   class ServerConfiguration
-    attr_reader :cert_file, :key_file, :idle_timeout, :server_resumption_level, :max_concurrent_requests,
-      :peer_unidi_stream_count, :stream_recv_window, :stream_recv_buffer, :conn_flow_control_window,
-      :pacing_enabled, :send_buffering_enabled, :initial_rtt_ms, :initial_window_packets, :max_ack_delay_ms
+    attr_reader :cert_file, :key_file, :idle_timeout_ms, :server_resumption_level, :max_concurrent_requests,
+      :max_unidirectional_streams, :stream_receive_window, :stream_receive_buffer, :connection_flow_control_window,
+      :pacing_enabled, :send_buffering_enabled, :initial_rtt_ms, :initial_window_packets, :max_ack_delay_ms,
+      :keep_alive_interval_ms, :congestion_control_algorithm, :migration_enabled,
+      :disconnect_timeout_ms, :handshake_idle_timeout_ms
 
     QUIC_SERVER_RESUME_AND_ZERORTT = 1
     QUIC_SERVER_RESUME_ONLY = 2
     QUIC_SERVER_RESUME_AND_REUSE = 3
     QUIC_SERVER_RESUME_AND_REUSE_ZERORTT = 4
 
+    # Congestion control algorithms
+    CONGESTION_CONTROL_CUBIC = 0
+    CONGESTION_CONTROL_BBR = 1
+
     DEFAULT_CERT_FILE = "certificates/server.crt"
     DEFAULT_KEY_FILE = "certificates/server.key"
     DEFAULT_ALPN = "h3"
 
-    # Flow control defaults (msquic defaults)
+    # Flow control defaults — cross-referenced with quiche, quic-go, lsquic, RFC 9000
     # See: https://github.com/microsoft/msquic/blob/main/docs/Settings.md
-    DEFAULT_STREAM_RECV_WINDOW = 65_536        # 64KB - initial stream receive window
-    DEFAULT_STREAM_RECV_BUFFER = 4_096         # 4KB - stream buffer size
-    DEFAULT_CONN_FLOW_CONTROL_WINDOW = 16_777_216  # 16MB - connection-wide flow control
+    DEFAULT_STREAM_RECEIVE_WINDOW = 262_144       # 256KB (quiche/quic-go use 1MB, MsQuic default 64KB)
+    DEFAULT_STREAM_RECEIVE_BUFFER = 32_768        # 32KB (MsQuic default 4KB — too small for typical responses)
+    DEFAULT_CONNECTION_FLOW_CONTROL_WINDOW = 16_777_216  # 16MB - connection-wide flow control
 
     # Throughput defaults
-    DEFAULT_PACING_ENABLED = true              # QUIC send pacing (disable for localhost/LAN)
-    DEFAULT_SEND_BUFFERING_ENABLED = true      # MsQuic buffers sends internally
-    DEFAULT_INITIAL_RTT_MS = 333               # MsQuic default — conservative, lower for LAN
-    DEFAULT_INITIAL_WINDOW_PACKETS = 10        # Congestion control initial window
-    DEFAULT_MAX_ACK_DELAY_MS = 25              # ACK batching delay
+    DEFAULT_PACING_ENABLED = true              # RFC 9002: MUST pace or limit bursts
+    DEFAULT_SEND_BUFFERING_ENABLED = true      # MsQuic recommended — coalesces small writes
+    DEFAULT_INITIAL_RTT_MS = 100               # MsQuic default 333ms is satellite-grade; 100ms matches Chromium
+    DEFAULT_INITIAL_WINDOW_PACKETS = 10        # Matches RFC 9002 recommendation
+    DEFAULT_MAX_ACK_DELAY_MS = 25              # Matches RFC 9000 default
+
+    # Connection management defaults
+    DEFAULT_KEEP_ALIVE_INTERVAL_MS = 0         # 0 = disabled. Set to 20000 for NAT traversal
+    DEFAULT_CONGESTION_CONTROL_ALGORITHM = CONGESTION_CONTROL_CUBIC  # CUBIC (0) or BBR (1)
+    DEFAULT_MIGRATION_ENABLED = true           # Client IP migration. Disable behind load balancers
+    DEFAULT_DISCONNECT_TIMEOUT_MS = 16_000     # How long to wait for ACK before path declared dead
+    DEFAULT_HANDSHAKE_IDLE_TIMEOUT_MS = 10_000 # Handshake timeout (separate from connection idle)
 
     def initialize(cert_file = nil, key_file = nil, options = {})
-      @idle_timeout = options[:idle_timeout].nil? ? 10000 : options[:idle_timeout]
+      @idle_timeout_ms = options[:idle_timeout_ms].nil? ? 10000 : options[:idle_timeout_ms]
       @server_resumption_level = options[:server_resumption_level].nil? ? QUIC_SERVER_RESUME_AND_ZERORTT : options[:server_resumption_level]
-      @max_concurrent_requests = options[:max_concurrent_requests].nil? ? 10 : options[:max_concurrent_requests]
-      @peer_unidi_stream_count = options[:peer_unidi_stream_count].nil? ? 10 : options[:peer_unidi_stream_count]
+      @max_concurrent_requests = options[:max_concurrent_requests].nil? ? 100 : options[:max_concurrent_requests]
+      @max_unidirectional_streams = options[:max_unidirectional_streams].nil? ? 10 : options[:max_unidirectional_streams]
       @alpn = options[:alpn].nil? ? DEFAULT_ALPN : options[:alpn]
 
-      # Flow control / backpressure settings
-      @stream_recv_window = options[:stream_recv_window].nil? ? DEFAULT_STREAM_RECV_WINDOW : options[:stream_recv_window]
-      @stream_recv_buffer = options[:stream_recv_buffer].nil? ? DEFAULT_STREAM_RECV_BUFFER : options[:stream_recv_buffer]
-      @conn_flow_control_window = options[:conn_flow_control_window].nil? ? DEFAULT_CONN_FLOW_CONTROL_WINDOW : options[:conn_flow_control_window]
+      # Flow control
+      @stream_receive_window = options[:stream_receive_window].nil? ? DEFAULT_STREAM_RECEIVE_WINDOW : options[:stream_receive_window]
+      @stream_receive_buffer = options[:stream_receive_buffer].nil? ? DEFAULT_STREAM_RECEIVE_BUFFER : options[:stream_receive_buffer]
+      @connection_flow_control_window = options[:connection_flow_control_window].nil? ? DEFAULT_CONNECTION_FLOW_CONTROL_WINDOW : options[:connection_flow_control_window]
 
-      # Throughput settings
+      # Throughput
       @pacing_enabled = options[:pacing_enabled].nil? ? DEFAULT_PACING_ENABLED : options[:pacing_enabled]
       @send_buffering_enabled = options[:send_buffering_enabled].nil? ? DEFAULT_SEND_BUFFERING_ENABLED : options[:send_buffering_enabled]
       @initial_rtt_ms = options[:initial_rtt_ms].nil? ? DEFAULT_INITIAL_RTT_MS : options[:initial_rtt_ms]
       @initial_window_packets = options[:initial_window_packets].nil? ? DEFAULT_INITIAL_WINDOW_PACKETS : options[:initial_window_packets]
       @max_ack_delay_ms = options[:max_ack_delay_ms].nil? ? DEFAULT_MAX_ACK_DELAY_MS : options[:max_ack_delay_ms]
+
+      # Connection management
+      @keep_alive_interval_ms = options[:keep_alive_interval_ms].nil? ? DEFAULT_KEEP_ALIVE_INTERVAL_MS : options[:keep_alive_interval_ms]
+      @congestion_control_algorithm = options[:congestion_control_algorithm].nil? ? DEFAULT_CONGESTION_CONTROL_ALGORITHM : options[:congestion_control_algorithm]
+      @migration_enabled = options[:migration_enabled].nil? ? DEFAULT_MIGRATION_ENABLED : options[:migration_enabled]
+      @disconnect_timeout_ms = options[:disconnect_timeout_ms].nil? ? DEFAULT_DISCONNECT_TIMEOUT_MS : options[:disconnect_timeout_ms]
+      @handshake_idle_timeout_ms = options[:handshake_idle_timeout_ms].nil? ? DEFAULT_HANDSHAKE_IDLE_TIMEOUT_MS : options[:handshake_idle_timeout_ms]
 
       @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
       @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file
@@ -79,19 +99,24 @@ module Quicsilver
       {
         cert_file: @cert_file,
         key_file: @key_file,
-        idle_timeout: @idle_timeout,
+        idle_timeout_ms: @idle_timeout_ms,
         server_resumption_level: @server_resumption_level,
-        peer_bidi_stream_count: @max_concurrent_requests,
-        peer_unidi_stream_count: @peer_unidi_stream_count,
+        max_concurrent_requests: @max_concurrent_requests,
+        max_unidirectional_streams: @max_unidirectional_streams,
         alpn: alpn,
-        stream_recv_window: @stream_recv_window,
-        stream_recv_buffer: @stream_recv_buffer,
-        conn_flow_control_window: @conn_flow_control_window,
+        stream_receive_window: @stream_receive_window,
+        stream_receive_buffer: @stream_receive_buffer,
+        connection_flow_control_window: @connection_flow_control_window,
         pacing_enabled: @pacing_enabled ? 1 : 0,
         send_buffering_enabled: @send_buffering_enabled ? 1 : 0,
         initial_rtt_ms: @initial_rtt_ms,
         initial_window_packets: @initial_window_packets,
-        max_ack_delay_ms: @max_ack_delay_ms
+        max_ack_delay_ms: @max_ack_delay_ms,
+        keep_alive_interval_ms: @keep_alive_interval_ms,
+        congestion_control_algorithm: @congestion_control_algorithm,
+        migration_enabled: @migration_enabled ? 1 : 0,
+        disconnect_timeout_ms: @disconnect_timeout_ms,
+        handshake_idle_timeout_ms: @handshake_idle_timeout_ms
       }
     end
   end

@@ -61,7 +61,7 @@ rackup -s quicsilver -p 4433
 
 ```ruby
 config = Quicsilver::ServerConfiguration.new("/path/to/cert.pem", "/path/to/key.pem",
-  idle_timeout: 10_000,           # Connection idle timeout (ms)
+  idle_timeout_ms: 10_000,        # Connection idle timeout (ms)
   max_concurrent_requests: 100    # Max concurrent requests per connection
 )
 
