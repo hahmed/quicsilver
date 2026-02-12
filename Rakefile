@@ -32,4 +32,27 @@ Rake::TestTask.new(:test) do |t|
   t.test_files = FileList["test/**/*_test.rb"]
 end
 
+namespace :benchmark do
+  desc "Run throughput benchmark"
+  task :throughput do
+    ruby "benchmarks/throughput.rb"
+  end
+
+  desc "Run concurrency benchmark"
+  task :concurrent do
+    ruby "benchmarks/concurrent.rb"
+  end
+
+  desc "Run component micro-benchmarks"
+  task :components do
+    ruby "benchmarks/components.rb"
+  end
+
+  desc "Run all benchmarks"
+  task :all => [:components, :throughput, :concurrent]
+end
+
+desc "Run all benchmarks"
+task :benchmark => "benchmark:all"
+
 task :default => :test

@@ -43,6 +43,7 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency 'rake-compiler-dock', '~> 1.3'
   spec.add_development_dependency "minitest", "~> 5.0"
   spec.add_development_dependency "minitest-focus", "~> 1.3"
+  spec.add_development_dependency "benchmark-ips", "~> 2.12"
   spec.add_dependency "localhost", "~> 1.6"
   spec.add_dependency "rack", "~> 3.0"
   spec.add_dependency "rackup", "~> 2.0"
