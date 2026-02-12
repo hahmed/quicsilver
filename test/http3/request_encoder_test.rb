@@ -131,15 +131,14 @@ class RequestEncoderTest < Minitest::Test
   end
 
   def test_uses_literal_with_name_ref_for_authority
-    # :authority should use 0x40 | index (literal with name reference)
+    # :authority should use 01NTxxxx (N=0, T=1 static, 4-bit index)
+    # :authority is index 0, so byte = 0x50 | 0 = 0x50
     data = encoder("GET", "/").encode
     bytes = data.bytes
 
     qpack_start = find_qpack_start(bytes)
-    # Authority comes after method and scheme in pseudo-header order
-    # This verifies the pattern exists somewhere in the QPACK block
-    assert bytes[qpack_start, 20].include?(0x40 | Quicsilver::HTTP3::QPACK_AUTHORITY),
-      "Should use literal with name ref (0x40 | index) for :authority"
+    assert bytes[qpack_start, 20].include?(0x50 | Quicsilver::HTTP3::QPACK_AUTHORITY),
+      "Should use literal with name ref (0x50 | index) for :authority"
   end
 
   # Roundtrip tests

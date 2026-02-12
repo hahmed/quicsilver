@@ -80,9 +80,10 @@ module Quicsilver
               end
             end
           # Pattern 3: Literal with Name Reference (01NTxxxx)
+          # Bits: 01=pattern, N=never-index, T=table(1=static), xxxx=4-bit prefix index
           elsif (byte & 0xC0) == 0x40
-            index = byte & 0x3F
-            offset += 1
+            index, bytes_consumed = decode_prefix_integer(payload.bytes, offset, 4, 0xF0)
+            offset += bytes_consumed
 
             entry = HTTP3::STATIC_TABLE[index] if index < HTTP3::STATIC_TABLE.size
             name = entry ? entry[0] : nil

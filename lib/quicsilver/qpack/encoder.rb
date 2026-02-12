@@ -50,7 +50,7 @@ module Quicsilver
         case lookup(name, value)
         in [index, true]
           encode_indexed(index)
-        in [index, false] if index < 64
+        in [index, false]
           encode_literal_with_name_ref(index, value)
         else
           encode_literal(name, value)
@@ -62,9 +62,10 @@ module Quicsilver
         encode_prefixed_int(index, 6, 0xC0)
       end
 
-      # Pattern 3: Literal with Name Reference (01xxxxxx)
+      # Pattern 3: Literal with Name Reference (01NTxxxx)
+      # N=0 (allow indexing), T=1 (static table), 4-bit prefix index
       def encode_literal_with_name_ref(index, value)
-        out = [0x40 | index].pack("C")
+        out = encode_prefixed_int(index, 4, 0x50)
         out << encode_str(value)
         out
       end

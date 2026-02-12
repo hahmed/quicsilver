@@ -4,7 +4,7 @@ require_relative "../lib/quicsilver/server_configuration"
 class ServerConfigurationTest < Minitest::Test
   def test_default_initialization
     config = fetch_server_configuration_with_certs
-    
+
     assert_equal cert_file_path, config.cert_file
     assert_equal key_file_path, config.key_file
     assert_equal 10000, config.idle_timeout
@@ -12,6 +12,11 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal 10, config.max_concurrent_requests
     assert_equal 10, config.peer_unidi_stream_count
     assert_equal "h3", config.alpn
+    assert_equal true, config.pacing_enabled
+    assert_equal true, config.send_buffering_enabled
+    assert_equal 333, config.initial_rtt_ms
+    assert_equal 10, config.initial_window_packets
+    assert_equal 25, config.max_ack_delay_ms
   end
 
   def test_initialization_with_custom_cert_files_raises_no_error_when_certs_does_not_exist
@@ -105,7 +110,7 @@ class ServerConfigurationTest < Minitest::Test
   def test_to_h_returns_symbol_keys
     config = fetch_server_configuration_with_certs
     hash = config.to_h
-    
+
     # Ensure all keys are symbols (important for C extension compatibility)
     assert hash.key?(:cert_file)
     assert hash.key?(:key_file)
@@ -114,7 +119,12 @@ class ServerConfigurationTest < Minitest::Test
     assert hash.key?(:peer_bidi_stream_count)
     assert hash.key?(:peer_unidi_stream_count)
     assert hash.key?(:alpn)
-    
+    assert hash.key?(:pacing_enabled)
+    assert hash.key?(:send_buffering_enabled)
+    assert hash.key?(:initial_rtt_ms)
+    assert hash.key?(:initial_window_packets)
+    assert hash.key?(:max_ack_delay_ms)
+
     # Ensure no string keys
     refute hash.key?("cert_file")
     refute hash.key?("key_file")
@@ -144,7 +154,7 @@ class ServerConfigurationTest < Minitest::Test
 
   def test_attr_readers_exist
     config = fetch_server_configuration_with_certs
-    
+
     # Test that all expected attributes are readable
     assert_respond_to config, :cert_file
     assert_respond_to config, :key_file
@@ -153,6 +163,11 @@ class ServerConfigurationTest < Minitest::Test
     assert_respond_to config, :max_concurrent_requests
     assert_respond_to config, :peer_unidi_stream_count
     assert_respond_to config, :alpn
+    assert_respond_to config, :pacing_enabled
+    assert_respond_to config, :send_buffering_enabled
+    assert_respond_to config, :initial_rtt_ms
+    assert_respond_to config, :initial_window_packets
+    assert_respond_to config, :max_ack_delay_ms
   end
 
   private

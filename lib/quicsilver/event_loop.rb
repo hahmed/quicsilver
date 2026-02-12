@@ -14,10 +14,7 @@ module Quicsilver
 
         @running = true
         @thread = Thread.new do
-          while @running
-            processed = Quicsilver.process_events
-            processed == 0 ? sleep(0.001) : Thread.pass
-          end
+          Quicsilver.poll while @running
         end
       end
     end
