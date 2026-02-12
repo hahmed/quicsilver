@@ -130,14 +130,14 @@ module Quicsilver
       @mutex.synchronize do
         case event
         when "RECEIVE"
-          (@response_buffers[stream_id] ||= StringIO.new).write(data)
+          (@response_buffers[stream_id] ||= StringIO.new("".b)).write(data)
 
         when "RECEIVE_FIN"
           stream_handle = data[0, 8].unpack1("Q") if data.bytesize >= 8
-          actual_data = data[8..-1] || ""
+          actual_data = data[8..-1] || "".b
 
           buffer = @response_buffers.delete(stream_id)
-          full_data = (buffer&.string || "") + actual_data
+          full_data = (buffer&.string || "".b) + actual_data
 
           response_parser = HTTP3::ResponseParser.new(full_data)
           response_parser.parse

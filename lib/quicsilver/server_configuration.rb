@@ -5,7 +5,8 @@ require "localhost"
 module Quicsilver
   class ServerConfiguration
     attr_reader :cert_file, :key_file, :idle_timeout, :server_resumption_level, :max_concurrent_requests,
-      :peer_unidi_stream_count, :stream_recv_window, :stream_recv_buffer, :conn_flow_control_window
+      :peer_unidi_stream_count, :stream_recv_window, :stream_recv_buffer, :conn_flow_control_window,
+      :pacing_enabled, :send_buffering_enabled, :initial_rtt_ms, :initial_window_packets, :max_ack_delay_ms
 
     QUIC_SERVER_RESUME_AND_ZERORTT = 1
     QUIC_SERVER_RESUME_ONLY = 2
@@ -22,6 +23,13 @@ module Quicsilver
     DEFAULT_STREAM_RECV_BUFFER = 4_096         # 4KB - stream buffer size
     DEFAULT_CONN_FLOW_CONTROL_WINDOW = 16_777_216  # 16MB - connection-wide flow control
 
+    # Throughput defaults
+    DEFAULT_PACING_ENABLED = true              # QUIC send pacing (disable for localhost/LAN)
+    DEFAULT_SEND_BUFFERING_ENABLED = true      # MsQuic buffers sends internally
+    DEFAULT_INITIAL_RTT_MS = 333               # MsQuic default — conservative, lower for LAN
+    DEFAULT_INITIAL_WINDOW_PACKETS = 10        # Congestion control initial window
+    DEFAULT_MAX_ACK_DELAY_MS = 25              # ACK batching delay
+
     def initialize(cert_file = nil, key_file = nil, options = {})
       @idle_timeout = options[:idle_timeout].nil? ? 10000 : options[:idle_timeout]
       @server_resumption_level = options[:server_resumption_level].nil? ? QUIC_SERVER_RESUME_AND_ZERORTT : options[:server_resumption_level]
@@ -33,6 +41,13 @@ module Quicsilver
       @stream_recv_window = options[:stream_recv_window].nil? ? DEFAULT_STREAM_RECV_WINDOW : options[:stream_recv_window]
       @stream_recv_buffer = options[:stream_recv_buffer].nil? ? DEFAULT_STREAM_RECV_BUFFER : options[:stream_recv_buffer]
       @conn_flow_control_window = options[:conn_flow_control_window].nil? ? DEFAULT_CONN_FLOW_CONTROL_WINDOW : options[:conn_flow_control_window]
+
+      # Throughput settings
+      @pacing_enabled = options[:pacing_enabled].nil? ? DEFAULT_PACING_ENABLED : options[:pacing_enabled]
+      @send_buffering_enabled = options[:send_buffering_enabled].nil? ? DEFAULT_SEND_BUFFERING_ENABLED : options[:send_buffering_enabled]
+      @initial_rtt_ms = options[:initial_rtt_ms].nil? ? DEFAULT_INITIAL_RTT_MS : options[:initial_rtt_ms]
+      @initial_window_packets = options[:initial_window_packets].nil? ? DEFAULT_INITIAL_WINDOW_PACKETS : options[:initial_window_packets]
+      @max_ack_delay_ms = options[:max_ack_delay_ms].nil? ? DEFAULT_MAX_ACK_DELAY_MS : options[:max_ack_delay_ms]
 
       @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
       @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file
@@ -71,7 +86,12 @@ module Quicsilver
         alpn: alpn,
         stream_recv_window: @stream_recv_window,
         stream_recv_buffer: @stream_recv_buffer,
-        conn_flow_control_window: @conn_flow_control_window
+        conn_flow_control_window: @conn_flow_control_window,
+        pacing_enabled: @pacing_enabled ? 1 : 0,
+        send_buffering_enabled: @send_buffering_enabled ? 1 : 0,
+        initial_rtt_ms: @initial_rtt_ms,
+        initial_window_packets: @initial_window_packets,
+        max_ack_delay_ms: @max_ack_delay_ms
       }
     end
   end

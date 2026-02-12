@@ -123,9 +123,10 @@ module Quicsilver
             end
           # Pattern 3: Literal with Name Reference (01NTxxxx)
           # Use name from static table, but value is provided as literal
+          # Bits: 01=pattern, N=never-index, T=table(1=static), xxxx=4-bit prefix index
           elsif (byte & 0xC0) == 0x40
-            index = byte & 0x3F
-            offset += 1
+            index, bytes_consumed = decode_prefix_integer(payload.bytes, offset, 4, 0xF0)
+            offset += bytes_consumed
 
             # Get the name from static table
             entry = HTTP3::STATIC_TABLE[index] if index < HTTP3::STATIC_TABLE.size

@@ -189,6 +189,23 @@ class StreamControlIntegrationTest < Minitest::Test
     refute result, "Cancel should return false on stale handle"
   end
 
+  # Regression: response bodies with non-ASCII bytes (e.g. JSON from MySQL)
+  # caused Encoding::CompatibilityError when concatenating binary C data
+  # with a UTF-8 StringIO buffer in Client#handle_stream_event.
+  def test_non_ascii_response_body_does_not_raise_encoding_error
+    unicode_body = '{"name":"Héllo Wörld 🚀","emoji":"✅"}'
+
+    app = ->(env) {
+      [200, { "content-type" => "application/json; charset=utf-8" }, [unicode_body]]
+    }
+
+    start_server_and_client(app)
+
+    response = @client.get("/unicode")
+    assert_equal 200, response[:status]
+    assert_equal unicode_body, response[:body].force_encoding("UTF-8")
+  end
+
   private
 
   def start_server_and_client(app)

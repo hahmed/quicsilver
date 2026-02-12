@@ -24,7 +24,9 @@ module Quicsilver
       end
     end
 
-    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil)
+    DEFAULT_THREAD_POOL_SIZE = 5
+
+    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE)
       @port = port
       @address = address
       @app = app || default_rack_app
@@ -36,6 +38,8 @@ module Quicsilver
       @request_registry = RequestRegistry.new
       @handler_threads = []
       @handler_mutex = Mutex.new
+      @thread_pool_size = threads
+      @work_queue = Queue.new
 
       self.class.instance = self
     end
@@ -60,6 +64,7 @@ module Quicsilver
 
       @running = true
 
+      start_worker_pool
       Quicsilver.event_loop.start
       Quicsilver.event_loop.join  # Block until shutdown
     rescue ServerConfigurationError, ServerListenerError => e
@@ -105,25 +110,19 @@ module Quicsilver
       @running
     end
 
-    # Wait for in-flight request handler threads to finish, then interrupt stragglers
+    # Wait for work queue to drain, then shut down the pool
     def drain(timeout: 5)
-      threads = @handler_mutex.synchronize { @handler_threads.dup }
-      return if threads.empty?
-
-      Quicsilver.logger.debug("Draining #{threads.size} in-flight request(s)")
+      Quicsilver.logger.debug("Draining work queue (#{@work_queue.size} pending)")
 
       deadline = Time.now + timeout
-      threads.each do |t|
-        remaining = deadline - Time.now
-        break if remaining <= 0
-        t.join(remaining)
+
+      # Wait for work queue to empty
+      while @work_queue.size > 0 && Time.now < deadline
+        sleep 0.05
       end
 
-      # Raise into anything still alive — Thread.raise lets threads unwind
-      @handler_mutex.synchronize do
-        @handler_threads.each { |t| t.raise(DrainTimeoutError, "drain timeout") if t.alive? }
-        @handler_threads.clear
-      end
+      # Signal workers to exit
+      stop_worker_pool
     end
 
     # Graceful shutdown: send GOAWAY, drain requests, then stop
@@ -235,15 +234,32 @@ module Quicsilver
       end
     end
 
-    # Dispatch request to a handler thread - keeps the event loop free
+    # Dispatch request to worker pool — bounded concurrency, no GVL strangulation
     def dispatch_request(connection, stream)
-      thread = Thread.new do
-        handle_request(connection, stream)
-      ensure
-        @handler_mutex.synchronize { @handler_threads.delete(Thread.current) }
-      end
+      @work_queue.push([connection, stream])
+    end
 
-      @handler_mutex.synchronize { @handler_threads << thread }
+    def start_worker_pool
+      @thread_pool_size.times do
+        thread = Thread.new do
+          while (work = @work_queue.pop)
+            break if work == :shutdown
+            connection, stream = work
+            handle_request(connection, stream)
+          end
+        end
+        @handler_mutex.synchronize { @handler_threads << thread }
+      end
+    end
+
+    def stop_worker_pool
+      @thread_pool_size.times { @work_queue.push(:shutdown) }
+      @handler_mutex.synchronize do
+        @handler_threads.each { |t| t.join(2) }
+        # Raise into any stuck workers
+        @handler_threads.each { |t| t.raise(DrainTimeoutError, "drain timeout") if t.alive? }
+        @handler_threads.clear
+      end
     end
 
     def handle_request(connection, stream)

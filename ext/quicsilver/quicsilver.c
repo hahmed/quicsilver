@@ -1,26 +1,16 @@
 #include <ruby.h>
+#include <ruby/thread.h>
+#define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 #include "msquic.h"
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static VALUE mQuicsilver;
 
-// Event queue for callbacks
-typedef struct CallbackEvent {
-    HQUIC connection;
-    void* connection_ctx;  // ConnectionContext pointer for building connection_data
-    VALUE client_obj;      // Ruby client object (for routing callbacks)
-    char* event_type;
-    uint64_t stream_id;
-    char* data;
-    size_t data_len;
-    struct CallbackEvent* next;
-} CallbackEvent;
-
-static CallbackEvent* event_queue_head = NULL;
-static CallbackEvent* event_queue_tail = NULL;
-static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Custom execution: app owns the event loop, MsQuic spawns no threads
+static QUIC_EVENTQ EventQ = -1;        // kqueue (macOS) / epoll (Linux)
+static QUIC_EXECUTION* ExecContext = NULL;
 
 // Global MSQUIC API table
 static const QUIC_API_TABLE* MsQuic = NULL;
@@ -59,116 +49,107 @@ typedef struct {
     QUIC_STATUS error_status;
 } StreamContext;
 
-// Enqueue a callback event (thread-safe)
-// NOTE: Called from QUIC callback threads without GVL - cannot use Ruby API here
+// Dispatch event directly to Ruby — called from MsQuic callbacks on the Ruby
+// thread during ExecutionPoll/kevent (we hold the GVL).
 static void
-enqueue_callback_event(HQUIC connection, void* connection_ctx, VALUE client_obj, const char* event_type, uint64_t stream_id, const char* data, size_t data_len)
+dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
+                 const char* event_type, uint64_t stream_id,
+                 const char* data, size_t data_len)
 {
-    CallbackEvent* event = (CallbackEvent*)malloc(sizeof(CallbackEvent));
-    if (event == NULL) return;
-
-    event->connection = connection;
-    event->connection_ctx = connection_ctx;
-    event->client_obj = client_obj;  // Store raw VALUE - will validate before use
-    event->event_type = strdup(event_type);
-    event->stream_id = stream_id;
-    event->data = (char*)malloc(data_len);
-    if (event->data != NULL) {
-        memcpy(event->data, data, data_len);
-    }
-    event->data_len = data_len;
-    event->next = NULL;
-
-    pthread_mutex_lock(&queue_mutex);
-    if (event_queue_tail == NULL) {
-        event_queue_head = event_queue_tail = event;
+    if (NIL_P(client_obj)) {
+        // Server event
+        VALUE server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
+        if (rb_class_real(CLASS_OF(server_class)) == rb_cClass) {
+            VALUE connection_data = rb_ary_new2(2);
+            rb_ary_push(connection_data, ULL2NUM((uintptr_t)connection));
+            rb_ary_push(connection_data, ULL2NUM((uintptr_t)connection_ctx));
+            rb_funcall(server_class, rb_intern("handle_stream"), 4,
+                connection_data,
+                ULL2NUM(stream_id),
+                rb_str_new_cstr(event_type),
+                rb_str_new(data, data_len));
+        }
     } else {
-        event_queue_tail->next = event;
-        event_queue_tail = event;
+        // Client event
+        if (RB_TYPE_P(client_obj, T_OBJECT)) {
+            rb_funcall(client_obj, rb_intern("handle_stream_event"), 3,
+                ULL2NUM(stream_id),
+                rb_str_new_cstr(event_type),
+                rb_str_new(data, data_len));
+        }
     }
-    pthread_mutex_unlock(&queue_mutex);
 }
 
-// Free a single event
-static void
-free_event(CallbackEvent* event)
+// kevent wait — called without GVL so other Ruby threads can run
+struct poll_args {
+    QUIC_EVENTQ kq;
+    QUIC_CQE events[64];
+    int max_events;
+    struct timespec timeout;
+    int count;
+};
+
+static void*
+kevent_wait_nogvl(void* arg)
 {
-    if (event == NULL) return;
-    free(event->event_type);
-    free(event->data);
-    free(event);
+    struct poll_args* a = (struct poll_args*)arg;
+    a->count = kevent(a->kq, NULL, 0, a->events, a->max_events, &a->timeout);
+    return NULL;
 }
 
-// Process all pending callback events (called from Ruby)
+// Drive MsQuic execution: poll internal timers, wait for I/O, fire completions.
+// Callbacks (StreamCallback, ConnectionCallback) fire HERE on the Ruby thread.
 static VALUE
-quicsilver_process_events(VALUE self)
+quicsilver_poll(VALUE self)
 {
-    CallbackEvent* event;
-    VALUE server_class = Qnil;
-    int processed = 0;
+    if (ExecContext == NULL) return INT2NUM(0);
 
-    // Get Server class for server events (client_obj == Qnil)
-    server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
-    if (rb_class_real(CLASS_OF(server_class)) != rb_cClass) {
-        server_class = Qnil;
+    // 1. ExecutionPoll — process MsQuic timers/state, may fire callbacks (has GVL)
+    uint32_t wait_ms = MsQuic->ExecutionPoll(ExecContext);
+
+    // 2. kevent — wait for I/O completions (releases GVL)
+    struct poll_args args;
+    args.kq = EventQ;
+    args.max_events = 64;
+    uint32_t actual_wait = (wait_ms == UINT32_MAX) ? 100 : (wait_ms > 100 ? 100 : wait_ms);
+    args.timeout.tv_sec = actual_wait / 1000;
+    args.timeout.tv_nsec = (actual_wait % 1000) * 1000000;
+    args.count = 0;
+
+    rb_thread_call_without_gvl(kevent_wait_nogvl, &args, RUBY_UBF_IO, NULL);
+
+    // 3. Fire completions — MsQuic callbacks run here (has GVL)
+    for (int i = 0; i < args.count; i++) {
+        QUIC_SQE* sqe = (QUIC_SQE*)args.events[i].udata;
+        if (sqe && sqe->Completion) {
+            sqe->Completion(&args.events[i]);
+        }
     }
 
-    // Process events in a loop, but limit iterations to avoid GVL starvation
-    int max_iterations = 100;
-    int iteration = 0;
+    return INT2NUM(args.count);
+}
 
-    while (iteration++ < max_iterations) {
-        pthread_mutex_lock(&queue_mutex);
-        event = event_queue_head;
-        if (event != NULL) {
-            event_queue_head = event->next;
-            if (event_queue_head == NULL) {
-                event_queue_tail = NULL;
-            }
+// Inline poll for use during synchronous waits (e.g. wait_for_connection).
+// Short non-blocking poll — keeps MsQuic alive while we spin.
+static void
+poll_inline(int timeout_ms)
+{
+    if (ExecContext == NULL) return;
+
+    MsQuic->ExecutionPoll(ExecContext);
+
+    QUIC_CQE events[8];
+    struct timespec ts;
+    ts.tv_sec = timeout_ms / 1000;
+    ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+
+    int count = kevent(EventQ, NULL, 0, events, 8, &ts);
+    for (int i = 0; i < count; i++) {
+        QUIC_SQE* sqe = (QUIC_SQE*)events[i].udata;
+        if (sqe && sqe->Completion) {
+            sqe->Completion(&events[i]);
         }
-        pthread_mutex_unlock(&queue_mutex);
-
-        if (event == NULL) break;
-
-        // Route based on client_obj:
-        // - If Qnil: server event, route to Server.handle_stream with connection_data
-        // - If not Qnil: client event, route to client_obj.handle_stream_event
-        int handled = 0;
-
-        if (NIL_P(event->client_obj)) {
-            // Server event - build connection_data array [connection_handle, context_ptr]
-            if (!NIL_P(server_class)) {
-                VALUE connection_data = rb_ary_new2(2);
-                rb_ary_push(connection_data, ULL2NUM((uintptr_t)event->connection));
-                rb_ary_push(connection_data, ULL2NUM((uintptr_t)event->connection_ctx));
-
-                rb_funcall(server_class, rb_intern("handle_stream"), 4,
-                    connection_data,
-                    ULL2NUM(event->stream_id),
-                    rb_str_new_cstr(event->event_type),
-                    rb_str_new(event->data, event->data_len));
-                handled = 1;
-            }
-        } else {
-            // Client event - validate object is a real Ruby object before calling
-            // This catches use-after-free when connection was closed but events still queued
-            if (RB_TYPE_P(event->client_obj, T_OBJECT)) {
-                rb_funcall(event->client_obj, rb_intern("handle_stream_event"), 3,
-                    ULL2NUM(event->stream_id),
-                    rb_str_new_cstr(event->event_type),
-                    rb_str_new(event->data, event->data_len));
-                handled = 1;
-            }
-        }
-
-        if (handled) {
-            processed++;
-        }
-
-        free_event(event);
     }
-
-    return INT2NUM(processed);
 }
 
 QUIC_STATUS
@@ -200,11 +181,11 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                     if (combined != NULL) {
                         memcpy(combined, &Stream, sizeof(HQUIC));
                         memcpy(combined + sizeof(HQUIC), buffer->Buffer, buffer->Length);
-                        enqueue_callback_event(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_len);
+                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_len);
                         free(combined);
                     }
                 } else {
-                    enqueue_callback_event(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, (const char*)buffer->Buffer, buffer->Length);
+                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, (const char*)buffer->Buffer, buffer->Length);
                 }
             }
             break;
@@ -225,7 +206,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             uint32_t stream_id_len = sizeof(stream_id);
             MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
             uint64_t error_code = Event->PEER_SEND_ABORTED.ErrorCode;
-            enqueue_callback_event(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", stream_id, (const char*)&error_code, sizeof(error_code));
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", stream_id, (const char*)&error_code, sizeof(error_code));
             break;
         }
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
@@ -234,7 +215,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             uint32_t stream_id_len = sizeof(stream_id);
             MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
             uint64_t error_code = Event->PEER_RECEIVE_ABORTED.ErrorCode;
-            enqueue_callback_event(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", stream_id, (const char*)&error_code, sizeof(error_code));
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", stream_id, (const char*)&error_code, sizeof(error_code));
             break;
         }
     }
@@ -259,7 +240,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             ctx->connected = 1;
             ctx->failed = 0;
             // Notify Ruby about new connection - pass ctx pointer for building connection_data
-            enqueue_callback_event(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC));
+            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC));
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
@@ -276,7 +257,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
             // Notify Ruby to clean up connection resources
-            enqueue_callback_event(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC));
+            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC));
             break;
          case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
             // Client opened a stream
@@ -366,15 +347,48 @@ quicsilver_open(VALUE self)
         rb_raise(rb_eRuntimeError, "MsQuicOpenVersion failed, 0x%x!", Status);
         return Qfalse;
     }
-    
-    // Create a registration for the app's connections
-    if (QUIC_FAILED(Status = MsQuic->RegistrationOpen(&RegConfig, &Registration))) {
-        rb_raise(rb_eRuntimeError, "RegistrationOpen failed, 0x%x!", Status);
+
+    // Custom execution MUST be set up BEFORE RegistrationOpen.
+    // RegistrationOpen triggers MsQuic lazy init (LazyInitComplete=TRUE),
+    // after which ExecutionCreate returns QUIC_STATUS_INVALID_STATE.
+    EventQ = kqueue();
+    if (EventQ == -1) {
         MsQuicClose(MsQuic);
         MsQuic = NULL;
+        rb_raise(rb_eRuntimeError, "Failed to create kqueue for custom execution");
         return Qfalse;
     }
-    
+
+    QUIC_EXECUTION_CONFIG exec_config = { 0, &EventQ };
+    Status = MsQuic->ExecutionCreate(
+        QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE,
+        0,      // PollingIdleTimeoutUs
+        1,      // 1 execution context
+        &exec_config,
+        &ExecContext
+    );
+    if (QUIC_FAILED(Status)) {
+        close(EventQ);
+        EventQ = -1;
+        MsQuicClose(MsQuic);
+        MsQuic = NULL;
+        rb_raise(rb_eRuntimeError, "ExecutionCreate failed, 0x%x!", Status);
+        return Qfalse;
+    }
+
+    // Now open registration — MsQuic lazy init will see the custom execution
+    // context and skip spawning its own worker threads.
+    if (QUIC_FAILED(Status = MsQuic->RegistrationOpen(&RegConfig, &Registration))) {
+        MsQuic->ExecutionDelete(1, &ExecContext);
+        ExecContext = NULL;
+        close(EventQ);
+        EventQ = -1;
+        MsQuicClose(MsQuic);
+        MsQuic = NULL;
+        rb_raise(rb_eRuntimeError, "RegistrationOpen failed, 0x%x!", Status);
+        return Qfalse;
+    }
+
     return Qtrue;
 }
 
@@ -441,6 +455,11 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     VALUE stream_recv_window_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("stream_recv_window")));
     VALUE stream_recv_buffer_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("stream_recv_buffer")));
     VALUE conn_flow_control_window_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("conn_flow_control_window")));
+    VALUE pacing_enabled_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("pacing_enabled")));
+    VALUE send_buffering_enabled_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("send_buffering_enabled")));
+    VALUE initial_rtt_ms_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("initial_rtt_ms")));
+    VALUE initial_window_packets_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("initial_window_packets")));
+    VALUE max_ack_delay_ms_val = rb_hash_aref(config_hash, ID2SYM(rb_intern("max_ack_delay_ms")));
 
     QUIC_STATUS Status;
     HQUIC Configuration = NULL;
@@ -455,6 +474,11 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     uint32_t stream_recv_window = NUM2UINT(stream_recv_window_val);
     uint32_t stream_recv_buffer = NUM2UINT(stream_recv_buffer_val);
     uint32_t conn_flow_control_window = NUM2UINT(conn_flow_control_window_val);
+    uint8_t pacing_enabled = (uint8_t)NUM2INT(pacing_enabled_val);
+    uint8_t send_buffering_enabled = (uint8_t)NUM2INT(send_buffering_enabled_val);
+    uint32_t initial_rtt_ms = NUM2UINT(initial_rtt_ms_val);
+    uint32_t initial_window_packets = NUM2UINT(initial_window_packets_val);
+    uint32_t max_ack_delay_ms = NUM2UINT(max_ack_delay_ms_val);
 
     QUIC_SETTINGS Settings = {0};
     Settings.IdleTimeoutMs = idle_timeout_ms;
@@ -473,6 +497,18 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     Settings.IsSet.StreamRecvBufferDefault = TRUE;
     Settings.ConnFlowControlWindow = conn_flow_control_window;
     Settings.IsSet.ConnFlowControlWindow = TRUE;
+
+    // Throughput settings
+    Settings.PacingEnabled = pacing_enabled;
+    Settings.IsSet.PacingEnabled = TRUE;
+    Settings.SendBufferingEnabled = send_buffering_enabled;
+    Settings.IsSet.SendBufferingEnabled = TRUE;
+    Settings.InitialRttMs = initial_rtt_ms;
+    Settings.IsSet.InitialRttMs = TRUE;
+    Settings.InitialWindowPackets = initial_window_packets;
+    Settings.IsSet.InitialWindowPackets = TRUE;
+    Settings.MaxAckDelayMs = max_ack_delay_ms;
+    Settings.IsSet.MaxAckDelayMs = TRUE;
 
     QUIC_BUFFER Alpn = { (uint32_t)strlen(alpn_str), (uint8_t*)alpn_str };
     
@@ -583,7 +619,7 @@ quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_m
     const int sleep_interval = 10; // 10ms
     
     while (elapsed < timeout && !ctx->connected && !ctx->failed) {
-        usleep(sleep_interval * 1000); // Convert to microseconds
+        poll_inline(sleep_interval);  // Drive MsQuic execution while waiting
         elapsed += sleep_interval;
     }
     
@@ -994,6 +1030,6 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "stream_reset", quicsilver_stream_reset, 2);
     rb_define_singleton_method(mQuicsilver, "stream_stop_sending", quicsilver_stream_stop_sending, 2);
 
-    // Event processing
-    rb_define_singleton_method(mQuicsilver, "process_events", quicsilver_process_events, 0);
+    // Event processing (custom execution — app drives MsQuic)
+    rb_define_singleton_method(mQuicsilver, "poll", quicsilver_poll, 0);
 }

@@ -61,12 +61,12 @@ class QpackEncoderTest < Minitest::Test
   end
 
   def test_encode_literal_with_name_reference
-    # Name match, value literal: 0x40 | index + value
+    # Name match, value literal: 01NTxxxx (N=0, T=1 static) = 0x50 | index
     headers = { ":path" => "/custom" }
     encoded = @encoder.encode(headers)
 
-    # :path is index 1
-    assert_equal 0x40 | 1, encoded.bytes[2]
+    # :path is index 1, pattern = 0x50 | 1 = 0x51
+    assert_equal 0x50 | 1, encoded.bytes[2]
   end
 
   def test_encode_fully_literal
