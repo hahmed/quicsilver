@@ -86,7 +86,10 @@ module Quicsilver
 
     # Called by Client on stream reset from peer or connection close
     def fail(error_code, message = nil) # :nodoc:
-      @status = :error
+      @mutex.synchronize do
+        return if @status == :cancelled
+        @status = :error
+      end
       @queue.push({ error: true, error_code: error_code, message: message })
     end
   end

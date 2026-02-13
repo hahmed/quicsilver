@@ -78,8 +78,44 @@ typedef struct {
     QUIC_STATUS error_status;
 } StreamContext;
 
-// Dispatch event directly to Ruby — called from MsQuic callbacks on the Ruby
-// thread during ExecutionPoll/kevent (we hold the GVL).
+// rb_protect wrapper — catches Ruby exceptions so they don't longjmp
+// through MsQuic callback frames (which would corrupt MsQuic state).
+struct dispatch_args {
+    VALUE receiver;
+    ID method;
+    int argc;
+    VALUE argv[4];
+};
+
+static VALUE
+dispatch_funcall(VALUE arg)
+{
+    struct dispatch_args* a = (struct dispatch_args*)arg;
+    return rb_funcallv(a->receiver, a->method, a->argc, a->argv);
+}
+
+static void
+safe_funcall(VALUE receiver, ID method, int argc, VALUE* argv)
+{
+    struct dispatch_args args;
+    args.receiver = receiver;
+    args.method = method;
+    args.argc = argc;
+    for (int i = 0; i < argc && i < 4; i++) {
+        args.argv[i] = argv[i];
+    }
+
+    int state = 0;
+    rb_protect(dispatch_funcall, (VALUE)&args, &state);
+    if (state) {
+        VALUE err = rb_errinfo();
+        rb_set_errinfo(Qnil);
+        VALUE msg = rb_funcall(err, rb_intern("message"), 0);
+        fprintf(stderr, "Quicsilver: exception in callback: %s\n", StringValueCStr(msg));
+    }
+}
+
+// Dispatch event to Ruby — uses rb_protect to catch exceptions safely.
 static void
 dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
                  const char* event_type, uint64_t stream_id,
@@ -92,19 +128,23 @@ dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
             VALUE connection_data = rb_ary_new2(2);
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)connection));
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)connection_ctx));
-            rb_funcall(server_class, rb_intern("handle_stream"), 4,
+            VALUE argv[4] = {
                 connection_data,
                 ULL2NUM(stream_id),
                 rb_str_new_cstr(event_type),
-                rb_str_new(data, data_len));
+                rb_str_new(data, data_len)
+            };
+            safe_funcall(server_class, rb_intern("handle_stream"), 4, argv);
         }
     } else {
         // Client event
         if (RB_TYPE_P(client_obj, T_OBJECT)) {
-            rb_funcall(client_obj, rb_intern("handle_stream_event"), 3,
+            VALUE argv[3] = {
                 ULL2NUM(stream_id),
                 rb_str_new_cstr(event_type),
-                rb_str_new(data, data_len));
+                rb_str_new(data, data_len)
+            };
+            safe_funcall(client_obj, rb_intern("handle_stream_event"), 3, argv);
         }
     }
 }
@@ -230,9 +270,28 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
     }
 
     switch (Event->Type) {
-        case QUIC_STREAM_EVENT_RECEIVE:
+        case QUIC_STREAM_EVENT_RECEIVE: {
+            int has_fin = (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+
+            if (Event->RECEIVE.BufferCount == 0 && has_fin) {
+                // Empty FIN — headers-only request/response with no body
+                uint64_t stream_id = 0;
+                uint32_t stream_id_len = sizeof(stream_id);
+                MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
+
+                size_t total_len = sizeof(HQUIC);
+                char* combined = (char*)malloc(total_len);
+                if (combined != NULL) {
+                    memcpy(combined, &Stream, sizeof(HQUIC));
+                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                        "RECEIVE_FIN", stream_id, combined, total_len);
+                    free(combined);
+                }
+                break;
+            }
+
             if (Event->RECEIVE.BufferCount > 0) {
-                const char* event_type = (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) ? "RECEIVE_FIN" : "RECEIVE";
+                const char* event_type = has_fin ? "RECEIVE_FIN" : "RECEIVE";
 
                 uint64_t stream_id = 0;
                 uint32_t stream_id_len = sizeof(stream_id);
@@ -274,6 +333,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                 }
             }
             break;
+        }
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
             // Free the send buffer that was allocated in quicsilver_send_stream
             if (Event->SEND_COMPLETE.ClientContext != NULL) {
@@ -284,6 +344,9 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             ctx->shutdown = 1;
             free(ctx);
             MsQuic->SetCallbackHandler(Stream, (void*)StreamCallback, NULL);
+            if (Event->SHUTDOWN_COMPLETE.AppCloseInProgress == FALSE) {
+                MsQuic->StreamClose(Stream);
+            }
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
             break;

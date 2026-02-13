@@ -112,6 +112,15 @@ class RequestTest < Minitest::Test
     assert_equal 0x999, stop_code
   end
 
+  def test_fail_does_not_clobber_cancel
+    stub_cancel do
+      @request.cancel
+      @request.fail(0x10c, "Stream reset")
+
+      assert @request.cancelled?, "Cancel should win — fail must not overwrite status outside mutex"
+    end
+  end
+
   # Error classes
   def test_cancelled_error_exists
     assert_equal Quicsilver::Request::CancelledError.superclass, StandardError

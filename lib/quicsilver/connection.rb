@@ -56,7 +56,7 @@ module Quicsilver
 
     def buffer_data(stream_id, data)
       @mutex.synchronize do
-        (@response_buffers[stream_id] ||= StringIO.new).write(data)
+        (@response_buffers[stream_id] ||= StringIO.new("".b)).write(data)
       end
     end
 
