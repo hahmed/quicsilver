@@ -108,10 +108,8 @@ safe_funcall(VALUE receiver, ID method, int argc, VALUE* argv)
     int state = 0;
     rb_protect(dispatch_funcall, (VALUE)&args, &state);
     if (state) {
-        VALUE err = rb_errinfo();
         rb_set_errinfo(Qnil);
-        VALUE msg = rb_funcall(err, rb_intern("message"), 0);
-        fprintf(stderr, "Quicsilver: exception in callback: %s\n", StringValueCStr(msg));
+        fprintf(stderr, "Quicsilver: exception in callback\n");
     }
 }
 
@@ -432,6 +430,8 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
 
                 // Set the stream callback handler to handle data events
                 MsQuic->SetCallbackHandler(Stream, (void*)StreamCallback, stream_ctx);
+            } else {
+                MsQuic->StreamClose(Stream);
             }
          break; 
         default:

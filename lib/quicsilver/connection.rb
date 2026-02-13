@@ -67,7 +67,7 @@ module Quicsilver
     def complete_stream(stream_id, final_data)
       @mutex.synchronize do
         buffer = @response_buffers.delete(stream_id)
-        (buffer&.string || "") + (final_data || "")
+        (buffer&.string || "".b) + (final_data || "".b)
       end
     end
 
@@ -156,8 +156,10 @@ module Quicsilver
       @streams.keys.select { |id| (id & 0x02) == 0 }.max || 0
     end
 
-    # RFC 9114 §7.2.4.1: HTTP/2 setting identifiers that must not appear in HTTP/3
-    HTTP2_SETTINGS = [0x02, 0x03, 0x04, 0x05, 0x08].freeze
+    # RFC 9114 §7.2.4.1 / §11.2.2: HTTP/2 setting identifiers forbidden in HTTP/3
+    # 0x00 = SETTINGS_HEADER_TABLE_SIZE (reserved), 0x02-0x05 = various HTTP/2 settings
+    # Note: 0x08 (SETTINGS_ENABLE_CONNECT_PROTOCOL) is valid in HTTP/3 per RFC 9220
+    HTTP2_SETTINGS = [0x00, 0x02, 0x03, 0x04, 0x05].freeze
 
     def parse_control_frames(data)
       offset = 0

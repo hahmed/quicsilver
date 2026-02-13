@@ -37,9 +37,36 @@ class ConnectionTest < Minitest::Test
 
   # === Control stream validation (#7, #8, #9) ===
 
+  def test_complete_stream_returns_binary_encoding
+    result = @connection.complete_stream(999, nil)
+    assert_equal Encoding::ASCII_8BIT, result.encoding
+  end
+
+  def test_rejects_reserved_settings_header_table_size
+    conn = Quicsilver::Connection.new(12345, [12345, 67890])
+    settings_payload = encode_varint(0x00) + encode_varint(0)
+    control_payload = encode_varint(Quicsilver::HTTP3::FRAME_SETTINGS) +
+                      encode_varint(settings_payload.bytesize) +
+                      settings_payload
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      conn.set_control_stream(1, control_payload)
+    end
+  end
+
+  def test_accepts_enable_connect_protocol
+    settings_payload = encode_varint(0x08) + encode_varint(1)
+    control_payload = encode_varint(Quicsilver::HTTP3::FRAME_SETTINGS) +
+                      encode_varint(settings_payload.bytesize) +
+                      settings_payload
+
+    @connection.set_control_stream(1, control_payload)
+    assert_equal 1, @connection.settings[0x08]
+  end
+
   def test_rejects_http2_settings_identifiers
-    # RFC 9114 §7.2.4.1: identifiers 0x02, 0x03, 0x04, 0x05, 0x08 are reserved
-    [0x02, 0x03, 0x04, 0x05, 0x08].each do |id|
+    # RFC 9114 §7.2.4.1 / §11.2.2: identifiers 0x00, 0x02, 0x03, 0x04, 0x05 are reserved
+    [0x00, 0x02, 0x03, 0x04, 0x05].each do |id|
       conn = Quicsilver::Connection.new(12345, [12345, 67890])
       settings_payload = encode_varint(id) + encode_varint(0)
       control_payload = encode_varint(Quicsilver::HTTP3::FRAME_SETTINGS) +
