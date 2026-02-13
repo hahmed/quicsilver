@@ -119,6 +119,24 @@ class QuicsilverTest < Minitest::Test
     assert clients.length > 0, "Should have created multiple clients"
   end
 
+  def test_listener_uses_configured_alpn
+    # Server with non-standard ALPN — client uses "h3" so handshake should fail
+    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path, alpn: "not-h3")
+    server = Quicsilver::Server.new(4437, server_configuration: config)
+    client = Quicsilver::Client.new("localhost", 4437, connection_timeout: 2000)
+
+    server_thread = Thread.new { server.start }
+    sleep 0.5
+
+    assert_raises(Quicsilver::ConnectionError, Quicsilver::TimeoutError) do
+      client.connect
+    end
+  ensure
+    client&.disconnect if client&.connected?
+    server&.stop if server&.running?
+    server_thread&.join(2)
+  end
+
   def test_server_restart_after_stop
     server = Quicsilver::Server.new(4436, server_configuration: default_server_config)
 

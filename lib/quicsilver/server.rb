@@ -62,7 +62,7 @@ module Quicsilver
       @listener_data = ListenerData.new(result[0], result[1])
       raise ServerListenerError, "Failed to create listener #{@address}:#{@port}"  unless @listener_data
 
-      unless Quicsilver.start_listener(@listener_data.listener_handle, @address, @port)
+      unless Quicsilver.start_listener(@listener_data.listener_handle, @address, @port, @server_configuration.alpn)
         Quicsilver.close_configuration(@config_handle)
         @config_handle = nil
         cleanup_failed_server

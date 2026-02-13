@@ -1015,16 +1015,17 @@ quicsilver_create_listener(VALUE self, VALUE config_handle)
 
 // Start listener on specific address and port
 static VALUE
-quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALUE port)
+quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALUE port, VALUE alpn)
 {
     if (MsQuic == NULL) {
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
         return Qfalse;
     }
-    
+
     HQUIC Listener = (HQUIC)(uintptr_t)NUM2ULL(listener_handle);
     uint16_t Port = (uint16_t)NUM2INT(port);
-    
+    const char* alpn_str = StringValueCStr(alpn);
+
     // Setup address - properly initialize the entire structure
     QUIC_ADDR Address;
     memset(&Address, 0, sizeof(Address));
@@ -1039,12 +1040,11 @@ quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALU
         QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_UNSPEC);
     }
     QuicAddrSetPort(&Address, Port);
-    
+
     QUIC_STATUS Status;
-    
-    // Create QUIC_BUFFER for the address
-    QUIC_BUFFER AlpnBuffer = { sizeof("h3") - 1, (uint8_t*)"h3" };
-    
+
+    QUIC_BUFFER AlpnBuffer = { (uint32_t)strlen(alpn_str), (uint8_t*)alpn_str };
+
     if (QUIC_FAILED(Status = MsQuic->ListenerStart(Listener, &AlpnBuffer, 1, &Address))) {
         rb_raise(rb_eRuntimeError, "ListenerStart failed, 0x%x!", Status);
         return Qfalse;
@@ -1264,7 +1264,7 @@ Init_quicsilver(void)
     
     // Listener management
     rb_define_singleton_method(mQuicsilver, "create_listener", quicsilver_create_listener, 1);
-    rb_define_singleton_method(mQuicsilver, "start_listener", quicsilver_start_listener, 3);
+    rb_define_singleton_method(mQuicsilver, "start_listener", quicsilver_start_listener, 4);
     rb_define_singleton_method(mQuicsilver, "stop_listener", quicsilver_stop_listener, 1);
     rb_define_singleton_method(mQuicsilver, "close_listener", quicsilver_close_listener, 1);
 
