@@ -97,6 +97,101 @@ class RequestParserTest < Minitest::Test
     assert_equal "chunk1chunk2chunk3", parser.body.read
   end
 
+  def test_indexed_field_with_high_index
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/",
+      "upgrade-insecure-requests" => "1"
+    )
+    parser = Quicsilver::HTTP3::RequestParser.new(build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload))
+    parser.parse
+
+    assert_equal "GET", parser.headers[":method"]
+    assert_equal "1", parser.headers["upgrade-insecure-requests"]
+  end
+
+  def test_literal_with_name_reference_high_index
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/",
+      "user-agent" => "TestBot/2.0"
+    )
+    parser = Quicsilver::HTTP3::RequestParser.new(build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload))
+    parser.parse
+
+    assert_equal "TestBot/2.0", parser.headers["user-agent"]
+  end
+
+  def test_all_indexed_fields_roundtrip
+    encoder = Quicsilver::Qpack::Encoder.new
+    table = Quicsilver::HTTP3::STATIC_TABLE
+
+    table.each_with_index do |(name, value), idx|
+      next if value.empty? # Skip name-only entries
+      next if name.start_with?(":status") # Response-only pseudo-headers
+
+      payload = encoder.encode({ name => value })
+      frame = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, payload)
+      parser = Quicsilver::HTTP3::RequestParser.new(frame)
+      parser.parse
+
+      assert_equal value, parser.headers[name],
+        "Static table index #{idx}: #{name}=#{value} failed to roundtrip"
+    end
+  end
+
+  def test_rejects_settings_frame_on_request_stream
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/"
+    )
+    data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload)
+    data += build_frame(Quicsilver::HTTP3::FRAME_SETTINGS, "\x01\x00")
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      parser = Quicsilver::HTTP3::RequestParser.new(data)
+      parser.parse
+    end
+  end
+
+  def test_rejects_goaway_frame_on_request_stream
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/"
+    )
+    data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload)
+    data += build_frame(Quicsilver::HTTP3::FRAME_GOAWAY, "\x00")
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      parser = Quicsilver::HTTP3::RequestParser.new(data)
+      parser.parse
+    end
+  end
+
+  def test_rejects_max_push_id_frame_on_request_stream
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/"
+    )
+    data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload)
+    data += build_frame(Quicsilver::HTTP3::FRAME_MAX_PUSH_ID, "\x00")
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      parser = Quicsilver::HTTP3::RequestParser.new(data)
+      parser.parse
+    end
+  end
+
   def test_frames_are_recorded
     headers_payload = build_qpack_headers(
       ":method" => "POST",

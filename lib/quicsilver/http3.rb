@@ -11,6 +11,11 @@ module Quicsilver
     FRAME_GOAWAY = 0x07
     FRAME_MAX_PUSH_ID = 0x0d
 
+    # Frame types forbidden on request streams (RFC 9114 Section 7.2.4, 7.2.6, 7.2.7)
+    CONTROL_ONLY_FRAMES = [FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID].freeze
+
+    FrameError = Class.new(StandardError)
+
     # HTTP/3 Error Codes (RFC 9114 Section 8.1)
     H3_NO_ERROR = 0x100
     H3_GENERAL_PROTOCOL_ERROR = 0x101
@@ -196,7 +201,10 @@ module Quicsilver
       # Build control stream data
       def build_control_stream
         stream_type = [0x00].pack('C')  # Control stream type
-        settings = build_settings_frame({})
+        settings = build_settings_frame({
+          0x01 => 0,  # QPACK_MAX_TABLE_CAPACITY = 0 (no dynamic table)
+          0x07 => 0   # QPACK_BLOCKED_STREAMS = 0
+        })
 
         stream_type + settings
       end

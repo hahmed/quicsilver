@@ -90,6 +90,10 @@ module Quicsilver
           payload = buffer[offset + header_len, length]
           @frames << { type: type, length: length, payload: payload }
 
+          if HTTP3::CONTROL_ONLY_FRAMES.include?(type)
+            raise HTTP3::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
+          end
+
           case type
           when 0x01 # HEADERS
             parse_headers(payload)
@@ -114,8 +118,8 @@ module Quicsilver
           # Pattern 1: Indexed Field Line (1Txxxxxx)
           # Use both name AND value from static table
           if (byte & 0x80) == 0x80
-            index = byte & 0x3F
-            offset += 1
+            index, bytes_consumed = decode_prefix_integer(payload.bytes, offset, 6, 0xC0)
+            offset += bytes_consumed
 
             field = decode_static_table_field(index)
             if field.is_a?(Hash)

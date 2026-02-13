@@ -231,29 +231,46 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
 
     switch (Event->Type) {
         case QUIC_STREAM_EVENT_RECEIVE:
-            // Client sent data - enqueue for Ruby processing
             if (Event->RECEIVE.BufferCount > 0) {
-                const QUIC_BUFFER* buffer = &Event->RECEIVE.Buffers[0];
                 const char* event_type = (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) ? "RECEIVE_FIN" : "RECEIVE";
 
-                // Get the QUIC protocol stream ID (0, 4, 8, 12...)
                 uint64_t stream_id = 0;
                 uint32_t stream_id_len = sizeof(stream_id);
                 MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
 
-                // Pack stream handle pointer along with data for RECEIVE_FIN
+                size_t total_data_len = 0;
+                for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
+                    total_data_len += Event->RECEIVE.Buffers[b].Length;
+                }
+
                 if (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) {
-                    // Create combined buffer: [stream_handle(8 bytes)][data]
-                    size_t total_len = sizeof(HQUIC) + buffer->Length;
+                    // Create combined buffer: [stream_handle(8 bytes)][all data]
+                    size_t total_len = sizeof(HQUIC) + total_data_len;
                     char* combined = (char*)malloc(total_len);
                     if (combined != NULL) {
                         memcpy(combined, &Stream, sizeof(HQUIC));
-                        memcpy(combined + sizeof(HQUIC), buffer->Buffer, buffer->Length);
+                        size_t offset = sizeof(HQUIC);
+                        for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
+                            memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
+                            offset += Event->RECEIVE.Buffers[b].Length;
+                        }
                         dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_len);
                         free(combined);
                     }
+                } else if (Event->RECEIVE.BufferCount == 1) {
+                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id,
+                        (const char*)Event->RECEIVE.Buffers[0].Buffer, Event->RECEIVE.Buffers[0].Length);
                 } else {
-                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, (const char*)buffer->Buffer, buffer->Length);
+                    char* combined = (char*)malloc(total_data_len);
+                    if (combined != NULL) {
+                        size_t offset = 0;
+                        for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
+                            memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
+                            offset += Event->RECEIVE.Buffers[b].Length;
+                        }
+                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_data_len);
+                        free(combined);
+                    }
                 }
             }
             break;
@@ -265,6 +282,8 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
             ctx->shutdown = 1;
+            free(ctx);
+            MsQuic->SetCallbackHandler(Stream, (void*)StreamCallback, NULL);
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
             break;
@@ -330,8 +349,11 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
-            // Notify Ruby to clean up connection resources
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC));
+            // Server contexts are freed here; client contexts in close_connection_handle
+            if (NIL_P(ctx->client_obj)) {
+                free(ctx);
+            }
             break;
          case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
             // Client opened a stream
@@ -521,11 +543,11 @@ quicsilver_create_configuration(VALUE self, VALUE unsecure)
     }
     
     if (QUIC_FAILED(Status = MsQuic->ConfigurationLoadCredential(Configuration, &CredConfig))) {
-        rb_raise(rb_eRuntimeError, "ConfigurationLoadCredential failed, 0x%x!", Status);
         MsQuic->ConfigurationClose(Configuration);
+        rb_raise(rb_eRuntimeError, "ConfigurationLoadCredential failed, 0x%x!", Status);
         return Qnil;
     }
-    
+
     // Return the configuration handle as a Ruby integer (pointer)
     return ULL2NUM((uintptr_t)Configuration);
 }
@@ -645,8 +667,8 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     
     if (QUIC_FAILED(Status = MsQuic->ConfigurationLoadCredential(Configuration, &CredConfig))) {
-        rb_raise(rb_eRuntimeError, "Server ConfigurationLoadCredential failed, 0x%x!", Status);
         MsQuic->ConfigurationClose(Configuration);
+        rb_raise(rb_eRuntimeError, "Server ConfigurationLoadCredential failed, 0x%x!", Status);
         return Qnil;
     }
     
@@ -843,20 +865,35 @@ quicsilver_close_configuration(VALUE self, VALUE config_handle)
     return Qnil;
 }
 
-// Close MSQUIC
 static VALUE
 quicsilver_close(VALUE self)
 {
     if (MsQuic != NULL) {
         if (Registration != NULL) {
-            // This will block until all outstanding child objects have been closed
             MsQuic->RegistrationClose(Registration);
             Registration = NULL;
         }
+
+        if (ExecContext != NULL) {
+            MsQuic->ExecutionDelete(1, &ExecContext);
+            ExecContext = NULL;
+        }
+
         MsQuicClose(MsQuic);
         MsQuic = NULL;
     }
-    
+
+#if __linux__
+    if (WakeFd != -1) {
+        close(WakeFd);
+        WakeFd = -1;
+    }
+#endif
+    if (EventQ != -1) {
+        close(EventQ);
+        EventQ = -1;
+    }
+
     return Qnil;
 }
 

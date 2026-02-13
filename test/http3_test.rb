@@ -96,20 +96,35 @@ class HTTP3Test < Minitest::Test
     stream = Quicsilver::HTTP3.build_control_stream
     bytes = stream.bytes
 
-    # Control stream starts with stream type 0x00
-    assert_equal 0x00, bytes[0], "First byte must be control stream type (0x00)"
+    assert_equal 0x00, bytes[0]
 
-    # Followed by SETTINGS frame
     frame_type, type_len = Quicsilver::HTTP3.decode_varint(bytes, 1)
-    assert_equal 0x04, frame_type, "Frame type must be SETTINGS (0x04)"
+    assert_equal 0x04, frame_type
 
-    # Empty SETTINGS frame (length = 0) per RFC 9114 - uses defaults
-    frame_length, _ = Quicsilver::HTTP3.decode_varint(bytes, 1 + type_len)
-    assert_equal 0, frame_length, "SETTINGS frame should be empty (length 0)"
+    frame_length, length_len = Quicsilver::HTTP3.decode_varint(bytes, 1 + type_len)
+    assert frame_length > 0, "SETTINGS frame must not be empty"
 
-    # Total: 1 byte stream type + 1 byte frame type + 1 byte length = 3 bytes
-    assert_equal 3, stream.bytesize
+    settings_start = 1 + type_len + length_len
+    settings = parse_settings(bytes[settings_start, frame_length])
+    assert_equal 0, settings[0x01], "QPACK_MAX_TABLE_CAPACITY"
+    assert_equal 0, settings[0x07], "QPACK_BLOCKED_STREAMS"
   end
+
+  private
+
+  def parse_settings(bytes)
+    settings = {}
+    offset = 0
+    while offset < bytes.size
+      id, id_len = Quicsilver::HTTP3.decode_varint(bytes, offset)
+      value, value_len = Quicsilver::HTTP3.decode_varint(bytes, offset + id_len)
+      settings[id] = value
+      offset += id_len + value_len
+    end
+    settings
+  end
+
+  public
 
   def test_decode_varint_insufficient_bytes
     # First byte indicates 2-byte varint but only 1 byte available
