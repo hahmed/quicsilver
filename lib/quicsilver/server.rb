@@ -2,7 +2,7 @@
 
 module Quicsilver
   class Server
-    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down
+    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size
 
     STREAM_EVENT_RECEIVE = "RECEIVE"
     STREAM_EVENT_RECEIVE_FIN = "RECEIVE_FIN"
@@ -25,8 +25,9 @@ module Quicsilver
     end
 
     DEFAULT_THREAD_POOL_SIZE = 5
+    DEFAULT_QUEUE_MULTIPLIER = 4
 
-    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE)
+    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil)
       @port = port
       @address = address
       @app = app || default_rack_app
@@ -40,6 +41,7 @@ module Quicsilver
       @handler_threads = []
       @handler_mutex = Mutex.new
       @thread_pool_size = threads
+      @max_queue_size = max_queue_size || threads * DEFAULT_QUEUE_MULTIPLIER
       @work_queue = Queue.new
       @cancelled_streams = Set.new
       @cancelled_mutex = Mutex.new
@@ -249,9 +251,15 @@ module Quicsilver
       end
     end
 
-    # Dispatch request to worker pool — bounded concurrency, no GVL strangulation
+    attr_reader :work_queue
+
     def dispatch_request(connection, stream)
-      @work_queue.push([connection, stream])
+      if @work_queue.size >= @max_queue_size
+        Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
+        connection.send_error(stream, 503, "Service Unavailable") if stream.ready_to_send?
+      else
+        @work_queue.push([connection, stream])
+      end
     end
 
     def start_worker_pool

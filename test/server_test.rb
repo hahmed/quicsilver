@@ -155,6 +155,54 @@ class ServerTest < Minitest::Test
       "Should reset the stream with H3_REQUEST_CANCELLED"
   end
 
+  def test_default_max_queue_size
+    server = create_server_direct(threads: 5)
+    assert_equal 20, server.max_queue_size
+  end
+
+  def test_custom_max_queue_size
+    server = create_server_direct(threads: 5, max_queue_size: 100)
+    assert_equal 100, server.max_queue_size
+  end
+
+  def test_dispatch_sends_503_when_queue_full
+    server = create_server_direct(threads: 1, max_queue_size: 1, app: ->(env) { [200, {}, ["OK"]] })
+
+    connection_handle = 12345
+    connection_data = [connection_handle, 67890]
+    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    server.connections[connection_handle] = connection
+
+    # Fill the queue so next dispatch overflows
+    server.send(:work_queue).push([:dummy, :work])
+
+    stream = Quicsilver::QuicStream.new(4)
+    stream.stream_handle = 0xBEEF
+
+    error_sent = nil
+    connection.stub(:send_error, ->(s, status, msg) { error_sent = [status, msg] }) do
+      server.send(:dispatch_request, connection, stream)
+    end
+
+    assert_equal [503, "Service Unavailable"], error_sent
+  end
+
+  def test_dispatch_queues_when_under_limit
+    server = create_server_direct(threads: 1, max_queue_size: 5, app: ->(env) { [200, {}, ["OK"]] })
+
+    connection_handle = 12345
+    connection_data = [connection_handle, 67890]
+    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    server.connections[connection_handle] = connection
+
+    stream = Quicsilver::QuicStream.new(4)
+    stream.stream_handle = 0xBEEF
+
+    server.send(:dispatch_request, connection, stream)
+
+    assert_equal 1, server.send(:work_queue).size
+  end
+
   private
 
   def create_server(port=4433, options={}, app=nil)
@@ -163,5 +211,10 @@ class ServerTest < Minitest::Test
 
     server_config = options.delete(:server_configuration) || Quicsilver::ServerConfiguration.new(normalized_cert_file, normalized_key_file)
     Quicsilver::Server.new(port, server_configuration: server_config, app: app, **options)
+  end
+
+  def create_server_direct(**kwargs)
+    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path)
+    Quicsilver::Server.new(4433, server_configuration: config, **kwargs)
   end
 end
