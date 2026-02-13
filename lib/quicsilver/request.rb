@@ -2,7 +2,7 @@
 
 module Quicsilver
   class Request
-    attr_reader :stream_handle, :status
+    attr_reader :stream, :status
 
     CancelledError = Class.new(StandardError)
 
@@ -15,9 +15,9 @@ module Quicsilver
       end
     end
 
-    def initialize(client, stream_handle)
+    def initialize(client, stream)
       @client = client
-      @stream_handle = stream_handle
+      @stream = stream
       @status = :pending
       @queue = Queue.new
       @mutex = Mutex.new
@@ -57,7 +57,7 @@ module Quicsilver
       @mutex.synchronize do
         return false unless @status == :pending
 
-        Quicsilver.stream_reset(@stream_handle, error_code)
+        @stream.reset(error_code)
         @status = :cancelled
       end
       true

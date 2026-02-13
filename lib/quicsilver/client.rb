@@ -4,6 +4,8 @@ require_relative "http3/request_encoder"
 require_relative "http3/response_parser"
 require_relative "event_loop"
 require_relative "request"
+require_relative "stream"
+require_relative "stream_event"
 require "timeout"
 
 module Quicsilver
@@ -31,7 +33,7 @@ module Quicsilver
       @connection_start_time = nil
 
       @response_buffers = {}
-      @pending_requests = {}  # stream_handle => Request
+      @pending_requests = {}  # handle => Request
       @mutex = Mutex.new
     end
 
@@ -98,7 +100,7 @@ module Quicsilver
       raise StreamFailedToOpenError unless stream
 
       request = Request.new(self, stream)
-      @mutex.synchronize { @pending_requests[stream] = request }
+      @mutex.synchronize { @pending_requests[stream.handle] = request }
 
       send_to_stream(stream, method, path, headers, body)
 
@@ -123,7 +125,7 @@ module Quicsilver
       "#{@hostname}:#{@port}"
     end
 
-    # Called directly by C extension via process_events
+    # Called directly by C extension via dispatch_to_ruby
     def handle_stream_event(stream_id, event, data) # :nodoc:
       return unless FINISHED_EVENTS.include?(event)
 
@@ -133,11 +135,10 @@ module Quicsilver
           (@response_buffers[stream_id] ||= StringIO.new("".b)).write(data)
 
         when "RECEIVE_FIN"
-          stream_handle = data[0, 8].unpack1("Q") if data.bytesize >= 8
-          actual_data = data[8..-1] || "".b
+          event = StreamEvent.new(data, "RECEIVE_FIN")
 
           buffer = @response_buffers.delete(stream_id)
-          full_data = (buffer&.string || "".b) + actual_data
+          full_data = (buffer&.string || "".b) + event.data
 
           response_parser = HTTP3::ResponseParser.new(full_data)
           response_parser.parse
@@ -148,21 +149,18 @@ module Quicsilver
             body: response_parser.body.read
           }
 
-          request = @pending_requests.delete(stream_handle)
+          request = @pending_requests.delete(event.handle)
           request&.complete(response)
 
         when "STREAM_RESET"
-          error_code = data.unpack1("Q")
-          # Find request by stream_id (we don't have stream_handle here)
-          request = @pending_requests.values.find { |r| r.stream_handle == stream_id }
-          if request
-            @pending_requests.delete(request.stream_handle)
-            request.fail(error_code, "Stream reset by server")
-          end
+          event = StreamEvent.new(data, "STREAM_RESET")
+          request = @pending_requests.delete(event.handle)
+          request&.fail(event.error_code, "Stream reset by peer")
 
         when "STOP_SENDING"
-          error_code = data.unpack1("Q")
-          Quicsilver.logger.debug("Stream #{stream_id} stop sending: 0x#{error_code.to_s(16)}")
+          event = StreamEvent.new(data, "STOP_SENDING")
+          request = @pending_requests.delete(event.handle)
+          request&.fail(event.error_code, "Peer sent STOP_SENDING")
         end
       end
     rescue => e
@@ -197,18 +195,18 @@ module Quicsilver
     end
 
     def open_stream
-      Quicsilver.open_stream(@connection_data, false)
+      handle = Quicsilver.open_stream(@connection_data, false)
+      Stream.new(handle)
     end
 
     def open_unidirectional_stream
-      Quicsilver.open_stream(@connection_data, true)
+      handle = Quicsilver.open_stream(@connection_data, true)
+      Stream.new(handle)
     end
 
     def send_control_stream
-      stream = open_unidirectional_stream
-      control_data = HTTP3.build_control_stream
-      Quicsilver.send_stream(stream, control_data, false)
-      @control_stream = stream
+      @control_stream = open_unidirectional_stream
+      @control_stream.send(HTTP3.build_control_stream)
     end
 
     def handle_connection_result(result)
@@ -238,10 +236,10 @@ module Quicsilver
         body: body
       ).encode
 
-      result = Quicsilver.send_stream(stream, encoded_response, true)
+      result = stream.send(encoded_response, fin: true)
 
       unless result
-        @mutex.synchronize { @pending_requests.delete(stream) }
+        @mutex.synchronize { @pending_requests.delete(stream.handle) }
         raise Error, "Failed to send request"
       end
     end

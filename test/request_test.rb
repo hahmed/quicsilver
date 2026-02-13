@@ -6,8 +6,8 @@ class RequestTest < Minitest::Test
   def setup
     @mock_client = Object.new
     def @mock_client.request_timeout; 30; end
-    @stream_handle = 12345
-    @request = Quicsilver::Request.new(@mock_client, @stream_handle)
+    @mock_stream = Quicsilver::Stream.new(12345)
+    @request = Quicsilver::Request.new(@mock_client, @mock_stream)
   end
 
   def test_initial_state_is_pending
@@ -17,8 +17,8 @@ class RequestTest < Minitest::Test
     assert_equal :pending, @request.status
   end
 
-  def test_stream_handle_accessible
-    assert_equal @stream_handle, @request.stream_handle
+  def test_stream_accessible
+    assert_equal @mock_stream, @request.stream
   end
 
   def test_complete_delivers_response
@@ -63,7 +63,6 @@ class RequestTest < Minitest::Test
   end
 
   def test_cancel_changes_status_to_cancelled
-    # Mock the stream_reset call
     Quicsilver.stub(:stream_reset, true) do
       result = @request.cancel
       assert result

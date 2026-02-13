@@ -183,13 +183,11 @@ module Quicsilver
       when STREAM_EVENT_RECEIVE_FIN
         return unless (connection = @connections[connection_handle])
 
-        stream_handle = data[0, 8].unpack1("Q")
-        actual_data = data[8..-1] || ""
+        event = StreamEvent.new(data, "RECEIVE_FIN")
 
-        # Get buffered data and build stream
-        full_data = connection.complete_stream(stream_id, actual_data)
+        full_data = connection.complete_stream(stream_id, event.data)
         stream = QuicStream.new(stream_id)
-        stream.stream_handle = stream_handle
+        stream.stream_handle = event.handle
         stream.append_data(full_data)
 
         if stream.bidirectional?
@@ -200,14 +198,14 @@ module Quicsilver
 
       when STREAM_EVENT_STREAM_RESET
         return unless @connections[connection_handle]
-        error_code = data.unpack1("Q")
-        Quicsilver.logger.debug("Stream #{stream_id} reset by peer with error code: 0x#{error_code.to_s(16)}")
+        event = StreamEvent.new(data, "STREAM_RESET")
+        Quicsilver.logger.debug("Stream #{stream_id} reset by peer with error code: 0x#{event.error_code.to_s(16)}")
         @request_registry.complete(stream_id)
 
       when STREAM_EVENT_STOP_SENDING
         return unless @connections[connection_handle]
-        error_code = data.unpack1("Q")
-        Quicsilver.logger.debug("Stream #{stream_id} stop sending requested with error code: 0x#{error_code.to_s(16)}")
+        event = StreamEvent.new(data, "STOP_SENDING")
+        Quicsilver.logger.debug("Stream #{stream_id} stop sending requested with error code: 0x#{event.error_code.to_s(16)}")
       end
     end
 

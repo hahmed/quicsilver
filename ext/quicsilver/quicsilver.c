@@ -226,21 +226,27 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
         case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED: {
-            // Peer sent RESET_STREAM - notify Ruby
+            // Peer sent RESET_STREAM — pack [stream_handle(8)][error_code(8)]
             uint64_t stream_id = 0;
             uint32_t stream_id_len = sizeof(stream_id);
             MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
             uint64_t error_code = Event->PEER_SEND_ABORTED.ErrorCode;
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", stream_id, (const char*)&error_code, sizeof(error_code));
+            char combined[sizeof(HQUIC) + sizeof(uint64_t)];
+            memcpy(combined, &Stream, sizeof(HQUIC));
+            memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", stream_id, combined, sizeof(combined));
             break;
         }
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
-            // Peer sent STOP_SENDING - notify Ruby
+            // Peer sent STOP_SENDING — pack [stream_handle(8)][error_code(8)]
             uint64_t stream_id = 0;
             uint32_t stream_id_len = sizeof(stream_id);
             MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
             uint64_t error_code = Event->PEER_RECEIVE_ABORTED.ErrorCode;
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", stream_id, (const char*)&error_code, sizeof(error_code));
+            char combined[sizeof(HQUIC) + sizeof(uint64_t)];
+            memcpy(combined, &Stream, sizeof(HQUIC));
+            memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", stream_id, combined, sizeof(combined));
             break;
         }
     }
@@ -963,7 +969,7 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
         rb_raise(rb_eRuntimeError, "StreamStart failed, 0x%x!", Status);
         return Qnil;
     }
-    
+
     return ULL2NUM((uintptr_t)Stream);
 }
 

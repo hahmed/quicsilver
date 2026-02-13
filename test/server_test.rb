@@ -83,6 +83,36 @@ class ServerTest < Minitest::Test
     assert_equal "chunk1chunk2chunk3", connection.complete_stream(stream_id, "")
   end
 
+  # Regression: C packs STREAM_RESET data as [handle(8)][error_code(8)].
+  # Server must skip the handle prefix to read the error code correctly.
+  def test_handle_stream_reset_parses_error_code_from_packed_data
+    logged_messages = []
+    Quicsilver.logger.stub(:debug, ->(msg) { logged_messages << msg }) do
+      server = create_server(4433, app: ->(env) { [200, {}, ["OK"]] })
+      connection_handle = 12345
+      connection_data = [connection_handle, 67890]
+
+      connection = Quicsilver::Connection.new(connection_handle, connection_data)
+      server.connections[connection_handle] = connection
+
+      stream_id = 4
+      server.request_registry.track(stream_id, connection_handle, path: "/test", method: "GET")
+
+      # C sends [handle(8)][error_code(8)]
+      fake_handle = 0xDEADBEEF
+      error_code = 0x10c
+      packed_data = [fake_handle, error_code].pack("QQ")
+
+      Quicsilver::Server.handle_stream(connection_data, stream_id, "STREAM_RESET", packed_data)
+
+      assert server.request_registry.empty?, "Request should be cleaned up after STREAM_RESET"
+
+      reset_log = logged_messages.find { |m| m.include?("reset") }
+      assert reset_log, "Should log the reset event"
+      assert_includes reset_log, "0x10c", "Should log the correct error code, not the handle"
+    end
+  end
+
   private
 
   def create_server(port=4433, options={}, app=nil)

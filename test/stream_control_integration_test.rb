@@ -189,6 +189,40 @@ class StreamControlIntegrationTest < Minitest::Test
     refute result, "Cancel should return false on stale handle"
   end
 
+  # Regression: C now packs [handle(8)][error_code(8)] for STREAM_RESET.
+  # Client must extract the handle to find the pending request and fail it.
+  def test_client_stream_reset_finds_request_by_handle
+    app = ->(env) { [200, {}, ["OK"]] }
+    start_server_and_client(app)
+
+    request = @client.build_request("GET", "/will-be-reset")
+    packed_data = [request.stream.handle, 0x10c].pack("QQ")
+
+    @client.handle_stream_event(0, "STREAM_RESET", packed_data)
+
+    error = assert_raises(Quicsilver::Request::ResetError) do
+      request.response(timeout: 1)
+    end
+    assert_equal 0x10c, error.error_code
+  end
+
+  # Regression: C now packs [handle(8)][error_code(8)] for STOP_SENDING.
+  # Client must fail the request instead of just logging.
+  def test_client_stop_sending_fails_request
+    app = ->(env) { [200, {}, ["OK"]] }
+    start_server_and_client(app)
+
+    request = @client.build_request("GET", "/will-get-stop-sending")
+    packed_data = [request.stream.handle, 0x10c].pack("QQ")
+
+    @client.handle_stream_event(0, "STOP_SENDING", packed_data)
+
+    error = assert_raises(Quicsilver::Request::ResetError) do
+      request.response(timeout: 1)
+    end
+    assert_equal 0x10c, error.error_code
+  end
+
   # Regression: response bodies with non-ASCII bytes (e.g. JSON from MySQL)
   # caused Encoding::CompatibilityError when concatenating binary C data
   # with a UTF-8 StringIO buffer in Client#handle_stream_event.

@@ -28,13 +28,13 @@ module Quicsilver
 
     def setup_http3_streams
       # Control stream (required)
-      @server_control_stream = Quicsilver.open_stream(@data, true)
-      Quicsilver.send_stream(@server_control_stream, HTTP3.build_control_stream, false)
+      @server_control_stream = open_stream(unidirectional: true)
+      @server_control_stream.send(HTTP3.build_control_stream)
 
       # QPACK encoder/decoder streams
       [0x02, 0x03].each do |type|
-        stream = Quicsilver.open_stream(@data, true)
-        Quicsilver.send_stream(stream, [type].pack("C"), false)
+        stream = open_stream(unidirectional: true)
+        stream.send([type].pack("C"))
       end
     end
 
@@ -73,7 +73,7 @@ module Quicsilver
       return unless @server_control_stream
 
       stream_id ||= last_client_stream_id
-      Quicsilver.send_stream(@server_control_stream, HTTP3.build_goaway_frame(stream_id), false)
+      @server_control_stream.send(HTTP3.build_goaway_frame(stream_id))
     rescue => e
       Quicsilver.logger.error("Failed to send GOAWAY: #{e.message}")
     end
@@ -136,15 +136,12 @@ module Quicsilver
       Quicsilver.connection_shutdown(@handle, error_code, false)
     end
 
-    def reset_stream(stream_handle, error_code = HTTP3::H3_REQUEST_CANCELLED)
-      Quicsilver.stream_reset(stream_handle, error_code)
-    end
-
-    def stop_sending(stream_handle, error_code = HTTP3::H3_REQUEST_CANCELLED)
-      Quicsilver.stream_stop_sending(stream_handle, error_code)
-    end
-
     private
+
+    def open_stream(unidirectional: false)
+      handle = Quicsilver.open_stream(@data, unidirectional)
+      Stream.new(handle)
+    end
 
     def last_client_stream_id
       @streams.keys.select { |id| (id & 0x02) == 0 }.max || 0
