@@ -44,6 +44,10 @@ module Quicsilver
           payload = buffer[offset + header_len, length]
           @frames << { type: type, length: length, payload: payload }
 
+          if HTTP3::CONTROL_ONLY_FRAMES.include?(type)
+            raise HTTP3::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
+          end
+
           case type
           when 0x01 # HEADERS
             parse_headers(payload)
@@ -125,12 +129,7 @@ module Quicsilver
         return nil if index >= HTTP3::STATIC_TABLE.size
 
         name, value = HTTP3::STATIC_TABLE[index]
-
-        if value.empty?
-          name
-        else
-          {name => value}
-        end
+        {name => value}
       end
     end
   end

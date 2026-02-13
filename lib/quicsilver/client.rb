@@ -207,6 +207,12 @@ module Quicsilver
     def send_control_stream
       @control_stream = open_unidirectional_stream
       @control_stream.send(HTTP3.build_control_stream)
+
+      # RFC 9204: QPACK encoder (0x02) and decoder (0x03) streams
+      [0x02, 0x03].each do |type|
+        stream = open_unidirectional_stream
+        stream.send([type].pack("C"))
+      end
     end
 
     def handle_connection_result(result)

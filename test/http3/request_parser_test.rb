@@ -126,6 +126,21 @@ class RequestParserTest < Minitest::Test
     assert_equal "TestBot/2.0", parser.headers["user-agent"]
   end
 
+  def test_indexed_field_with_empty_value
+    # Static table index 0 is [":authority", ""] — an empty-value entry.
+    # Pattern 1 (fully indexed) should still produce {":authority" => ""}
+    encoder = Quicsilver::Qpack::Encoder.new
+    # Manually build indexed field line for index 0
+    indexed_byte = encoder.send(:encode_indexed, 0)
+    payload = "\x00\x00".b + indexed_byte
+    frame = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, payload)
+
+    parser = Quicsilver::HTTP3::RequestParser.new(frame)
+    parser.parse
+
+    assert_equal "", parser.headers[":authority"]
+  end
+
   def test_all_indexed_fields_roundtrip
     encoder = Quicsilver::Qpack::Encoder.new
     table = Quicsilver::HTTP3::STATIC_TABLE

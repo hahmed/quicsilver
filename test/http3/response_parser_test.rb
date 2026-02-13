@@ -146,6 +146,36 @@ class ResponseParserTest < Minitest::Test
     assert_equal body_content, parser.frames[1][:payload]
   end
 
+  def test_indexed_field_with_empty_value
+    # Static table index 0 is [":authority", ""] — empty-value entry
+    encoder = Quicsilver::Qpack::Encoder.new
+    indexed_byte = encoder.send(:encode_indexed, 0)
+    headers_payload = "\x00\x00".b + build_indexed_status(200) + indexed_byte
+    parser = parse(build_frame(HEADERS, headers_payload))
+
+    assert_equal "", parser.headers[":authority"]
+  end
+
+  def test_rejects_settings_frame_on_request_stream
+    headers_payload = build_qpack_response_headers(200, {})
+    data = build_frame(HEADERS, headers_payload)
+    data += build_frame(Quicsilver::HTTP3::FRAME_SETTINGS, "\x01\x00")
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      parse(data)
+    end
+  end
+
+  def test_rejects_goaway_frame_on_request_stream
+    headers_payload = build_qpack_response_headers(200, {})
+    data = build_frame(HEADERS, headers_payload)
+    data += build_frame(Quicsilver::HTTP3::FRAME_GOAWAY, "\x00")
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      parse(data)
+    end
+  end
+
   # Edge cases
   def test_parse_empty_data
     parser = parse("")

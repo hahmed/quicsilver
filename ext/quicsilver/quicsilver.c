@@ -826,6 +826,19 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
     return Qnil;
 }
 
+// Close a server-side connection handle (context already freed in C callback)
+static VALUE
+quicsilver_close_server_connection(VALUE self, VALUE connection_handle)
+{
+    if (MsQuic == NULL) return Qnil;
+
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
+    if (Connection != NULL) {
+        MsQuic->ConnectionClose(Connection);
+    }
+    return Qnil;
+}
+
 // Gracefully shutdown a QUIC connection (sends CONNECTION_CLOSE frame to peer)
 // silent = true: immediate shutdown without notifying peer
 // silent = false: graceful shutdown with CONNECTION_CLOSE frame
@@ -1063,7 +1076,7 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
     // Start the stream
     Status = MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE);
     if (QUIC_FAILED(Status)) {
-        free(ctx);
+        // StreamClose fires SHUTDOWN_COMPLETE synchronously which frees ctx
         MsQuic->StreamClose(Stream);
         rb_raise(rb_eRuntimeError, "StreamStart failed, 0x%x!", Status);
         return Qnil;
@@ -1184,6 +1197,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "connection_shutdown", quicsilver_connection_shutdown, 3);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
+    rb_define_singleton_method(mQuicsilver, "close_server_connection", quicsilver_close_server_connection, 1);
     
     // Listener management
     rb_define_singleton_method(mQuicsilver, "create_listener", quicsilver_create_listener, 1);

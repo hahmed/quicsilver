@@ -34,6 +34,7 @@ module Quicsilver
       @running = false
       @shutting_down = false
       @listener_data = nil
+      @config_handle = nil
       @connections = {}
       @request_registry = RequestRegistry.new
       @handler_threads = []
@@ -50,16 +51,16 @@ module Quicsilver
       raise ServerIsRunningError, "Server is already running" if @running
 
       Quicsilver.open_connection
-      config = Quicsilver.create_server_configuration(@server_configuration.to_h)
-      raise ServerConfigurationError, "Failed to create server configuration" unless config
+      @config_handle = Quicsilver.create_server_configuration(@server_configuration.to_h)
+      raise ServerConfigurationError, "Failed to create server configuration" unless @config_handle
 
-      # Create and start the listener
-      result = Quicsilver.create_listener(config)
+      result = Quicsilver.create_listener(@config_handle)
       @listener_data = ListenerData.new(result[0], result[1])
       raise ServerListenerError, "Failed to create listener #{@address}:#{@port}"  unless @listener_data
 
       unless Quicsilver.start_listener(@listener_data.listener_handle, @address, @port)
-        Quicsilver.close_configuration(config)
+        Quicsilver.close_configuration(@config_handle)
+        @config_handle = nil
         cleanup_failed_server
         raise ServerListenerError, "Failed to start listener on #{@address}:#{@port}"
       end
@@ -99,7 +100,12 @@ module Quicsilver
         Quicsilver.close_listener([@listener_data.listener_handle, @listener_data.context_handle])
       end
 
-      Quicsilver.event_loop.stop  # Stop event loop so start unblocks
+      if @config_handle
+        Quicsilver.close_configuration(@config_handle)
+        @config_handle = nil
+      end
+
+      Quicsilver.event_loop.stop
       @running = false
       @listener_data = nil
     rescue => e
@@ -178,6 +184,7 @@ module Quicsilver
 
       when STREAM_EVENT_CONNECTION_CLOSED
         @connections.delete(connection_handle)&.streams&.clear
+        Quicsilver.close_server_connection(connection_handle)
 
       when STREAM_EVENT_SEND_COMPLETE
         # Buffer cleanup handled in C extension

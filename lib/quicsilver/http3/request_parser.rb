@@ -170,14 +170,7 @@ module Quicsilver
         return nil if index >= HTTP3::STATIC_TABLE.size
 
         name, value = HTTP3::STATIC_TABLE[index]
-
-        # If value is empty, return just the name (caller provides value)
-        # Otherwise return complete field as hash
-        if value.empty?
-          name
-        else
-          {name => value}
-        end
+        {name => value}
       end
     end
   end
