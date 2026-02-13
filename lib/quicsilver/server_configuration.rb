@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "localhost"
-
 module Quicsilver
   class ServerConfiguration
     attr_reader :cert_file, :key_file, :idle_timeout_ms, :server_resumption_level, :max_concurrent_requests,
@@ -44,30 +42,30 @@ module Quicsilver
     DEFAULT_HANDSHAKE_IDLE_TIMEOUT_MS = 10_000 # Handshake timeout (separate from connection idle)
 
     def initialize(cert_file = nil, key_file = nil, options = {})
-      @idle_timeout_ms = options[:idle_timeout_ms].nil? ? 10000 : options[:idle_timeout_ms]
-      @server_resumption_level = options[:server_resumption_level].nil? ? QUIC_SERVER_RESUME_AND_ZERORTT : options[:server_resumption_level]
-      @max_concurrent_requests = options[:max_concurrent_requests].nil? ? 100 : options[:max_concurrent_requests]
-      @max_unidirectional_streams = options[:max_unidirectional_streams].nil? ? 10 : options[:max_unidirectional_streams]
-      @alpn = options[:alpn].nil? ? DEFAULT_ALPN : options[:alpn]
+      @idle_timeout_ms = options.fetch(:idle_timeout_ms, 10000)
+      @server_resumption_level = options.fetch(:server_resumption_level, QUIC_SERVER_RESUME_AND_ZERORTT)
+      @max_concurrent_requests = options.fetch(:max_concurrent_requests, 100)
+      @max_unidirectional_streams = options.fetch(:max_unidirectional_streams, 10)
+      @alpn = options.fetch(:alpn, DEFAULT_ALPN)
 
       # Flow control
-      @stream_receive_window = options[:stream_receive_window].nil? ? DEFAULT_STREAM_RECEIVE_WINDOW : options[:stream_receive_window]
-      @stream_receive_buffer = options[:stream_receive_buffer].nil? ? DEFAULT_STREAM_RECEIVE_BUFFER : options[:stream_receive_buffer]
-      @connection_flow_control_window = options[:connection_flow_control_window].nil? ? DEFAULT_CONNECTION_FLOW_CONTROL_WINDOW : options[:connection_flow_control_window]
+      @stream_receive_window = options.fetch(:stream_receive_window, DEFAULT_STREAM_RECEIVE_WINDOW)
+      @stream_receive_buffer = options.fetch(:stream_receive_buffer, DEFAULT_STREAM_RECEIVE_BUFFER)
+      @connection_flow_control_window = options.fetch(:connection_flow_control_window, DEFAULT_CONNECTION_FLOW_CONTROL_WINDOW)
 
       # Throughput
-      @pacing_enabled = options[:pacing_enabled].nil? ? DEFAULT_PACING_ENABLED : options[:pacing_enabled]
-      @send_buffering_enabled = options[:send_buffering_enabled].nil? ? DEFAULT_SEND_BUFFERING_ENABLED : options[:send_buffering_enabled]
-      @initial_rtt_ms = options[:initial_rtt_ms].nil? ? DEFAULT_INITIAL_RTT_MS : options[:initial_rtt_ms]
-      @initial_window_packets = options[:initial_window_packets].nil? ? DEFAULT_INITIAL_WINDOW_PACKETS : options[:initial_window_packets]
-      @max_ack_delay_ms = options[:max_ack_delay_ms].nil? ? DEFAULT_MAX_ACK_DELAY_MS : options[:max_ack_delay_ms]
+      @pacing_enabled = options.fetch(:pacing_enabled, DEFAULT_PACING_ENABLED)
+      @send_buffering_enabled = options.fetch(:send_buffering_enabled, DEFAULT_SEND_BUFFERING_ENABLED)
+      @initial_rtt_ms = options.fetch(:initial_rtt_ms, DEFAULT_INITIAL_RTT_MS)
+      @initial_window_packets = options.fetch(:initial_window_packets, DEFAULT_INITIAL_WINDOW_PACKETS)
+      @max_ack_delay_ms = options.fetch(:max_ack_delay_ms, DEFAULT_MAX_ACK_DELAY_MS)
 
       # Connection management
-      @keep_alive_interval_ms = options[:keep_alive_interval_ms].nil? ? DEFAULT_KEEP_ALIVE_INTERVAL_MS : options[:keep_alive_interval_ms]
-      @congestion_control_algorithm = options[:congestion_control_algorithm].nil? ? DEFAULT_CONGESTION_CONTROL_ALGORITHM : options[:congestion_control_algorithm]
-      @migration_enabled = options[:migration_enabled].nil? ? DEFAULT_MIGRATION_ENABLED : options[:migration_enabled]
-      @disconnect_timeout_ms = options[:disconnect_timeout_ms].nil? ? DEFAULT_DISCONNECT_TIMEOUT_MS : options[:disconnect_timeout_ms]
-      @handshake_idle_timeout_ms = options[:handshake_idle_timeout_ms].nil? ? DEFAULT_HANDSHAKE_IDLE_TIMEOUT_MS : options[:handshake_idle_timeout_ms]
+      @keep_alive_interval_ms = options.fetch(:keep_alive_interval_ms, DEFAULT_KEEP_ALIVE_INTERVAL_MS)
+      @congestion_control_algorithm = options.fetch(:congestion_control_algorithm, DEFAULT_CONGESTION_CONTROL_ALGORITHM)
+      @migration_enabled = options.fetch(:migration_enabled, DEFAULT_MIGRATION_ENABLED)
+      @disconnect_timeout_ms = options.fetch(:disconnect_timeout_ms, DEFAULT_DISCONNECT_TIMEOUT_MS)
+      @handshake_idle_timeout_ms = options.fetch(:handshake_idle_timeout_ms, DEFAULT_HANDSHAKE_IDLE_TIMEOUT_MS)
 
       @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
       @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file
