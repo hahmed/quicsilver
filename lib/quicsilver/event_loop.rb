@@ -21,6 +21,7 @@ module Quicsilver
 
     def stop
       @running = false
+      Quicsilver.wake
       @thread&.join(2)
     end
 

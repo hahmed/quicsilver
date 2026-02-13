@@ -18,6 +18,29 @@ static VALUE mQuicsilver;
 static QUIC_EVENTQ EventQ = -1;        // kqueue (macOS) / epoll (Linux)
 static QUIC_EXECUTION* ExecContext = NULL;
 
+#if __linux__
+#include <sys/eventfd.h>
+static int WakeFd = -1;  // eventfd for waking epoll
+#endif
+#define WAKE_IDENT 0xCAFE  // kqueue EVFILT_USER identifier (macOS only)
+
+// Wake the event loop from another thread (e.g. after StreamSend)
+static void
+wake_event_loop(void)
+{
+    if (EventQ == -1) return;
+#if __linux__
+    if (WakeFd != -1) {
+        uint64_t val = 1;
+        write(WakeFd, &val, sizeof(val));
+    }
+#elif __APPLE__ || __FreeBSD__
+    struct kevent kev;
+    EV_SET(&kev, WAKE_IDENT, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+    kevent(EventQ, &kev, 1, NULL, 0, NULL);
+#endif
+}
+
 // Global MSQUIC API table
 static const QUIC_API_TABLE* MsQuic = NULL;
 
@@ -134,7 +157,9 @@ quicsilver_poll(VALUE self)
     struct poll_args args;
     args.eq = EventQ;
     args.max_events = 64;
-    uint32_t actual_wait = (wait_ms == UINT32_MAX) ? 100 : (wait_ms > 100 ? 100 : wait_ms);
+    // With wake_event_loop(), Ruby threads instantly unblock us when work is
+    // queued. Cap at 1s as a safety net for shutdown responsiveness.
+    uint32_t actual_wait = (wait_ms == UINT32_MAX) ? 1000 : wait_ms;
     args.timeout_ms = (int)actual_wait;
     args.count = 0;
 
@@ -142,6 +167,15 @@ quicsilver_poll(VALUE self)
 
     // 3. Fire completions — MsQuic callbacks run here (has GVL)
     for (int i = 0; i < args.count; i++) {
+#if __linux__
+        if (args.events[i].data.ptr == NULL) {
+            uint64_t val;
+            read(WakeFd, &val, sizeof(val));  // drain eventfd
+            continue;
+        }
+#elif __APPLE__ || __FreeBSD__
+        if (args.events[i].filter == EVFILT_USER && args.events[i].ident == WAKE_IDENT) continue;
+#endif
         QUIC_SQE* sqe = cqe_get_sqe(&args.events[i]);
         if (sqe && sqe->Completion) {
             sqe->Completion(&args.events[i]);
@@ -170,6 +204,15 @@ poll_inline(int timeout_ms)
     int count = kevent(EventQ, NULL, 0, events, 8, &ts);
 #endif
     for (int i = 0; i < count; i++) {
+#if __linux__
+        if (events[i].data.ptr == NULL) {
+            uint64_t val;
+            read(WakeFd, &val, sizeof(val));  // drain eventfd
+            continue;
+        }
+#elif __APPLE__ || __FreeBSD__
+        if (events[i].filter == EVFILT_USER && events[i].ident == WAKE_IDENT) continue;
+#endif
         QUIC_SQE* sqe = cqe_get_sqe(&events[i]);
         if (sqe && sqe->Completion) {
             sqe->Completion(&events[i]);
@@ -424,6 +467,21 @@ quicsilver_open(VALUE self)
         return Qfalse;
     }
 
+    // Register wake source — Ruby threads can unblock the event loop
+#if __linux__
+    WakeFd = eventfd(0, EFD_NONBLOCK);
+    if (WakeFd != -1) {
+        struct epoll_event ev = { .events = EPOLLIN, .data.ptr = NULL };
+        epoll_ctl(EventQ, EPOLL_CTL_ADD, WakeFd, &ev);
+    }
+#elif __APPLE__ || __FreeBSD__
+    {
+        struct kevent kev;
+        EV_SET(&kev, WAKE_IDENT, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+        kevent(EventQ, &kev, 1, NULL, 0, NULL);
+    }
+#endif
+
     return Qtrue;
 }
 
@@ -662,7 +720,8 @@ quicsilver_start_connection(VALUE self, VALUE connection_handle, VALUE config_ha
         rb_raise(rb_eRuntimeError, "ConnectionStart failed, 0x%x!", Status);
         return Qfalse;
     }
-    
+
+    wake_event_loop();
     return Qtrue;
 }
 
@@ -765,6 +824,7 @@ quicsilver_connection_shutdown(VALUE self, VALUE connection_handle, VALUE error_
             : QUIC_CONNECTION_SHUTDOWN_FLAG_NONE;
 
         MsQuic->ConnectionShutdown(Connection, flags, ErrorCode);
+        wake_event_loop();
     }
 
     return Qtrue;
@@ -876,7 +936,8 @@ quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALU
         rb_raise(rb_eRuntimeError, "ListenerStart failed, 0x%x!", Status);
         return Qfalse;
     }
-    
+
+    wake_event_loop();
     return Qtrue;
 }
 
@@ -887,9 +948,10 @@ quicsilver_stop_listener(VALUE self, VALUE listener_handle)
     if (MsQuic == NULL) {
         return Qfalse;
     }
-    
+
     HQUIC Listener = (HQUIC)(uintptr_t)NUM2ULL(listener_handle);
     MsQuic->ListenerStop(Listener);
+    wake_event_loop();
     return Qtrue;
 }
 
@@ -970,6 +1032,7 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
         return Qnil;
     }
 
+    wake_event_loop();
     return ULL2NUM((uintptr_t)Stream);
 }
 
@@ -1010,7 +1073,8 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data, VALUE send_f
         rb_raise(rb_eRuntimeError, "StreamSend failed, 0x%x!", Status);
         return Qfalse;
     }
-    
+
+    wake_event_loop();
     return Qtrue;
 }
 
@@ -1030,6 +1094,7 @@ quicsilver_stream_reset(VALUE self, VALUE stream_handle, VALUE error_code)
 
     MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND, ErrorCode);
 
+    wake_event_loop();
     return Qtrue;
 }
 
@@ -1049,7 +1114,15 @@ quicsilver_stream_stop_sending(VALUE self, VALUE stream_handle, VALUE error_code
 
     MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE, ErrorCode);
 
+    wake_event_loop();
     return Qtrue;
+}
+
+static VALUE
+quicsilver_wake(VALUE self)
+{
+    wake_event_loop();
+    return Qnil;
 }
 
 // Initialize the extension
@@ -1089,4 +1162,5 @@ Init_quicsilver(void)
 
     // Event processing (custom execution — app drives MsQuic)
     rb_define_singleton_method(mQuicsilver, "poll", quicsilver_poll, 0);
+    rb_define_singleton_method(mQuicsilver, "wake", quicsilver_wake, 0);
 }
