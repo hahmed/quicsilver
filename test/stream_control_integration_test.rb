@@ -240,6 +240,34 @@ class StreamControlIntegrationTest < Minitest::Test
     assert_equal unicode_body, response[:body].force_encoding("UTF-8")
   end
 
+  # STOP_SENDING compliance: when client cancels, server skips sending the response
+  def test_server_skips_response_after_client_cancel
+    request_started = Queue.new
+    app_finished = Queue.new
+
+    app = ->(env) {
+      request_started.push(true)
+      sleep 1
+      app_finished.push(true)
+      [200, {}, ["Should not be sent"]]
+    }
+
+    start_server_and_client(app)
+
+    request = @client.build_request("GET", "/will-cancel")
+    request_started.pop(timeout: 2)
+
+    request.cancel
+    assert request.cancelled?, "Request should be cancelled"
+
+    # Wait for the Rack app to finish (it can't be interrupted)
+    app_finished.pop(timeout: 3)
+    sleep 0.2  # Let worker thread reach the cancelled? check
+
+    # Server should have marked the stream cancelled and skipped send_response
+    assert @server.request_registry.empty?, "Request registry should be cleaned up"
+  end
+
   private
 
   def start_server_and_client(app)

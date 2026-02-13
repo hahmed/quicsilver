@@ -51,13 +51,14 @@ module Quicsilver
       @response
     end
 
-    # Cancel the request (sends RESET_STREAM to server)
+    # Cancel the request (sends RESET_STREAM + STOP_SENDING to server)
     # error_code defaults to H3_REQUEST_CANCELLED (0x10c)
     def cancel(error_code: HTTP3::H3_REQUEST_CANCELLED)
       @mutex.synchronize do
         return false unless @status == :pending
 
         @stream.reset(error_code)
+        @stream.stop_sending(error_code)
         @status = :cancelled
       end
       true

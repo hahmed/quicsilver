@@ -63,7 +63,7 @@ class RequestTest < Minitest::Test
   end
 
   def test_cancel_changes_status_to_cancelled
-    Quicsilver.stub(:stream_reset, true) do
+    stub_cancel do
       result = @request.cancel
       assert result
       assert @request.cancelled?
@@ -81,27 +81,35 @@ class RequestTest < Minitest::Test
   end
 
   def test_cancel_returns_false_if_already_cancelled
-    Quicsilver.stub(:stream_reset, true) do
+    stub_cancel do
       @request.cancel
       result = @request.cancel
       refute result
     end
   end
 
-  def test_cancel_uses_h3_request_cancelled_by_default
-    called_with = nil
-    Quicsilver.stub(:stream_reset, ->(handle, code) { called_with = code; true }) do
-      @request.cancel
+  def test_cancel_sends_reset_and_stop_sending
+    reset_code = nil
+    stop_code = nil
+    Quicsilver.stub(:stream_reset, ->(handle, code) { reset_code = code; true }) do
+      Quicsilver.stub(:stream_stop_sending, ->(handle, code) { stop_code = code; true }) do
+        @request.cancel
+      end
     end
-    assert_equal Quicsilver::HTTP3::H3_REQUEST_CANCELLED, called_with
+    assert_equal Quicsilver::HTTP3::H3_REQUEST_CANCELLED, reset_code
+    assert_equal Quicsilver::HTTP3::H3_REQUEST_CANCELLED, stop_code
   end
 
   def test_cancel_accepts_custom_error_code
-    called_with = nil
-    Quicsilver.stub(:stream_reset, ->(handle, code) { called_with = code; true }) do
-      @request.cancel(error_code: 0x999)
+    reset_code = nil
+    stop_code = nil
+    Quicsilver.stub(:stream_reset, ->(handle, code) { reset_code = code; true }) do
+      Quicsilver.stub(:stream_stop_sending, ->(handle, code) { stop_code = code; true }) do
+        @request.cancel(error_code: 0x999)
+      end
     end
-    assert_equal 0x999, called_with
+    assert_equal 0x999, reset_code
+    assert_equal 0x999, stop_code
   end
 
   # Error classes
@@ -113,5 +121,15 @@ class RequestTest < Minitest::Test
     error = Quicsilver::Request::ResetError.new("test", 0x100)
     assert_equal 0x100, error.error_code
     assert_equal "test", error.message
+  end
+
+  private
+
+  def stub_cancel(&block)
+    Quicsilver.stub(:stream_reset, true) do
+      Quicsilver.stub(:stream_stop_sending, true) do
+        block.call
+      end
+    end
   end
 end

@@ -40,6 +40,8 @@ module Quicsilver
       @handler_mutex = Mutex.new
       @thread_pool_size = threads
       @work_queue = Queue.new
+      @cancelled_streams = Set.new
+      @cancelled_mutex = Mutex.new
 
       self.class.instance = self
     end
@@ -108,6 +110,10 @@ module Quicsilver
 
     def running?
       @running
+    end
+
+    def cancelled_stream?(stream_id)
+      @cancelled_mutex.synchronize { @cancelled_streams.include?(stream_id) }
     end
 
     # Wait for work queue to drain, then shut down the pool
@@ -200,12 +206,16 @@ module Quicsilver
         return unless @connections[connection_handle]
         event = StreamEvent.new(data, "STREAM_RESET")
         Quicsilver.logger.debug("Stream #{stream_id} reset by peer with error code: 0x#{event.error_code.to_s(16)}")
+        @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
         @request_registry.complete(stream_id)
 
       when STREAM_EVENT_STOP_SENDING
         return unless @connections[connection_handle]
         event = StreamEvent.new(data, "STOP_SENDING")
         Quicsilver.logger.debug("Stream #{stream_id} stop sending requested with error code: 0x#{event.error_code.to_s(16)}")
+        @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
+        Quicsilver.stream_reset(event.handle, HTTP3::H3_REQUEST_CANCELLED)
+        @request_registry.complete(stream_id)
       end
     end
 
@@ -275,6 +285,11 @@ module Quicsilver
 
         status, headers, body = @app.call(env)
 
+        if cancelled_stream?(stream.stream_id)
+          Quicsilver.logger.debug("Skipping response for cancelled stream #{stream.stream_id}")
+          return
+        end
+
         raise "Stream handle not found for stream #{stream.stream_id}" unless stream.ready_to_send?
 
         connection.send_response(stream, status, headers, body)
@@ -290,6 +305,7 @@ module Quicsilver
       connection.send_error(stream, 500, "Internal Server Error") if stream.ready_to_send?
     ensure
       @request_registry.complete(stream.stream_id) if @request_registry.include?(stream.stream_id)
+      @cancelled_mutex.synchronize { @cancelled_streams.delete(stream.stream_id) }
     end
   end
 end

@@ -113,6 +113,48 @@ class ServerTest < Minitest::Test
     end
   end
 
+  # STOP_SENDING compliance: server must mark stream as cancelled and reset it
+  def test_stop_sending_cancels_stream
+    server = create_server(4433, app: ->(env) { [200, {}, ["OK"]] })
+    connection_handle = 12345
+    connection_data = [connection_handle, 67890]
+
+    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    server.connections[connection_handle] = connection
+
+    stream_id = 4
+    stream_handle = 0xABCD
+    packed_data = [stream_handle, Quicsilver::HTTP3::H3_REQUEST_CANCELLED].pack("QQ")
+
+    Quicsilver.stub(:stream_reset, ->(*args) { true }) do
+      Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data)
+    end
+
+    assert server.cancelled_stream?(stream_id), "Stream should be marked as cancelled after STOP_SENDING"
+  end
+
+  # STOP_SENDING compliance: server resets the send side of the stream
+  def test_stop_sending_resets_stream
+    server = create_server(4433, app: ->(env) { [200, {}, ["OK"]] })
+    connection_handle = 12345
+    connection_data = [connection_handle, 67890]
+
+    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    server.connections[connection_handle] = connection
+
+    stream_id = 4
+    stream_handle = 0xABCD
+    packed_data = [stream_handle, Quicsilver::HTTP3::H3_REQUEST_CANCELLED].pack("QQ")
+
+    reset_called_with = nil
+    Quicsilver.stub(:stream_reset, ->(*args) { reset_called_with = args; true }) do
+      Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data)
+    end
+
+    assert_equal [stream_handle, Quicsilver::HTTP3::H3_REQUEST_CANCELLED], reset_called_with,
+      "Should reset the stream with H3_REQUEST_CANCELLED"
+  end
+
   private
 
   def create_server(port=4433, options={}, app=nil)
