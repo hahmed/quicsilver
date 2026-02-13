@@ -166,6 +166,71 @@ class ConnectionTest < Minitest::Test
     assert_empty conn.settings
   end
 
+  # === Duplicate settings identifiers ===
+
+  def test_rejects_duplicate_settings_identifiers
+    settings_payload = encode_varint(0x01) + encode_varint(0) +
+                       encode_varint(0x01) + encode_varint(1)
+    control_payload = encode_varint(Quicsilver::HTTP3::FRAME_SETTINGS) +
+                      encode_varint(settings_payload.bytesize) +
+                      settings_payload
+
+    conn = Quicsilver::Connection.new(12345, [12345, 67890])
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      conn.set_control_stream(1, control_payload)
+    end
+  end
+
+  # === Stream type varint decoding ===
+
+  def test_stream_type_decoded_as_varint
+    # Control stream type 0x00 encoded as 2-byte varint: \x40\x00
+    stream = Quicsilver::QuicStream.new(3, is_unidirectional: true)
+    stream.append_data("\x40\x00".b + build_settings_frame)
+
+    @connection.handle_unidirectional_stream(stream)
+    assert_equal 3, @connection.control_stream_id
+  end
+
+  # === HTTP/2 reserved frame types on control stream ===
+
+  def test_rejects_data_frame_on_control_stream
+    data_after_settings = build_settings_frame +
+                          encode_varint(Quicsilver::HTTP3::FRAME_DATA) +
+                          encode_varint(4) + "test"
+
+    conn = Quicsilver::Connection.new(12345, [12345, 67890])
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      conn.set_control_stream(1, data_after_settings)
+    end
+  end
+
+  def test_rejects_headers_frame_on_control_stream
+    data_after_settings = build_settings_frame +
+                          encode_varint(Quicsilver::HTTP3::FRAME_HEADERS) +
+                          encode_varint(4) + "test"
+
+    conn = Quicsilver::Connection.new(12345, [12345, 67890])
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      conn.set_control_stream(1, data_after_settings)
+    end
+  end
+
+  def test_rejects_http2_reserved_frame_types_on_control_stream
+    [0x02, 0x06, 0x08, 0x09].each do |type|
+      data_after_settings = build_settings_frame +
+                            encode_varint(type) +
+                            encode_varint(0)
+
+      conn = Quicsilver::Connection.new(12345, [12345, 67890])
+      assert_raises(Quicsilver::HTTP3::FrameError, "Should reject frame type 0x#{type.to_s(16)}") do
+        conn.set_control_stream(1, data_after_settings)
+      end
+    end
+  end
+
+  # === GOAWAY stream ID ===
+
   def test_last_client_stream_id_tracks_bidi_streams
     @connection.track_client_stream(4)
     @connection.track_client_stream(8)

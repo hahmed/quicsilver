@@ -115,8 +115,9 @@ module Quicsilver
       data = stream.data
       return if data.empty?
 
-      stream_type = data[0].ord
-      payload = data[1..-1]
+      stream_type, type_len = HTTP3.decode_varint(data.bytes, 0)
+      return if type_len == 0
+      payload = data[type_len..-1]
 
       case stream_type
       when 0x00 then set_control_stream(stream.stream_id, payload)
@@ -164,6 +165,17 @@ module Quicsilver
     # Note: 0x08 (SETTINGS_ENABLE_CONNECT_PROTOCOL) is valid in HTTP/3 per RFC 9220
     HTTP2_SETTINGS = [0x00, 0x02, 0x03, 0x04, 0x05].freeze
 
+    # Frame types forbidden on the control stream
+    FORBIDDEN_ON_CONTROL = [
+      0x00, # DATA — request streams only
+      0x01, # HEADERS — request streams only
+      0x02, # HTTP/2 PRIORITY (reserved)
+      0x05, # PUSH_PROMISE — request streams only
+      0x06, # HTTP/2 PING (reserved)
+      0x08, # HTTP/2 WINDOW_UPDATE (reserved)
+      0x09, # HTTP/2 CONTINUATION (reserved)
+    ].freeze
+
     def parse_control_frames(data)
       offset = 0
       first_frame = !@settings_received
@@ -178,6 +190,10 @@ module Quicsilver
         end
         first_frame = false
 
+        if FORBIDDEN_ON_CONTROL.include?(frame_type)
+          raise HTTP3::FrameError, "Frame type 0x#{frame_type.to_s(16)} not allowed on control stream"
+        end
+
         if frame_type == HTTP3::FRAME_SETTINGS
           raise HTTP3::FrameError, "Duplicate SETTINGS frame on control stream" if @settings_received
           parse_settings(data[offset + type_len + length_len, frame_length])
@@ -190,6 +206,7 @@ module Quicsilver
 
     def parse_settings(payload)
       offset = 0
+      seen = Set.new
       while offset < payload.bytesize
         id, id_len = HTTP3.decode_varint(payload.bytes, offset)
         value, value_len = HTTP3.decode_varint(payload.bytes, offset + id_len)
@@ -198,6 +215,9 @@ module Quicsilver
         if HTTP2_SETTINGS.include?(id)
           raise HTTP3::FrameError, "HTTP/2 setting identifier 0x#{id.to_s(16)} not allowed in HTTP/3"
         end
+
+        raise HTTP3::FrameError, "Duplicate setting identifier 0x#{id.to_s(16)}" if seen.include?(id)
+        seen.add(id)
 
         @settings[id] = value
         offset += id_len + value_len
