@@ -28,12 +28,15 @@ module Quicsilver
       private
 
       def all_headers
-        [
-          [":method", @method],
-          [":scheme", @scheme],
-          [":authority", @authority],
-          [":path", @path]
-        ] + @headers.map { |k, v| [k.to_s, v.to_s] }
+        headers = [[":method", @method]]
+        if @method == "CONNECT"
+          headers << [":authority", @authority]
+        else
+          headers << [":scheme", @scheme]
+          headers << [":authority", @authority]
+          headers << [":path", @path]
+        end
+        headers + @headers.map { |k, v| [k.to_s, v.to_s] }
       end
 
       def build_frame(type, payload)

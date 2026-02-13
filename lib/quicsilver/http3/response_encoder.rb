@@ -42,11 +42,16 @@ module Quicsilver
 
       private
 
+      # RFC 9114 §4.2: connection-specific header fields must not appear in HTTP/3
+      FORBIDDEN_HEADERS = %w[transfer-encoding connection keep-alive upgrade te proxy-connection].freeze
+
       def all_headers
         headers = [[":status", @status.to_s]]
         @headers.each do |name, value|
-          next if name.to_s.start_with?("rack.")
-          headers << [name.to_s, value.to_s]
+          downcased = name.to_s.downcase
+          next if downcased.start_with?("rack.")
+          next if FORBIDDEN_HEADERS.include?(downcased)
+          headers << [downcased, value.to_s]
         end
         headers
       end

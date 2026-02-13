@@ -93,6 +93,24 @@ class ConnectionTest < Minitest::Test
     assert_equal 0, @connection.settings[0x07]
   end
 
+  def test_rejects_duplicate_settings_frame
+    @connection.set_control_stream(1, build_settings_frame)
+
+    # Second SETTINGS on same control stream is a protocol error
+    second_settings = build_settings_frame
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      @connection.send(:parse_control_frames, second_settings)
+    end
+  end
+
+  def test_rejects_push_stream_from_client
+    stream = build_unidirectional_stream(0x01)
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      @connection.handle_unidirectional_stream(stream)
+    end
+  end
+
   def test_rejects_duplicate_control_stream
     @connection.set_control_stream(1, build_settings_frame)
 

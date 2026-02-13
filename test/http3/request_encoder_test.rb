@@ -141,6 +141,17 @@ class RequestEncoderTest < Minitest::Test
       "Should use literal with name ref (0x50 | index) for :authority"
   end
 
+  def test_connect_omits_scheme_and_path
+    data = encoder("CONNECT", "/", authority: "proxy.example.com:443").encode
+    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser.parse
+
+    assert_equal "CONNECT", parser.headers[":method"]
+    assert_equal "proxy.example.com:443", parser.headers[":authority"]
+    assert_nil parser.headers[":scheme"]
+    assert_nil parser.headers[":path"]
+  end
+
   # Roundtrip tests
   def test_roundtrip_get_request
     data = encoder("GET", "/test", headers: { "user-agent" => "Test/1.0" }).encode

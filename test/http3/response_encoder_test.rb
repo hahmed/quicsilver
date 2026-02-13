@@ -125,6 +125,27 @@ class ResponseEncoderTest < Minitest::Test
     assert_equal large_chunk, parse_body(data)
   end
 
+  def test_strips_connection_specific_headers
+    headers = {
+      "content-type" => "text/plain",
+      "transfer-encoding" => "chunked",
+      "connection" => "keep-alive",
+      "keep-alive" => "timeout=5",
+      "upgrade" => "websocket",
+      "te" => "trailers",
+      "x-custom" => "stays"
+    }
+    data = encoder(200, headers, ["body"]).encode
+    parser = parse_response(data)
+
+    refute parser.headers.key?("transfer-encoding")
+    refute parser.headers.key?("connection")
+    refute parser.headers.key?("keep-alive")
+    refute parser.headers.key?("upgrade")
+    refute parser.headers.key?("te")
+    assert_equal "stays", parser.headers["x-custom"]
+  end
+
   # Body resource management
   def test_encode_closes_body_if_closeable
     body_mock = ["content"]

@@ -22,6 +22,7 @@ module Quicsilver
       @server_control_stream = nil
 
       @settings = {}
+      @settings_received = false
     end
 
     # === Setup (called after connection established) ===
@@ -119,6 +120,8 @@ module Quicsilver
 
       case stream_type
       when 0x00 then set_control_stream(stream.stream_id, payload)
+      when 0x01
+        raise HTTP3::FrameError, "Client must not send push streams"
       when 0x02
         raise HTTP3::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
         @qpack_encoder_stream_id = stream.stream_id
@@ -163,7 +166,7 @@ module Quicsilver
 
     def parse_control_frames(data)
       offset = 0
-      first_frame = true
+      first_frame = !@settings_received
 
       while offset < data.bytesize
         frame_type, type_len = HTTP3.decode_varint(data.bytes, offset)
@@ -176,7 +179,9 @@ module Quicsilver
         first_frame = false
 
         if frame_type == HTTP3::FRAME_SETTINGS
+          raise HTTP3::FrameError, "Duplicate SETTINGS frame on control stream" if @settings_received
           parse_settings(data[offset + type_len + length_len, frame_length])
+          @settings_received = true
         end
 
         offset += type_len + length_len + frame_length
