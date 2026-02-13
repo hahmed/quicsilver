@@ -207,6 +207,54 @@ class RequestParserTest < Minitest::Test
     end
   end
 
+  def test_rejects_data_before_headers
+    data = build_frame(Quicsilver::HTTP3::FRAME_DATA, "body first")
+    data += build_frame(Quicsilver::HTTP3::FRAME_HEADERS, build_qpack_headers(
+      ":method" => "GET", ":scheme" => "https", ":authority" => "localhost", ":path" => "/"
+    ))
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      parser = Quicsilver::HTTP3::RequestParser.new(data)
+      parser.parse
+    end
+  end
+
+  def test_rejects_missing_method
+    headers_payload = build_qpack_headers(
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/test"
+    )
+    parser = Quicsilver::HTTP3::RequestParser.new(build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload))
+    parser.parse
+
+    assert_nil parser.to_rack_env
+  end
+
+  def test_rejects_missing_scheme
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":authority" => "localhost:4433",
+      ":path" => "/test"
+    )
+    parser = Quicsilver::HTTP3::RequestParser.new(build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload))
+    parser.parse
+
+    assert_nil parser.to_rack_env
+  end
+
+  def test_rejects_missing_path
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433"
+    )
+    parser = Quicsilver::HTTP3::RequestParser.new(build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload))
+    parser.parse
+
+    assert_nil parser.to_rack_env
+  end
+
   def test_frames_are_recorded
     headers_payload = build_qpack_headers(
       ":method" => "POST",

@@ -176,6 +176,15 @@ class ResponseParserTest < Minitest::Test
     end
   end
 
+  def test_rejects_data_before_headers
+    data = build_frame(DATA, "body first")
+    data += build_frame(HEADERS, build_qpack_response_headers(200, {}))
+
+    assert_raises(Quicsilver::HTTP3::FrameError) do
+      parse(data)
+    end
+  end
+
   # Edge cases
   def test_parse_empty_data
     parser = parse("")
@@ -259,6 +268,11 @@ class ResponseParserTest < Minitest::Test
       assert_equal expected_name, entry[0], "Index #{index} name mismatch"
       assert_equal expected_value, entry[1], "Index #{index} value mismatch"
     end
+  end
+
+  def test_static_table_hsts_casing
+    assert_equal 'max-age=31536000; includeSubDomains', Quicsilver::HTTP3::STATIC_TABLE[57][1]
+    assert_equal 'max-age=31536000; includeSubDomains; preload', Quicsilver::HTTP3::STATIC_TABLE[58][1]
   end
 
   private

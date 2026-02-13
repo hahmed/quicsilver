@@ -55,7 +55,6 @@ class ServerConfigurationTest < Minitest::Test
   end
 
   def test_initialization_with_nil_values_in_options
-    # Test that explicit nil values in options don't break the defaults
     options = {
       idle_timeout_ms: nil,
       server_resumption_level: nil,
@@ -69,15 +68,15 @@ class ServerConfigurationTest < Minitest::Test
 
     config = fetch_server_configuration_with_certs(options)
 
-    # Should use defaults when nil is explicitly passed
-    assert_equal 10000, config.idle_timeout_ms
-    assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
-    assert_equal 100, config.max_concurrent_requests
-    assert_equal 10, config.max_unidirectional_streams
-    assert_equal "h3", config.alpn
-    assert_equal 0, config.keep_alive_interval_ms
-    assert_equal Quicsilver::ServerConfiguration::CONGESTION_CONTROL_CUBIC, config.congestion_control_algorithm
-    assert_equal true, config.migration_enabled
+    # Explicit nil means nil — fetch doesn't override caller intent
+    assert_nil config.idle_timeout_ms
+    assert_nil config.server_resumption_level
+    assert_nil config.max_concurrent_requests
+    assert_nil config.max_unidirectional_streams
+    assert_nil config.alpn
+    assert_nil config.keep_alive_interval_ms
+    assert_nil config.congestion_control_algorithm
+    assert_nil config.migration_enabled
   end
 
   def test_initialization_with_false_values_in_options

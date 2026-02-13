@@ -99,8 +99,8 @@ module Quicsilver
       ['content-type', 'text/plain;charset=utf-8'],            # 54
       ['range', 'bytes=0-'],                                   # 55
       ['strict-transport-security', 'max-age=31536000'],       # 56
-      ['strict-transport-security', 'max-age=31536000; includesubdomains'], # 57
-      ['strict-transport-security', 'max-age=31536000; includesubdomains; preload'], # 58
+      ['strict-transport-security', 'max-age=31536000; includeSubDomains'], # 57
+      ['strict-transport-security', 'max-age=31536000; includeSubDomains; preload'], # 58
       ['vary', 'accept-encoding'],                             # 59
       ['vary', 'origin'],                                      # 60
       ['x-content-type-options', 'nosniff'],                   # 61

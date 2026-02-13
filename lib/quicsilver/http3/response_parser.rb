@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-require 'stringio'
-require_relative '../qpack/decoder'
+require "stringio"
+require_relative "../qpack/decoder"
 
 module Quicsilver
   module HTTP3
@@ -31,6 +31,7 @@ module Quicsilver
       def parse!
         buffer = @data.dup
         offset = 0
+        headers_received = false
 
         while offset < buffer.bytesize
           break if buffer.bytesize - offset < 2
@@ -51,7 +52,9 @@ module Quicsilver
           case type
           when 0x01 # HEADERS
             parse_headers(payload)
+            headers_received = true
           when 0x00 # DATA
+            raise HTTP3::FrameError, "DATA frame before HEADERS" unless headers_received
             @body_io.write(payload)
           end
 
