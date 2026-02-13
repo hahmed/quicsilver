@@ -2,7 +2,7 @@
 
 module Quicsilver
   class Server
-    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size
+    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size, :max_connections
 
     STREAM_EVENT_RECEIVE = "RECEIVE"
     STREAM_EVENT_RECEIVE_FIN = "RECEIVE_FIN"
@@ -26,8 +26,9 @@ module Quicsilver
 
     DEFAULT_THREAD_POOL_SIZE = 5
     DEFAULT_QUEUE_MULTIPLIER = 4
+    DEFAULT_MAX_CONNECTIONS = 100
 
-    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil)
+    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil, max_connections: DEFAULT_MAX_CONNECTIONS)
       @port = port
       @address = address
       @app = app || default_rack_app
@@ -43,6 +44,7 @@ module Quicsilver
       @thread_pool_size = threads
       @max_queue_size = max_queue_size || threads * DEFAULT_QUEUE_MULTIPLIER
       @work_queue = Queue.new
+      @max_connections = max_connections
       @cancelled_streams = Set.new
       @cancelled_mutex = Mutex.new
 
@@ -69,6 +71,7 @@ module Quicsilver
 
       @running = true
 
+      setup_signal_handlers
       start_worker_pool
       Quicsilver.event_loop.start
       Quicsilver.event_loop.join  # Block until shutdown
@@ -180,6 +183,12 @@ module Quicsilver
 
       case event
       when STREAM_EVENT_CONNECTION_ESTABLISHED
+        if @connections.size >= @max_connections
+          Quicsilver.logger.warn("Connection limit reached (#{@max_connections}), rejecting connection")
+          Quicsilver.connection_shutdown(connection_handle, HTTP3::H3_EXCESSIVE_LOAD, false)
+          return
+        end
+
         connection = Connection.new(connection_handle, connection_data)
         @connections[connection_handle] = connection
         connection.setup_http3_streams
@@ -206,6 +215,7 @@ module Quicsilver
         stream.append_data(full_data)
 
         if stream.bidirectional?
+          connection.track_client_stream(stream_id)
           dispatch_request(connection, stream)
         else
           connection.handle_unidirectional_stream(stream)
@@ -229,6 +239,12 @@ module Quicsilver
     end
 
     private
+
+    def setup_signal_handlers
+      %w[INT TERM].each do |signal|
+        trap(signal) { Thread.new { shutdown } }
+      end
+    end
 
     def default_rack_app
       ->(env) {

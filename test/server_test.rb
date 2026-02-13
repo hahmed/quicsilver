@@ -187,6 +187,50 @@ class ServerTest < Minitest::Test
     assert_equal [503, "Service Unavailable"], error_sent
   end
 
+  def test_default_max_connections
+    server = create_server_direct
+    assert_equal 100, server.max_connections
+  end
+
+  def test_custom_max_connections
+    server = create_server_direct(max_connections: 50)
+    assert_equal 50, server.max_connections
+  end
+
+  def test_rejects_connection_at_limit
+    server = create_server_direct(max_connections: 1, app: ->(env) { [200, {}, ["OK"]] })
+
+    # Pre-fill to limit
+    connection = Quicsilver::Connection.new(12345, [12345, 67890])
+    server.connections[12345] = connection
+
+    new_handle = 99999
+    new_data = [new_handle, 11111]
+
+    shutdown_called = false
+    Quicsilver.stub(:connection_shutdown, ->(*args) { shutdown_called = true }) do
+      server.handle_stream_event(new_data, 0, "CONNECTION_ESTABLISHED", nil)
+    end
+
+    assert shutdown_called, "Should shutdown excess connection"
+    assert_nil server.connections[new_handle], "Should not add connection beyond limit"
+  end
+
+  def test_signal_handlers_installed
+    server = create_server_direct
+    server.send(:setup_signal_handlers)
+
+    # Verify traps are set by checking they return the previous handler
+    old_int = trap("INT", "DEFAULT")
+    old_term = trap("TERM", "DEFAULT")
+
+    refute_nil old_int
+    refute_nil old_term
+  ensure
+    trap("INT", "DEFAULT")
+    trap("TERM", "DEFAULT")
+  end
+
   def test_dispatch_queues_when_under_limit
     server = create_server_direct(threads: 1, max_queue_size: 5, app: ->(env) { [200, {}, ["OK"]] })
 

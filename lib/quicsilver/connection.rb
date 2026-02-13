@@ -52,6 +52,10 @@ module Quicsilver
       @streams.delete(stream_id)
     end
 
+    def track_client_stream(stream_id)
+      @streams[stream_id] = true
+    end
+
     # === Data Handling ===
 
     def buffer_data(stream_id, data)
@@ -115,12 +119,17 @@ module Quicsilver
 
       case stream_type
       when 0x00 then set_control_stream(stream.stream_id, payload)
-      when 0x02 then @qpack_encoder_stream_id = stream.stream_id
-      when 0x03 then @qpack_decoder_stream_id = stream.stream_id
+      when 0x02
+        raise HTTP3::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
+        @qpack_encoder_stream_id = stream.stream_id
+      when 0x03
+        raise HTTP3::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
+        @qpack_decoder_stream_id = stream.stream_id
       end
     end
 
     def set_control_stream(stream_id, payload = nil)
+      raise HTTP3::FrameError, "Duplicate control stream" if @control_stream_id
       @control_stream_id = stream_id
       parse_control_frames(payload) if payload && !payload.empty?
     end
@@ -147,11 +156,22 @@ module Quicsilver
       @streams.keys.select { |id| (id & 0x02) == 0 }.max || 0
     end
 
+    # RFC 9114 §7.2.4.1: HTTP/2 setting identifiers that must not appear in HTTP/3
+    HTTP2_SETTINGS = [0x02, 0x03, 0x04, 0x05, 0x08].freeze
+
     def parse_control_frames(data)
       offset = 0
+      first_frame = true
+
       while offset < data.bytesize
         frame_type, type_len = HTTP3.decode_varint(data.bytes, offset)
         frame_length, length_len = HTTP3.decode_varint(data.bytes, offset + type_len)
+        break if type_len == 0 || length_len == 0
+
+        if first_frame && frame_type != HTTP3::FRAME_SETTINGS
+          raise HTTP3::FrameError, "First frame on control stream must be SETTINGS"
+        end
+        first_frame = false
 
         if frame_type == HTTP3::FRAME_SETTINGS
           parse_settings(data[offset + type_len + length_len, frame_length])
@@ -166,6 +186,12 @@ module Quicsilver
       while offset < payload.bytesize
         id, id_len = HTTP3.decode_varint(payload.bytes, offset)
         value, value_len = HTTP3.decode_varint(payload.bytes, offset + id_len)
+        break if id_len == 0 || value_len == 0
+
+        if HTTP2_SETTINGS.include?(id)
+          raise HTTP3::FrameError, "HTTP/2 setting identifier 0x#{id.to_s(16)} not allowed in HTTP/3"
+        end
+
         @settings[id] = value
         offset += id_len + value_len
       end

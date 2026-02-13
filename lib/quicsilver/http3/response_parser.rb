@@ -38,6 +38,8 @@ module Quicsilver
 
           type, type_len = HTTP3.decode_varint(buffer.bytes, offset)
           length, length_len = HTTP3.decode_varint(buffer.bytes, offset + type_len)
+          break if type_len == 0 || length_len == 0
+
           header_len = type_len + length_len
 
           break if buffer.bytesize < offset + header_len + length

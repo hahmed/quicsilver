@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "timeout"
 require_relative "../../lib/quicsilver/http3"
 require_relative "../../lib/quicsilver/http3/response_parser"
 
@@ -174,6 +175,14 @@ class ResponseParserTest < Minitest::Test
     assert_raises(Quicsilver::HTTP3::FrameError) do
       parse(data)
     end
+  end
+
+  def test_truncated_frame_length_does_not_hang
+    truncated = "\x01\x80\x00".b
+    parser = Quicsilver::HTTP3::ResponseParser.new(truncated)
+
+    Timeout.timeout(1) { parser.parse }
+    assert_empty parser.frames
   end
 
   def test_rejects_data_before_headers
