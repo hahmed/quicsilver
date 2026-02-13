@@ -80,70 +80,71 @@ typedef struct {
 
 // rb_protect wrapper — catches Ruby exceptions so they don't longjmp
 // through MsQuic callback frames (which would corrupt MsQuic state).
-struct dispatch_args {
-    VALUE receiver;
-    ID method;
-    int argc;
-    VALUE argv[4];
+// All Ruby object construction AND the funcall happen inside rb_protect.
+struct dispatch_ruby_args {
+    HQUIC connection;
+    void* connection_ctx;
+    VALUE client_obj;
+    const char* event_type;
+    uint64_t stream_id;
+    const char* data;
+    size_t data_len;
 };
 
 static VALUE
-dispatch_funcall(VALUE arg)
+dispatch_ruby_body(VALUE arg)
 {
-    struct dispatch_args* a = (struct dispatch_args*)arg;
-    return rb_funcallv(a->receiver, a->method, a->argc, a->argv);
-}
+    struct dispatch_ruby_args* a = (struct dispatch_ruby_args*)arg;
 
-static void
-safe_funcall(VALUE receiver, ID method, int argc, VALUE* argv)
-{
-    struct dispatch_args args;
-    args.receiver = receiver;
-    args.method = method;
-    args.argc = argc;
-    for (int i = 0; i < argc && i < 4; i++) {
-        args.argv[i] = argv[i];
+    if (NIL_P(a->client_obj)) {
+        VALUE server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
+        if (rb_class_real(CLASS_OF(server_class)) == rb_cClass) {
+            VALUE connection_data = rb_ary_new2(2);
+            rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection));
+            rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection_ctx));
+            VALUE argv[4] = {
+                connection_data,
+                ULL2NUM(a->stream_id),
+                rb_str_new_cstr(a->event_type),
+                rb_str_new(a->data, a->data_len)
+            };
+            rb_funcallv(server_class, rb_intern("handle_stream"), 4, argv);
+        }
+    } else {
+        if (RB_TYPE_P(a->client_obj, T_OBJECT)) {
+            VALUE argv[3] = {
+                ULL2NUM(a->stream_id),
+                rb_str_new_cstr(a->event_type),
+                rb_str_new(a->data, a->data_len)
+            };
+            rb_funcallv(a->client_obj, rb_intern("handle_stream_event"), 3, argv);
+        }
     }
 
-    int state = 0;
-    rb_protect(dispatch_funcall, (VALUE)&args, &state);
-    if (state) {
-        rb_set_errinfo(Qnil);
-        fprintf(stderr, "Quicsilver: exception in callback\n");
-    }
+    return Qnil;
 }
 
-// Dispatch event to Ruby — uses rb_protect to catch exceptions safely.
+// Dispatch event to Ruby — entire body wrapped in rb_protect so no Ruby call
+// (object construction or funcall) can longjmp through MsQuic callback frames.
 static void
 dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
                  const char* event_type, uint64_t stream_id,
                  const char* data, size_t data_len)
 {
-    if (NIL_P(client_obj)) {
-        // Server event
-        VALUE server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
-        if (rb_class_real(CLASS_OF(server_class)) == rb_cClass) {
-            VALUE connection_data = rb_ary_new2(2);
-            rb_ary_push(connection_data, ULL2NUM((uintptr_t)connection));
-            rb_ary_push(connection_data, ULL2NUM((uintptr_t)connection_ctx));
-            VALUE argv[4] = {
-                connection_data,
-                ULL2NUM(stream_id),
-                rb_str_new_cstr(event_type),
-                rb_str_new(data, data_len)
-            };
-            safe_funcall(server_class, rb_intern("handle_stream"), 4, argv);
-        }
-    } else {
-        // Client event
-        if (RB_TYPE_P(client_obj, T_OBJECT)) {
-            VALUE argv[3] = {
-                ULL2NUM(stream_id),
-                rb_str_new_cstr(event_type),
-                rb_str_new(data, data_len)
-            };
-            safe_funcall(client_obj, rb_intern("handle_stream_event"), 3, argv);
-        }
+    struct dispatch_ruby_args args;
+    args.connection = connection;
+    args.connection_ctx = connection_ctx;
+    args.client_obj = client_obj;
+    args.event_type = event_type;
+    args.stream_id = stream_id;
+    args.data = data;
+    args.data_len = data_len;
+
+    int state = 0;
+    rb_protect(dispatch_ruby_body, (VALUE)&args, &state);
+    if (state) {
+        rb_set_errinfo(Qnil);
+        fprintf(stderr, "Quicsilver: exception in callback\n");
     }
 }
 
@@ -411,10 +412,12 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC));
-            // Server contexts are freed here; client contexts in close_connection_handle
-            if (NIL_P(ctx->client_obj)) {
-                free(ctx);
+            // Free context for all connections (both client and server).
+            // Client GC registration must be removed before freeing.
+            if (!NIL_P(ctx->client_obj)) {
+                rb_gc_unregister_address(&ctx->client_obj);
             }
+            free(ctx);
             break;
          case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
             // Client opened a stream
@@ -871,20 +874,15 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
     VALUE context_handle = rb_ary_entry(connection_data, 1);
 
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
-    ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
+    (void)context_handle; // ctx freed by SHUTDOWN_COMPLETE, not here
 
     if (Connection != NULL) {
         MsQuic->ConnectionClose(Connection);
     }
 
-    // Free context if valid
-    if (ctx != NULL) {
-        // Unregister from GC if client object was set
-        if (!NIL_P(ctx->client_obj)) {
-            rb_gc_unregister_address(&ctx->client_obj);
-        }
-        free(ctx);
-    }
+    // Don't free ctx here — ConnectionClose is async and SHUTDOWN_COMPLETE
+    // will fire on the next event loop poll, which still needs ctx.
+    // SHUTDOWN_COMPLETE handles cleanup for both client and server.
 
     return Qnil;
 }

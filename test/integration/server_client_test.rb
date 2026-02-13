@@ -130,6 +130,38 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  def test_server_survives_rack_app_exception
+    crashing_app = ->(_env) { raise "intentional test crash" }
+
+    start_server(crashing_app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    client.connect
+
+    response = client.get("/")
+
+    assert_equal 500, response[:status]
+    assert @server.running?, "Server should still be running after app exception"
+  ensure
+    client&.disconnect
+  end
+
+  def test_client_connect_disconnect_cycle
+    app = ->(_env) { [200, {}, ["OK"]] }
+
+    start_server(app)
+
+    3.times do
+      client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+      client.connect
+      assert client.connected?
+      client.disconnect
+      sleep 0.1
+    end
+
+    assert @server.running?, "Server should still be running after client disconnect cycles"
+  end
+
   private
 
   def start_server(app)
