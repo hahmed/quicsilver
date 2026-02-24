@@ -9,6 +9,9 @@ module Quicsilver
       include Qpack::Decoder
       attr_reader :frames, :headers, :body
 
+      # Known HTTP/3 request pseudo-headers (RFC 9114 §4.3.1)
+      VALID_PSEUDO_HEADERS = %w[:method :scheme :authority :path :protocol].freeze
+
       def initialize(data)
         @data = data
         @frames = []
@@ -21,11 +24,43 @@ module Quicsilver
         parse!
       end
 
+      # Validate pseudo-header semantics per RFC 9114 §4.3.1.
+      # Call after parse to check CONNECT rules, required headers, host/:authority consistency.
+      def validate_headers!
+        return if @headers.empty?
+
+        method = @headers[":method"]
+
+        if method == "CONNECT"
+          raise HTTP3::MessageError, "CONNECT request must include :authority" unless @headers[":authority"]
+          raise HTTP3::MessageError, "CONNECT request must not include :scheme" if @headers[":scheme"]
+          raise HTTP3::MessageError, "CONNECT request must not include :path" if @headers[":path"]
+        else
+          raise HTTP3::MessageError, "Request missing required pseudo-header :method" unless method
+          raise HTTP3::MessageError, "Request missing required pseudo-header :scheme" unless @headers[":scheme"]
+          raise HTTP3::MessageError, "Request missing required pseudo-header :path" unless @headers[":path"]
+        end
+
+        # Host and :authority consistency (RFC 9114 §4.3.1)
+        if @headers[":authority"] && @headers["host"]
+          unless @headers[":authority"] == @headers["host"]
+            raise HTTP3::MessageError, ":authority and host header must be consistent"
+          end
+        end
+      end
+
       def to_rack_env(stream_info = {})
         return nil if @headers.empty?
-        return nil unless @headers[":method"] && @headers[":scheme"] && @headers[":path"]
 
-        path_full = @headers[":path"]
+        method = @headers[":method"]
+
+        if method == "CONNECT"
+          return nil unless @headers[":authority"]
+        else
+          return nil unless method && @headers[":scheme"] && @headers[":path"]
+        end
+
+        path_full = @headers[":path"] || ""
         path, query = path_full.split("?", 2)
 
         authority = @headers[":authority"] || "localhost:4433"
@@ -33,8 +68,8 @@ module Quicsilver
         port ||= "4433"
 
         env = {
-          "REQUEST_METHOD" => @headers[":method"],
-          "PATH_INFO" => path,
+          "REQUEST_METHOD" => method,
+          "PATH_INFO" => path || "",
           "QUERY_STRING" => query || "",
           "SERVER_NAME" => host,
           "SERVER_PORT" => port,
@@ -113,21 +148,30 @@ module Quicsilver
       # QPACK header block decoding (RFC 9204 §4.5)
       # Skips 2-byte prefix (required insert count + delta base), then decodes
       # field lines using one of three patterns identified by high bits.
+      #
+      # Validates per RFC 9114 §4.2 and §4.3.1:
+      # - Header names MUST be lowercase
+      # - Pseudo-headers MUST appear before regular headers
+      # - Duplicate pseudo-headers are malformed
+      # - Unknown pseudo-headers are malformed
       def parse_headers(payload)
         offset = 2
         return if payload.bytesize < offset
 
+        pseudo_done = false
+
         while offset < payload.bytesize
           byte = payload.bytes[offset]
+          name = nil
+          value = nil
 
           # Indexed Field Line (1Txxxxxx) — name + value from static table
           if (byte & 0x80) == 0x80
             index, bytes_consumed = decode_prefix_integer(payload.bytes, offset, 6, 0xC0)
             offset += bytes_consumed
 
-            field = decode_static_table_field(index)
-            if field.is_a?(Hash)
-              @headers.merge!(field)
+            if index < HTTP3::STATIC_TABLE.size
+              name, value = HTTP3::STATIC_TABLE[index]
             end
           # Literal with Name Reference (01NTxxxx) — name from static table, literal value
           elsif (byte & 0xC0) == 0x40
@@ -140,7 +184,6 @@ module Quicsilver
             if name
               value, consumed = decode_qpack_string(payload.bytes, offset)
               offset += consumed
-              @headers[name] = value
             end
           # Literal with Literal Name (001NHxxx) — both name and value are literals
           elsif (byte & 0xE0) == 0x20
@@ -157,11 +200,35 @@ module Quicsilver
 
             value, consumed = decode_qpack_string(payload.bytes, offset)
             offset += consumed
-
-            @headers[name] = value
           else
             break
           end
+
+          next unless name
+
+          # RFC 9114 §4.2: Header field names MUST be lowercase
+          if name =~ /[A-Z]/
+            raise HTTP3::MessageError, "Header name '#{name}' contains uppercase characters"
+          end
+
+          if name.start_with?(":")
+            # Pseudo-headers MUST appear before regular headers
+            raise HTTP3::MessageError, "Pseudo-header '#{name}' after regular header" if pseudo_done
+
+            # Reject unknown pseudo-headers
+            unless VALID_PSEUDO_HEADERS.include?(name)
+              raise HTTP3::MessageError, "Unknown pseudo-header '#{name}'"
+            end
+
+            # Reject duplicate pseudo-headers
+            if @headers.key?(name)
+              raise HTTP3::MessageError, "Duplicate pseudo-header '#{name}'"
+            end
+          else
+            pseudo_done = true
+          end
+
+          @headers[name] = value
         end
       end
 

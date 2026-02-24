@@ -15,6 +15,7 @@ module Quicsilver
     CONTROL_ONLY_FRAMES = [FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID].freeze
 
     FrameError = Class.new(StandardError)
+    MessageError = Class.new(StandardError)
 
     # HTTP/3 Error Codes (RFC 9114 Section 8.1)
     H3_NO_ERROR = 0x100
