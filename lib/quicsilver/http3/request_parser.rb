@@ -1,19 +1,19 @@
 # frozen_string_literal: true
 
 require "stringio"
-require_relative "../qpack/decoder"
+require_relative "../qpack/header_block_decoder"
 
 module Quicsilver
   module HTTP3
     class RequestParser
-      include Qpack::Decoder
       attr_reader :frames, :headers, :body
 
       # Known HTTP/3 request pseudo-headers (RFC 9114 §4.3.1)
       VALID_PSEUDO_HEADERS = %w[:method :scheme :authority :path :protocol].freeze
 
-      def initialize(data)
+      def initialize(data, decoder: Qpack::HeaderBlockDecoder.new)
         @data = data
+        @decoder = decoder
         @frames = []
         @headers = {}
         @body = StringIO.new
@@ -145,82 +145,29 @@ module Quicsilver
         @body.rewind
       end
 
-      # QPACK header block decoding (RFC 9204 §4.5)
-      # Skips 2-byte prefix (required insert count + delta base), then decodes
-      # field lines using one of three patterns identified by high bits.
-      #
-      # Validates per RFC 9114 §4.2 and §4.3.1:
+      # Decode QPACK header block and validate per RFC 9114 §4.2 and §4.3.1:
       # - Header names MUST be lowercase
       # - Pseudo-headers MUST appear before regular headers
       # - Duplicate pseudo-headers are malformed
       # - Unknown pseudo-headers are malformed
+      #
+      # QPACK decoding is delegated to @decoder (injectable).
       def parse_headers(payload)
-        offset = 2
-        return if payload.bytesize < offset
-
         pseudo_done = false
 
-        while offset < payload.bytesize
-          byte = payload.bytes[offset]
-          name = nil
-          value = nil
-
-          # Indexed Field Line (1Txxxxxx) — name + value from static table
-          if (byte & 0x80) == 0x80
-            index, bytes_consumed = decode_prefix_integer(payload.bytes, offset, 6, 0xC0)
-            offset += bytes_consumed
-
-            if index < HTTP3::STATIC_TABLE.size
-              name, value = HTTP3::STATIC_TABLE[index]
-            end
-          # Literal with Name Reference (01NTxxxx) — name from static table, literal value
-          elsif (byte & 0xC0) == 0x40
-            index, bytes_consumed = decode_prefix_integer(payload.bytes, offset, 4, 0xF0)
-            offset += bytes_consumed
-
-            entry = HTTP3::STATIC_TABLE[index] if index < HTTP3::STATIC_TABLE.size
-            name = entry ? entry[0] : nil
-
-            if name
-              value, consumed = decode_qpack_string(payload.bytes, offset)
-              offset += consumed
-            end
-          # Literal with Literal Name (001NHxxx) — both name and value are literals
-          elsif (byte & 0xE0) == 0x20
-            huffman_name = (byte & 0x08) != 0
-            name_len, name_len_bytes = decode_prefix_integer(payload.bytes, offset, 3, 0x28)
-            offset += name_len_bytes
-            raw_name = payload[offset, name_len]
-            name = if huffman_name
-              Qpack::HuffmanCode.decode(raw_name) || raw_name
-            else
-              raw_name
-            end
-            offset += name_len
-
-            value, consumed = decode_qpack_string(payload.bytes, offset)
-            offset += consumed
-          else
-            break
-          end
-
-          next unless name
-
+        @decoder.decode(payload) do |name, value|
           # RFC 9114 §4.2: Header field names MUST be lowercase
           if name =~ /[A-Z]/
             raise HTTP3::MessageError, "Header name '#{name}' contains uppercase characters"
           end
 
           if name.start_with?(":")
-            # Pseudo-headers MUST appear before regular headers
             raise HTTP3::MessageError, "Pseudo-header '#{name}' after regular header" if pseudo_done
 
-            # Reject unknown pseudo-headers
             unless VALID_PSEUDO_HEADERS.include?(name)
               raise HTTP3::MessageError, "Unknown pseudo-header '#{name}'"
             end
 
-            # Reject duplicate pseudo-headers
             if @headers.key?(name)
               raise HTTP3::MessageError, "Duplicate pseudo-header '#{name}'"
             end
@@ -230,13 +177,6 @@ module Quicsilver
 
           @headers[name] = value
         end
-      end
-
-      def decode_static_table_field(index)
-        return nil if index >= HTTP3::STATIC_TABLE.size
-
-        name, value = HTTP3::STATIC_TABLE[index]
-        {name => value}
       end
     end
   end
