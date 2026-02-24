@@ -11,9 +11,15 @@ module Quicsilver
       # Known HTTP/3 request pseudo-headers (RFC 9114 §4.3.1)
       VALID_PSEUDO_HEADERS = %w[:method :scheme :authority :path :protocol].freeze
 
-      def initialize(data, decoder: Qpack::HeaderBlockDecoder.new)
+      def initialize(data, decoder: Qpack::HeaderBlockDecoder.new,
+                     max_body_size: nil, max_header_size: nil,
+                     max_header_count: nil, max_frame_payload_size: nil)
         @data = data
         @decoder = decoder
+        @max_body_size = max_body_size
+        @max_header_size = max_header_size
+        @max_header_count = max_header_count
+        @max_frame_payload_size = max_frame_payload_size
         @frames = []
         @headers = {}
         @body = StringIO.new
@@ -133,6 +139,11 @@ module Quicsilver
           break if buffer.bytesize < offset + header_len + length
 
           payload = buffer[offset + header_len, length]
+
+          if @max_frame_payload_size && length > @max_frame_payload_size
+            raise HTTP3::FrameError, "Frame payload #{length} exceeds limit #{@max_frame_payload_size}"
+          end
+
           @frames << { type: type, length: length, payload: payload }
 
           if HTTP3::CONTROL_ONLY_FRAMES.include?(type)
@@ -141,11 +152,17 @@ module Quicsilver
 
           case type
           when 0x01 # HEADERS
+            if @max_header_size && length > @max_header_size
+              raise HTTP3::MessageError, "Header block #{length} exceeds limit #{@max_header_size}"
+            end
             parse_headers(payload)
             headers_received = true
           when 0x00 # DATA
             raise HTTP3::FrameError, "DATA frame before HEADERS" unless headers_received
             @body.write(payload)
+            if @max_body_size && @body.size > @max_body_size
+              raise HTTP3::MessageError, "Body size #{@body.size} exceeds limit #{@max_body_size}"
+            end
           end
 
           offset += header_len + length
@@ -201,6 +218,9 @@ module Quicsilver
           end
           @headers[name] = "#{@headers[name]}#{separator}#{value}"
         else
+          if @max_header_count && @headers.size >= @max_header_count
+            raise HTTP3::MessageError, "Header count exceeds limit #{@max_header_count}"
+          end
           @headers[name] = value
         end
       end

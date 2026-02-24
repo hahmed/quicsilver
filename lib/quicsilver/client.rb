@@ -27,6 +27,8 @@ module Quicsilver
       @unsecure = options.fetch(:unsecure, true)
       @connection_timeout = options.fetch(:connection_timeout, DEFAULT_CONNECTION_TIMEOUT)
       @request_timeout = options.fetch(:request_timeout, DEFAULT_REQUEST_TIMEOUT)
+      @max_body_size = options[:max_body_size]
+      @max_header_size = options[:max_header_size]
 
       @connection_data = nil
       @connected = false
@@ -140,7 +142,8 @@ module Quicsilver
           buffer = @response_buffers.delete(stream_id)
           full_data = (buffer&.string || "".b) + event.data
 
-          response_parser = HTTP3::ResponseParser.new(full_data)
+          response_parser = HTTP3::ResponseParser.new(full_data, max_body_size: @max_body_size,
+            max_header_size: @max_header_size)
           response_parser.parse
 
           response = {

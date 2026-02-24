@@ -6,7 +6,8 @@ module Quicsilver
       :max_unidirectional_streams, :stream_receive_window, :stream_receive_buffer, :connection_flow_control_window,
       :pacing_enabled, :send_buffering_enabled, :initial_rtt_ms, :initial_window_packets, :max_ack_delay_ms,
       :keep_alive_interval_ms, :congestion_control_algorithm, :migration_enabled,
-      :disconnect_timeout_ms, :handshake_idle_timeout_ms
+      :disconnect_timeout_ms, :handshake_idle_timeout_ms,
+      :max_body_size, :max_header_size, :max_header_count, :max_frame_payload_size
 
     QUIC_SERVER_RESUME_AND_ZERORTT = 1
     QUIC_SERVER_RESUME_ONLY = 2
@@ -66,6 +67,12 @@ module Quicsilver
       @migration_enabled = options.fetch(:migration_enabled, DEFAULT_MIGRATION_ENABLED)
       @disconnect_timeout_ms = options.fetch(:disconnect_timeout_ms, DEFAULT_DISCONNECT_TIMEOUT_MS)
       @handshake_idle_timeout_ms = options.fetch(:handshake_idle_timeout_ms, DEFAULT_HANDSHAKE_IDLE_TIMEOUT_MS)
+
+      # HTTP/3 parser limits (nil = unlimited)
+      @max_body_size = options[:max_body_size]
+      @max_header_size = options[:max_header_size]
+      @max_header_count = options[:max_header_count]
+      @max_frame_payload_size = options[:max_frame_payload_size]
 
       @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
       @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file

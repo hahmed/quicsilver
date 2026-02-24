@@ -8,9 +8,12 @@ module Quicsilver
     class ResponseParser
       attr_reader :frames, :headers, :status
 
-      def initialize(data, decoder: Qpack::HeaderBlockDecoder.new)
+      def initialize(data, decoder: Qpack::HeaderBlockDecoder.new,
+                     max_body_size: nil, max_header_size: nil)
         @data = data
         @decoder = decoder
+        @max_body_size = max_body_size
+        @max_header_size = max_header_size
         @frames = []
         @headers = {}
         @body_io = StringIO.new
@@ -53,11 +56,17 @@ module Quicsilver
 
           case type
           when 0x01 # HEADERS
+            if @max_header_size && length > @max_header_size
+              raise HTTP3::MessageError, "Header block #{length} exceeds limit #{@max_header_size}"
+            end
             parse_headers(payload)
             headers_received = true
           when 0x00 # DATA
             raise HTTP3::FrameError, "DATA frame before HEADERS" unless headers_received
             @body_io.write(payload)
+            if @max_body_size && @body_io.size > @max_body_size
+              raise HTTP3::MessageError, "Body size #{@body_io.size} exceeds limit #{@max_body_size}"
+            end
           end
 
           offset += header_len + length

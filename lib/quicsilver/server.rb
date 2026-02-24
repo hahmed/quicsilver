@@ -302,7 +302,13 @@ module Quicsilver
     end
 
     def handle_request(connection, stream)
-      parser = HTTP3::RequestParser.new(stream.data)
+      parser = HTTP3::RequestParser.new(
+        stream.data,
+        max_body_size: @server_configuration.max_body_size,
+        max_header_size: @server_configuration.max_header_size,
+        max_header_count: @server_configuration.max_header_count,
+        max_frame_payload_size: @server_configuration.max_frame_payload_size
+      )
       parser.parse
       env = parser.to_rack_env
 

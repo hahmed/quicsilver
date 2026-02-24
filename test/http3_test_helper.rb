@@ -62,6 +62,16 @@ module HTTP3TestHelpers
     data
   end
 
+  def get_headers(extra = {})
+    { ":method" => "GET", ":scheme" => "https",
+      ":authority" => "localhost", ":path" => "/" }.merge(extra)
+  end
+
+  def post_headers(extra = {})
+    { ":method" => "POST", ":scheme" => "https",
+      ":authority" => "localhost", ":path" => "/" }.merge(extra)
+  end
+
   def qpack_prefix
     "\x00\x00".b
   end
