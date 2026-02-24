@@ -75,6 +75,7 @@ typedef struct {
     VALUE client_obj;      // Ruby client object (copied from connection context)
     int started;
     int shutdown;
+    int early_data;        // Set when stream received 0-RTT data
     QUIC_STATUS error_status;
 } StreamContext;
 
@@ -272,16 +273,23 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
         case QUIC_STREAM_EVENT_RECEIVE: {
             int has_fin = (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
 
+            // Track 0-RTT early data for replay protection
+            if (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_0_RTT) {
+                ctx->early_data = 1;
+            }
+
             if (Event->RECEIVE.BufferCount == 0 && has_fin) {
                 // Empty FIN — headers-only request/response with no body
+                // Format: [stream_handle(8)][early_data(1)]
                 uint64_t stream_id = 0;
                 uint32_t stream_id_len = sizeof(stream_id);
                 MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
 
-                size_t total_len = sizeof(HQUIC);
+                size_t total_len = sizeof(HQUIC) + 1;
                 char* combined = (char*)malloc(total_len);
                 if (combined != NULL) {
                     memcpy(combined, &Stream, sizeof(HQUIC));
+                    combined[sizeof(HQUIC)] = (char)ctx->early_data;
                     dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
                         "RECEIVE_FIN", stream_id, combined, total_len);
                     free(combined);
@@ -302,12 +310,13 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                 }
 
                 if (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) {
-                    // Create combined buffer: [stream_handle(8 bytes)][all data]
-                    size_t total_len = sizeof(HQUIC) + total_data_len;
+                    // Create combined buffer: [stream_handle(8)][early_data(1)][all data]
+                    size_t total_len = sizeof(HQUIC) + 1 + total_data_len;
                     char* combined = (char*)malloc(total_len);
                     if (combined != NULL) {
                         memcpy(combined, &Stream, sizeof(HQUIC));
-                        size_t offset = sizeof(HQUIC);
+                        combined[sizeof(HQUIC)] = (char)ctx->early_data;
+                        size_t offset = sizeof(HQUIC) + 1;
                         for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
@@ -429,6 +438,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
                 stream_ctx->client_obj = ctx->client_obj;  // Copy from connection context
                 stream_ctx->started = 1;
                 stream_ctx->shutdown = 0;
+                stream_ctx->early_data = 0;
                 stream_ctx->error_status = QUIC_STATUS_SUCCESS;
 
                 // Set the stream callback handler to handle data events
@@ -1119,6 +1129,7 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
     ctx->client_obj = conn_ctx ? conn_ctx->client_obj : Qnil;
     ctx->started = 1;
     ctx->shutdown = 0;
+    ctx->early_data = 0;
     ctx->error_status = QUIC_STATUS_SUCCESS;
 
     // Use flag based on parameter

@@ -216,7 +216,7 @@ module Quicsilver
 
         if stream.bidirectional?
           connection.track_client_stream(stream_id)
-          dispatch_request(connection, stream)
+          dispatch_request(connection, stream, early_data: event.early_data)
         else
           connection.handle_unidirectional_stream(stream)
         end
@@ -269,12 +269,12 @@ module Quicsilver
 
     attr_reader :work_queue
 
-    def dispatch_request(connection, stream)
+    def dispatch_request(connection, stream, early_data: false)
       if @work_queue.size >= @max_queue_size
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
         connection.send_error(stream, 503, "Service Unavailable") if stream.ready_to_send?
       else
-        @work_queue.push([connection, stream])
+        @work_queue.push([connection, stream, early_data])
       end
     end
 
@@ -283,8 +283,8 @@ module Quicsilver
         thread = Thread.new do
           while (work = @work_queue.pop)
             break if work == :shutdown
-            connection, stream = work
-            handle_request(connection, stream)
+            connection, stream, early_data = work
+            handle_request(connection, stream, early_data: early_data)
           end
         end
         @handler_mutex.synchronize { @handler_threads << thread }
@@ -301,7 +301,7 @@ module Quicsilver
       end
     end
 
-    def handle_request(connection, stream)
+    def handle_request(connection, stream, early_data: false)
       parser = HTTP3::RequestParser.new(
         stream.data,
         max_body_size: @server_configuration.max_body_size,
@@ -310,6 +310,7 @@ module Quicsilver
         max_frame_payload_size: @server_configuration.max_frame_payload_size
       )
       parser.parse
+      parser.validate_headers!(early_data: early_data)
       env = parser.to_rack_env
 
       if env && @app
