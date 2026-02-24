@@ -71,8 +71,25 @@ module Quicsilver
           if name == ":status"
             @status = value.to_i
           else
-            @headers[name] = value
+            store_header(name, value)
           end
+        end
+      end
+
+      # RFC 9110 §5.3: Combine duplicate header values.
+      # - set-cookie: join with "\n" (Rack convention, MUST NOT combine with comma)
+      # - cookie: join with "; " (RFC 9114 §4.2.1)
+      # - all others: join with ", "
+      def store_header(name, value)
+        if @headers.key?(name)
+          separator = case name
+            when "set-cookie" then "\n"
+            when "cookie" then "; "
+            else ", "
+          end
+          @headers[name] = "#{@headers[name]}#{separator}#{value}"
+        else
+          @headers[name] = value
         end
       end
     end
