@@ -47,6 +47,15 @@ module Quicsilver
             raise HTTP3::MessageError, ":authority and host header must be consistent"
           end
         end
+
+        # Content-length vs body size (RFC 9114 §4.1.2)
+        if @headers["content-length"]
+          expected = @headers["content-length"].to_i
+          actual = @body.size
+          unless expected == actual
+            raise HTTP3::MessageError, "Content-length mismatch: header=#{expected}, body=#{actual}"
+          end
+        end
       end
 
       def to_rack_env(stream_info = {})

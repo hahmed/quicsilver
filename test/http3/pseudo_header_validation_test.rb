@@ -1,29 +1,19 @@
 # frozen_string_literal: true
 
-$LOAD_PATH.unshift File.expand_path("../../lib", __dir__)
-require "set"
-require "quicsilver/http3"
-require "quicsilver/qpack/huffman_code"
-require "quicsilver/qpack/decoder"
-require "quicsilver/qpack/encoder"
-require "quicsilver/http3/request_parser"
-
-require "minitest/autorun"
+require_relative "../http3_test_helper"
 
 class PseudoHeaderValidationTest < Minitest::Test
+  include HTTP3TestHelpers
+
   # === RFC 9114 §4.3.1: Pseudo-header ordering ===
 
   def test_rejects_pseudo_header_after_regular_header
-    # Manually build: regular header "host" then pseudo-header ":path"
-    # Can't use Encoder for this since it would order them correctly
     payload = qpack_prefix
     payload += encode_literal("host", "example.com")
     payload += encode_literal(":path", "/")
 
-    parser = parse_headers_frame(payload)
-
     assert_raises(Quicsilver::HTTP3::MessageError) do
-      parser.parse
+      parse_headers_frame(payload).parse
     end
   end
 
@@ -114,7 +104,6 @@ class PseudoHeaderValidationTest < Minitest::Test
   end
 
   def test_validate_connect_requires_authority
-    # Build manually — CONNECT with only :method, no :authority
     payload = qpack_prefix
     payload += encode_literal(":method", "CONNECT")
 
@@ -133,7 +122,6 @@ class PseudoHeaderValidationTest < Minitest::Test
     )
     parser = parse_headers_frame(headers)
     parser.parse
-    # Should not raise
     parser.validate_headers!
   end
 
@@ -206,7 +194,6 @@ class PseudoHeaderValidationTest < Minitest::Test
     )
     parser = parse_headers_frame(headers)
     parser.parse
-    # Should not raise
     parser.validate_headers!
   end
 
@@ -238,8 +225,6 @@ class PseudoHeaderValidationTest < Minitest::Test
     )
     parser = parse_headers_frame(headers)
     parser.parse
-
-    # No error from validate
     parser.validate_headers!
 
     assert_equal "GET", parser.headers[":method"]
@@ -248,53 +233,7 @@ class PseudoHeaderValidationTest < Minitest::Test
 
   private
 
-  def qpack_prefix
-    "\x00\x00".b
-  end
-
-  # Encode a literal header field with literal name (pattern 5: 001xxxxx)
-  # This bypasses the encoder to produce invalid sequences for testing
-  def encode_literal(name, value)
-    name_bytes = name.b
-    value_bytes = value.b
-
-    out = "".b
-    # 001 H=0 N=0 + name length (3-bit prefix, pattern 0x20)
-    out << encode_prefixed_int(name_bytes.bytesize, 3, 0x20)
-    out << name_bytes
-    # H=0 + value length (7-bit prefix, pattern 0x00)
-    out << encode_prefixed_int(value_bytes.bytesize, 7, 0x00)
-    out << value_bytes
-    out
-  end
-
-  def encode_prefixed_int(value, prefix_bits, pattern)
-    max_prefix = (1 << prefix_bits) - 1
-    if value < max_prefix
-      [pattern | value].pack("C")
-    else
-      out = [pattern | max_prefix].pack("C")
-      value -= max_prefix
-      while value >= 128
-        out << [(value & 0x7F) | 0x80].pack("C")
-        value >>= 7
-      end
-      out << [value].pack("C")
-      out
-    end
-  end
-
-  def build_frame(type, payload)
-    Quicsilver::HTTP3.encode_varint(type) +
-      Quicsilver::HTTP3.encode_varint(payload.bytesize) +
-      payload
-  end
-
-  def build_qpack_headers(headers)
-    Quicsilver::Qpack::Encoder.new(huffman: false).encode(headers)
-  end
-
   def parse_headers_frame(payload)
-    Quicsilver::HTTP3::RequestParser.new(build_frame(Quicsilver::HTTP3::FRAME_HEADERS, payload))
+    Quicsilver::HTTP3::RequestParser.new(build_headers_frame(payload))
   end
 end
