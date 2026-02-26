@@ -7,7 +7,8 @@ module Quicsilver
       :pacing_enabled, :send_buffering_enabled, :initial_rtt_ms, :initial_window_packets, :max_ack_delay_ms,
       :keep_alive_interval_ms, :congestion_control_algorithm, :migration_enabled,
       :disconnect_timeout_ms, :handshake_idle_timeout_ms,
-      :max_body_size, :max_header_size, :max_header_count, :max_frame_payload_size
+      :max_body_size, :max_header_size, :max_header_count, :max_frame_payload_size,
+      :early_data_policy
 
     QUIC_SERVER_RESUME_AND_ZERORTT = 1
     QUIC_SERVER_RESUME_ONLY = 2
@@ -73,6 +74,14 @@ module Quicsilver
       @max_header_size = options[:max_header_size]
       @max_header_count = options[:max_header_count]
       @max_frame_payload_size = options[:max_frame_payload_size]
+
+      # 0-RTT early data policy (RFC 8470)
+      # :reject (default) — send 425 Too Early for unsafe methods on 0-RTT
+      # :allow — pass all 0-RTT requests to the Rack app with env["quicsilver.early_data"]
+      @early_data_policy = options.fetch(:early_data_policy, :reject)
+      unless %i[reject allow].include?(@early_data_policy)
+        raise ServerConfigurationError, "Invalid early_data_policy: #{@early_data_policy.inspect} (must be :reject or :allow)"
+      end
 
       @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
       @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file

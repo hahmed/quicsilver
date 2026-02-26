@@ -30,22 +30,12 @@ module Quicsilver
         parse!
       end
 
-      # Safe HTTP methods that are allowed in 0-RTT (early data).
-      # RFC 9110 §9.2.1
-      SAFE_METHODS = %w[GET HEAD OPTIONS].freeze
-
       # Validate pseudo-header semantics per RFC 9114 §4.3.1.
       # Call after parse to check CONNECT rules, required headers, host/:authority consistency.
-      # Pass early_data: true when the request arrived on a 0-RTT stream.
-      def validate_headers!(early_data: false)
+      def validate_headers!
         return if @headers.empty?
 
         method = @headers[":method"]
-
-        # RFC 9110 §9.2.1: 0-RTT requests must use safe methods to prevent replay attacks
-        if early_data && !SAFE_METHODS.include?(method)
-          raise HTTP3::MessageError, "Unsafe method '#{method}' not allowed in 0-RTT early data"
-        end
 
         if method == "CONNECT"
           raise HTTP3::MessageError, "CONNECT request must include :authority" unless @headers[":authority"]

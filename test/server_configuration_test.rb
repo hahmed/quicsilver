@@ -166,6 +166,22 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal "custom-protocol", config.alpn
   end
 
+  def test_early_data_policy_defaults_to_reject
+    config = fetch_server_configuration_with_certs
+    assert_equal :reject, config.early_data_policy
+  end
+
+  def test_early_data_policy_allow
+    config = fetch_server_configuration_with_certs(early_data_policy: :allow)
+    assert_equal :allow, config.early_data_policy
+  end
+
+  def test_early_data_policy_invalid_raises
+    assert_raises(Quicsilver::ServerConfigurationError) do
+      fetch_server_configuration_with_certs(early_data_policy: :bogus)
+    end
+  end
+
   def test_attr_readers_exist
     config = fetch_server_configuration_with_certs
 

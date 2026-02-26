@@ -12,6 +12,9 @@ module Quicsilver
     STREAM_EVENT_STREAM_RESET = "STREAM_RESET"
     STREAM_EVENT_STOP_SENDING = "STOP_SENDING"
 
+    # Safe HTTP methods allowed in 0-RTT early data (RFC 9110 §9.2.1)
+    SAFE_METHODS = %w[GET HEAD OPTIONS].freeze
+
     ServerStopError = Class.new(StandardError)
     DrainTimeoutError = Class.new(StandardError)
 
@@ -310,10 +313,19 @@ module Quicsilver
         max_frame_payload_size: @server_configuration.max_frame_payload_size
       )
       parser.parse
-      parser.validate_headers!(early_data: early_data)
+      parser.validate_headers!
       env = parser.to_rack_env
 
       if env && @app
+        env["quicsilver.early_data"] = early_data
+
+        # RFC 8470: reject unsafe methods on 0-RTT unless app opted in
+        if @server_configuration.early_data_policy == :reject &&
+           early_data && !SAFE_METHODS.include?(env["REQUEST_METHOD"])
+          connection.send_error(stream, 425, "Too Early") if stream.ready_to_send?
+          return
+        end
+
         @request_registry.track(
           stream.stream_id,
           connection.handle,
