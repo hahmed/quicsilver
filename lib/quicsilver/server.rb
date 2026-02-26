@@ -275,7 +275,7 @@ module Quicsilver
     def dispatch_request(connection, stream, early_data: false)
       if @work_queue.size >= @max_queue_size
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
-        connection.send_error(stream, 503, "Service Unavailable") if stream.ready_to_send?
+        connection.send_error(stream, 503, "Service Unavailable") if stream.writable?
       else
         @work_queue.push([connection, stream, early_data])
       end
@@ -322,7 +322,7 @@ module Quicsilver
         # RFC 8470: reject unsafe methods on 0-RTT unless app opted in
         if @server_configuration.early_data_policy == :reject &&
            early_data && !SAFE_METHODS.include?(env["REQUEST_METHOD"])
-          connection.send_error(stream, 425, "Too Early") if stream.ready_to_send?
+          connection.send_error(stream, 425, "Too Early") if stream.writable?
           return
         end
 
@@ -340,19 +340,19 @@ module Quicsilver
           return
         end
 
-        raise "Stream handle not found for stream #{stream.stream_id}" unless stream.ready_to_send?
+        raise "Stream handle not found for stream #{stream.stream_id}" unless stream.writable?
 
         connection.send_response(stream, status, headers, body)
         @request_registry.complete(stream.stream_id)
       else
-        connection.send_error(stream, 400, "Bad Request") if stream.ready_to_send?
+        connection.send_error(stream, 400, "Bad Request") if stream.writable?
       end
     rescue DrainTimeoutError
       Quicsilver.logger.debug("Request interrupted by drain: stream #{stream.stream_id}")
     rescue => e
       Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
       Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
-      connection.send_error(stream, 500, "Internal Server Error") if stream.ready_to_send?
+      connection.send_error(stream, 500, "Internal Server Error") if stream.writable?
     ensure
       @request_registry.complete(stream.stream_id) if @request_registry.include?(stream.stream_id)
       @cancelled_mutex.synchronize { @cancelled_streams.delete(stream.stream_id) }

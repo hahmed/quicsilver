@@ -56,11 +56,11 @@ class QuicStreamTest < Minitest::Test
     refute Quicsilver::QuicStream.new(3).bidirectional?
   end
 
-  def test_ready_to_send_requires_stream_handle
+  def test_writable_requires_stream_handle
     stream = Quicsilver::QuicStream.new(0)
-    refute stream.ready_to_send?
+    refute stream.writable?
 
     stream.stream_handle = 12345
-    assert stream.ready_to_send?
+    assert stream.writable?
   end
 end

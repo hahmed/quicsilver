@@ -16,7 +16,7 @@ module Quicsilver
       (stream_id & 0x02) == 0
     end
 
-    def ready_to_send?
+    def writable?
       !stream_handle.nil?
     end
 
