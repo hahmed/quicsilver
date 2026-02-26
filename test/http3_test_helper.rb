@@ -1,43 +1,32 @@
 # frozen_string_literal: true
 
-$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
-
-require "set"
-require "quicsilver/http3"
-require "quicsilver/qpack/huffman_code"
-require "quicsilver/qpack/decoder"
-require "quicsilver/qpack/encoder"
-require "quicsilver/qpack/header_block_decoder"
-require "quicsilver/http3/request_parser"
-require "quicsilver/http3/response_parser"
-
-require "minitest/autorun"
+require "test_helper"
 
 module HTTP3TestHelpers
   def build_frame(type, payload)
-    Quicsilver::HTTP3.encode_varint(type) +
-      Quicsilver::HTTP3.encode_varint(payload.bytesize) +
+    Quicsilver::Protocol.encode_varint(type) +
+      Quicsilver::Protocol.encode_varint(payload.bytesize) +
       payload
   end
 
   def build_headers_frame(payload)
-    build_frame(Quicsilver::HTTP3::FRAME_HEADERS, payload)
+    build_frame(Quicsilver::Protocol::FRAME_HEADERS, payload)
   end
 
   def build_data_frame(payload)
-    build_frame(Quicsilver::HTTP3::FRAME_DATA, payload)
+    build_frame(Quicsilver::Protocol::FRAME_DATA, payload)
   end
 
   def encode_varint(value)
-    Quicsilver::HTTP3.encode_varint(value)
+    Quicsilver::Protocol.encode_varint(value)
   end
 
   def build_qpack_headers(headers)
-    Quicsilver::Qpack::Encoder.new(huffman: false).encode(headers)
+    Quicsilver::Protocol::Qpack::Encoder.new(huffman: false).encode(headers)
   end
 
   def build_qpack_response_headers(status, headers = {})
-    Quicsilver::Qpack::Encoder.new(huffman: false).encode(
+    Quicsilver::Protocol::Qpack::Encoder.new(huffman: false).encode(
       { ":status" => status.to_s }.merge(headers)
     )
   end

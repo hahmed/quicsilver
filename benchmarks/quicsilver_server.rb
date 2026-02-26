@@ -26,7 +26,7 @@ authority = Localhost::Authority.fetch
 cert_file = authority.certificate_path
 key_file = authority.key_path
 
-config = ::Quicsilver::ServerConfiguration.new(cert_file, key_file)
+config = ::Quicsilver::Transport::Configuration.new(cert_file, key_file)
 
 server = ::Quicsilver::Server.new(
   port.to_i,

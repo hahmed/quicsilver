@@ -2,8 +2,6 @@
 
 require "test_helper"
 require "timeout"
-require_relative "../../lib/quicsilver/http3"
-require_relative "../../lib/quicsilver/http3/response_parser"
 
 class ResponseParserTest < Minitest::Test
   def test_parses_200_response
@@ -149,7 +147,7 @@ class ResponseParserTest < Minitest::Test
 
   def test_indexed_field_with_empty_value
     # Static table index 0 is [":authority", ""] — empty-value entry
-    encoder = Quicsilver::Qpack::Encoder.new
+    encoder = Quicsilver::Protocol::Qpack::Encoder.new
     indexed_byte = encoder.send(:encode_indexed, 0)
     headers_payload = "\x00\x00".b + build_indexed_status(200) + indexed_byte
     parser = parse(build_frame(HEADERS, headers_payload))
@@ -160,9 +158,9 @@ class ResponseParserTest < Minitest::Test
   def test_rejects_settings_frame_on_request_stream
     headers_payload = build_qpack_response_headers(200, {})
     data = build_frame(HEADERS, headers_payload)
-    data += build_frame(Quicsilver::HTTP3::FRAME_SETTINGS, "\x01\x00")
+    data += build_frame(Quicsilver::Protocol::FRAME_SETTINGS, "\x01\x00")
 
-    assert_raises(Quicsilver::HTTP3::FrameError) do
+    assert_raises(Quicsilver::Protocol::FrameError) do
       parse(data)
     end
   end
@@ -170,16 +168,16 @@ class ResponseParserTest < Minitest::Test
   def test_rejects_goaway_frame_on_request_stream
     headers_payload = build_qpack_response_headers(200, {})
     data = build_frame(HEADERS, headers_payload)
-    data += build_frame(Quicsilver::HTTP3::FRAME_GOAWAY, "\x00")
+    data += build_frame(Quicsilver::Protocol::FRAME_GOAWAY, "\x00")
 
-    assert_raises(Quicsilver::HTTP3::FrameError) do
+    assert_raises(Quicsilver::Protocol::FrameError) do
       parse(data)
     end
   end
 
   def test_truncated_frame_length_does_not_hang
     truncated = "\x01\x80\x00".b
-    parser = Quicsilver::HTTP3::ResponseParser.new(truncated)
+    parser = Quicsilver::Protocol::ResponseParser.new(truncated)
 
     Timeout.timeout(1) { parser.parse }
     assert_empty parser.frames
@@ -189,7 +187,7 @@ class ResponseParserTest < Minitest::Test
     data = build_frame(DATA, "body first")
     data += build_frame(HEADERS, build_qpack_response_headers(200, {}))
 
-    assert_raises(Quicsilver::HTTP3::FrameError) do
+    assert_raises(Quicsilver::Protocol::FrameError) do
       parse(data)
     end
   end
@@ -236,7 +234,7 @@ class ResponseParserTest < Minitest::Test
     # Values 0-62 fit in 6 bits (for indexed field pattern)
     (0..62).step(10).each do |value|
       headers_payload = "\x00\x00".b + [0xC0 | value].pack('C')
-      parser = Quicsilver::HTTP3::ResponseParser.new(build_frame(HEADERS, headers_payload))
+      parser = Quicsilver::Protocol::ResponseParser.new(build_frame(HEADERS, headers_payload))
       # Just verify it parses without error
       parser.parse
     end
@@ -248,10 +246,10 @@ class ResponseParserTest < Minitest::Test
     # For index 63: first byte = 0xFF, second byte = 0x00 (63 + 0*128 = 63)
     headers_payload = "\x00\x00".b + "\xFF\x00".b
 
-    parser = Quicsilver::HTTP3::ResponseParser.new(build_frame(HEADERS, headers_payload))
+    parser = Quicsilver::Protocol::ResponseParser.new(build_frame(HEADERS, headers_payload))
     parser.parse
     # Index 63 maps to static table entry - just verify no crash
-    assert_kind_of Quicsilver::HTTP3::ResponseParser, parser
+    assert_kind_of Quicsilver::Protocol::ResponseParser, parser
   end
 
   # Static table coverage
@@ -273,24 +271,24 @@ class ResponseParserTest < Minitest::Test
     ]
 
     test_cases.each do |index, expected_name, expected_value|
-      entry = Quicsilver::HTTP3::STATIC_TABLE[index]
+      entry = Quicsilver::Protocol::STATIC_TABLE[index]
       assert_equal expected_name, entry[0], "Index #{index} name mismatch"
       assert_equal expected_value, entry[1], "Index #{index} value mismatch"
     end
   end
 
   def test_static_table_hsts_casing
-    assert_equal 'max-age=31536000; includeSubDomains', Quicsilver::HTTP3::STATIC_TABLE[57][1]
-    assert_equal 'max-age=31536000; includeSubDomains; preload', Quicsilver::HTTP3::STATIC_TABLE[58][1]
+    assert_equal 'max-age=31536000; includeSubDomains', Quicsilver::Protocol::STATIC_TABLE[57][1]
+    assert_equal 'max-age=31536000; includeSubDomains; preload', Quicsilver::Protocol::STATIC_TABLE[58][1]
   end
 
   private
 
-  HEADERS = Quicsilver::HTTP3::FRAME_HEADERS
-  DATA = Quicsilver::HTTP3::FRAME_DATA
+  HEADERS = Quicsilver::Protocol::FRAME_HEADERS
+  DATA = Quicsilver::Protocol::FRAME_DATA
 
   def parse(data)
-    parser = Quicsilver::HTTP3::ResponseParser.new(data)
+    parser = Quicsilver::Protocol::ResponseParser.new(data)
     parser.parse
     parser
   end
@@ -300,18 +298,18 @@ class ResponseParserTest < Minitest::Test
   end
 
   def encode_varint(value)
-    Quicsilver::HTTP3.encode_varint(value)
+    Quicsilver::Protocol.encode_varint(value)
   end
 
   def build_qpack_response_headers(status, headers)
-    Quicsilver::Qpack::Encoder.new.encode(
+    Quicsilver::Protocol::Qpack::Encoder.new.encode(
       { ":status" => status.to_s }.merge(headers)
     )
   end
 
   def build_indexed_status(status)
     # For tests that need just a status in the payload (no prefix)
-    encoder = Quicsilver::Qpack::Encoder.new
+    encoder = Quicsilver::Protocol::Qpack::Encoder.new
     full = encoder.encode({ ":status" => status.to_s })
     # Strip the 2-byte QPACK prefix
     full[2..]

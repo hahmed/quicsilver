@@ -1,10 +1,9 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require "quicsilver/qpack/huffman_code"
 
 class HuffmanCodeTest < Minitest::Test
-  HuffmanCode = Quicsilver::Qpack::HuffmanCode
+  HuffmanCode = Quicsilver::Protocol::Qpack::Huffman
 
   # Table integrity
   def test_table_has_256_entries

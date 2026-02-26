@@ -1,9 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require_relative "../../lib/quicsilver/http3"
-require_relative "../../lib/quicsilver/http3/request_encoder"
-require_relative "../../lib/quicsilver/http3/request_parser"
 
 class RequestEncoderTest < Minitest::Test
   # Core functionality tests
@@ -126,7 +123,7 @@ class RequestEncoderTest < Minitest::Test
     assert qpack_start, "Could not find QPACK prefix"
 
     first_header_byte = bytes[qpack_start + 2]
-    assert_equal 0xC0 | Quicsilver::HTTP3::QPACK_METHOD_GET, first_header_byte,
+    assert_equal 0xC0 | Quicsilver::Protocol::QPACK_METHOD_GET, first_header_byte,
       "Should use indexed field line (0xC0 | index) for :method GET"
   end
 
@@ -137,13 +134,13 @@ class RequestEncoderTest < Minitest::Test
     bytes = data.bytes
 
     qpack_start = find_qpack_start(bytes)
-    assert bytes[qpack_start, 20].include?(0x50 | Quicsilver::HTTP3::QPACK_AUTHORITY),
+    assert bytes[qpack_start, 20].include?(0x50 | Quicsilver::Protocol::QPACK_AUTHORITY),
       "Should use literal with name ref (0x50 | index) for :authority"
   end
 
   def test_connect_omits_scheme_and_path
     data = encoder("CONNECT", "/", authority: "proxy.example.com:443").encode
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
 
     assert_equal "CONNECT", parser.headers[":method"]
@@ -176,7 +173,7 @@ class RequestEncoderTest < Minitest::Test
   private
 
   def encoder(method, path, scheme: "https", authority: "localhost:4433", headers: {}, body: nil)
-    Quicsilver::HTTP3::RequestEncoder.new(
+    Quicsilver::Protocol::RequestEncoder.new(
       method: method,
       path: path,
       scheme: scheme,
@@ -187,13 +184,13 @@ class RequestEncoderTest < Minitest::Test
   end
 
   def assert_encoded_header(data, name, value)
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
     assert_equal value, parser.headers[name], "Expected header #{name} to be #{value}"
   end
 
   def parse_body(data)
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
     parser.body.read
   end
@@ -202,13 +199,13 @@ class RequestEncoderTest < Minitest::Test
     # Find HEADERS frame (type 0x01) and skip to payload
     offset = 0
     while offset < bytes.size - 2
-      type, type_len = Quicsilver::HTTP3.decode_varint(bytes, offset)
+      type, type_len = Quicsilver::Protocol.decode_varint(bytes, offset)
       return nil if type_len == 0
 
-      length, length_len = Quicsilver::HTTP3.decode_varint(bytes, offset + type_len)
+      length, length_len = Quicsilver::Protocol.decode_varint(bytes, offset + type_len)
       return nil if length_len == 0
 
-      if type == Quicsilver::HTTP3::FRAME_HEADERS
+      if type == Quicsilver::Protocol::FRAME_HEADERS
         return offset + type_len + length_len
       end
 

@@ -4,7 +4,7 @@ require "test_helper"
 
 class QpackEncoderTest < Minitest::Test
   def setup
-    @encoder = Quicsilver::Qpack::Encoder.new
+    @encoder = Quicsilver::Protocol::Qpack::Encoder.new
   end
 
   # Static table lookup
@@ -189,7 +189,7 @@ class QpackEncoderTest < Minitest::Test
   end
 
   def test_lookup_can_be_overridden_for_dynamic_table
-    custom_encoder = Class.new(Quicsilver::Qpack::Encoder) do
+    custom_encoder = Class.new(Quicsilver::Protocol::Qpack::Encoder) do
       def lookup(name, value)
         return [200, true] if name == "x-dynamic"
 
@@ -206,7 +206,7 @@ class QpackEncoderTest < Minitest::Test
   end
 
   def test_encode_prefix_can_be_overridden
-    custom_encoder = Class.new(Quicsilver::Qpack::Encoder) do
+    custom_encoder = Class.new(Quicsilver::Protocol::Qpack::Encoder) do
       def encode_prefix
         "\x05\x00".b # Non-zero Required Insert Count
       end
@@ -218,11 +218,11 @@ class QpackEncoderTest < Minitest::Test
 
   # Static table integrity
   def test_static_table_has_99_entries
-    assert_equal 99, Quicsilver::HTTP3::STATIC_TABLE.size
+    assert_equal 99, Quicsilver::Protocol::STATIC_TABLE.size
   end
 
   def test_common_pseudo_headers_in_static_table
-    table = Quicsilver::HTTP3::STATIC_TABLE
+    table = Quicsilver::Protocol::STATIC_TABLE
 
     assert_includes table, [":authority", ""]
     assert_includes table, [":method", "GET"]
@@ -233,7 +233,7 @@ class QpackEncoderTest < Minitest::Test
   end
 
   def test_common_status_codes_in_static_table
-    table = Quicsilver::HTTP3::STATIC_TABLE
+    table = Quicsilver::Protocol::STATIC_TABLE
 
     assert_includes table, [":status", "200"]
     assert_includes table, [":status", "204"]
@@ -245,7 +245,7 @@ class QpackEncoderTest < Minitest::Test
   end
 
   def test_common_headers_in_static_table
-    table = Quicsilver::HTTP3::STATIC_TABLE
+    table = Quicsilver::Protocol::STATIC_TABLE
 
     # Check some common headers exist (name-only entries)
     names = table.map(&:first)

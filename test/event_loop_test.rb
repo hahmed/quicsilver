@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require_relative "../lib/quicsilver/event_loop"
 
 class EventLoopTest < Minitest::Test
   def test_wake_is_callable
@@ -16,7 +15,7 @@ class EventLoopTest < Minitest::Test
 
   def test_stop_unblocks_event_loop_quickly
     Quicsilver.open_connection
-    loop_instance = Quicsilver::EventLoop.new
+    loop_instance = Quicsilver::Transport::EventLoop.new
     loop_instance.start
 
     # Give the loop thread time to enter its poll wait
@@ -61,7 +60,7 @@ class EventLoopTest < Minitest::Test
   private
 
   def create_server(port)
-    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path)
+    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
     app = ->(env) { [200, { "content-type" => "text/plain" }, ["OK"]] }
     Quicsilver::Server.new(port, server_configuration: config, app: app)
   end

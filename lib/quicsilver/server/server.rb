@@ -12,9 +12,6 @@ module Quicsilver
     STREAM_EVENT_STREAM_RESET = "STREAM_RESET"
     STREAM_EVENT_STOP_SENDING = "STOP_SENDING"
 
-    # Safe HTTP methods allowed in 0-RTT early data (RFC 9110 §9.2.1)
-    SAFE_METHODS = %w[GET HEAD OPTIONS].freeze
-
     ServerStopError = Class.new(StandardError)
     DrainTimeoutError = Class.new(StandardError)
 
@@ -35,7 +32,7 @@ module Quicsilver
       @port = port
       @address = address
       @app = app || default_rack_app
-      @server_configuration = server_configuration || ServerConfiguration.new
+      @server_configuration = server_configuration || Transport::Configuration.new
       @running = false
       @shutting_down = false
       @listener_data = nil
@@ -50,6 +47,14 @@ module Quicsilver
       @max_connections = max_connections
       @cancelled_streams = Set.new
       @cancelled_mutex = Mutex.new
+
+      @request_handler = RequestHandler.new(
+        app: @app,
+        configuration: @server_configuration,
+        request_registry: @request_registry,
+        cancelled_streams: @cancelled_streams,
+        cancelled_mutex: @cancelled_mutex
+      )
 
       self.class.instance = self
     end
@@ -154,7 +159,7 @@ module Quicsilver
       Quicsilver.logger.info("Initiating graceful shutdown (timeout: #{timeout}s)")
 
       # Phase 1: Send GOAWAY - tell clients to stop sending new requests
-      @connections.each_value { |c| c.send_goaway(HTTP3::MAX_STREAM_ID) }
+      @connections.each_value { |c| c.send_goaway(Protocol::MAX_STREAM_ID) }
 
       # Phase 2: Drain in-flight requests
       drain(timeout: timeout)
@@ -188,11 +193,11 @@ module Quicsilver
       when STREAM_EVENT_CONNECTION_ESTABLISHED
         if @connections.size >= @max_connections
           Quicsilver.logger.warn("Connection limit reached (#{@max_connections}), rejecting connection")
-          Quicsilver.connection_shutdown(connection_handle, HTTP3::H3_EXCESSIVE_LOAD, false)
+          Quicsilver.connection_shutdown(connection_handle, Protocol::H3_EXCESSIVE_LOAD, false)
           return
         end
 
-        connection = Connection.new(connection_handle, connection_data)
+        connection = Transport::Connection.new(connection_handle, connection_data)
         @connections[connection_handle] = connection
         connection.setup_http3_streams
 
@@ -210,10 +215,10 @@ module Quicsilver
       when STREAM_EVENT_RECEIVE_FIN
         return unless (connection = @connections[connection_handle])
 
-        event = StreamEvent.new(data, "RECEIVE_FIN")
+        event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
 
         full_data = connection.complete_stream(stream_id, event.data)
-        stream = QuicStream.new(stream_id)
+        stream = Transport::InboundStream.new(stream_id)
         stream.stream_handle = event.handle
         stream.append_data(full_data)
 
@@ -226,17 +231,17 @@ module Quicsilver
 
       when STREAM_EVENT_STREAM_RESET
         return unless @connections[connection_handle]
-        event = StreamEvent.new(data, "STREAM_RESET")
+        event = Transport::StreamEvent.new(data, "STREAM_RESET")
         Quicsilver.logger.debug("Stream #{stream_id} reset by peer with error code: 0x#{event.error_code.to_s(16)}")
         @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
         @request_registry.complete(stream_id)
 
       when STREAM_EVENT_STOP_SENDING
         return unless @connections[connection_handle]
-        event = StreamEvent.new(data, "STOP_SENDING")
+        event = Transport::StreamEvent.new(data, "STOP_SENDING")
         Quicsilver.logger.debug("Stream #{stream_id} stop sending requested with error code: 0x#{event.error_code.to_s(16)}")
         @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
-        Quicsilver.stream_reset(event.handle, HTTP3::H3_REQUEST_CANCELLED)
+        Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
         @request_registry.complete(stream_id)
       end
     end
@@ -287,7 +292,7 @@ module Quicsilver
           while (work = @work_queue.pop)
             break if work == :shutdown
             connection, stream, early_data = work
-            handle_request(connection, stream, early_data: early_data)
+            @request_handler.call(connection, stream, early_data: early_data)
           end
         end
         @handler_mutex.synchronize { @handler_threads << thread }
@@ -302,60 +307,6 @@ module Quicsilver
         @handler_threads.each { |t| t.raise(DrainTimeoutError, "drain timeout") if t.alive? }
         @handler_threads.clear
       end
-    end
-
-    def handle_request(connection, stream, early_data: false)
-      parser = HTTP3::RequestParser.new(
-        stream.data,
-        max_body_size: @server_configuration.max_body_size,
-        max_header_size: @server_configuration.max_header_size,
-        max_header_count: @server_configuration.max_header_count,
-        max_frame_payload_size: @server_configuration.max_frame_payload_size
-      )
-      parser.parse
-      parser.validate_headers!
-      env = parser.to_rack_env
-
-      if env && @app
-        env["quicsilver.early_data"] = early_data
-
-        # RFC 8470: reject unsafe methods on 0-RTT unless app opted in
-        if @server_configuration.early_data_policy == :reject &&
-           early_data && !SAFE_METHODS.include?(env["REQUEST_METHOD"])
-          connection.send_error(stream, 425, "Too Early") if stream.writable?
-          return
-        end
-
-        @request_registry.track(
-          stream.stream_id,
-          connection.handle,
-          path: env["PATH_INFO"] || "/",
-          method: env["REQUEST_METHOD"] || "GET"
-        )
-
-        status, headers, body = @app.call(env)
-
-        if cancelled_stream?(stream.stream_id)
-          Quicsilver.logger.debug("Skipping response for cancelled stream #{stream.stream_id}")
-          return
-        end
-
-        raise "Stream handle not found for stream #{stream.stream_id}" unless stream.writable?
-
-        connection.send_response(stream, status, headers, body)
-        @request_registry.complete(stream.stream_id)
-      else
-        connection.send_error(stream, 400, "Bad Request") if stream.writable?
-      end
-    rescue DrainTimeoutError
-      Quicsilver.logger.debug("Request interrupted by drain: stream #{stream.stream_id}")
-    rescue => e
-      Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
-      Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
-      connection.send_error(stream, 500, "Internal Server Error") if stream.writable?
-    ensure
-      @request_registry.complete(stream.stream_id) if @request_registry.include?(stream.stream_id)
-      @cancelled_mutex.synchronize { @cancelled_streams.delete(stream.stream_id) }
     end
   end
 end

@@ -20,7 +20,7 @@ class EarlyDataValidationTest < Minitest::Test
       server, connection, stream = setup_request(method, policy: :reject)
 
       connection.stub(:send_error, ->(s, status, msg) { error_status = status }) do
-        server.send(:handle_request, connection, stream, early_data: true)
+        server.instance_variable_get(:@request_handler).call(connection, stream, early_data: true)
       end
 
       assert_equal 425, error_status
@@ -34,7 +34,7 @@ class EarlyDataValidationTest < Minitest::Test
         app: ->(env) { app_called = true; [200, {}, ["OK"]] })
 
       connection.stub(:send_response, ->(*args) {}) do
-        server.send(:handle_request, connection, stream, early_data: true)
+        server.instance_variable_get(:@request_handler).call(connection, stream, early_data: true)
       end
 
       assert app_called, "#{method} should pass through to app on early data in :reject mode"
@@ -48,7 +48,7 @@ class EarlyDataValidationTest < Minitest::Test
         app: ->(env) { app_called = true; [200, {}, ["OK"]] })
 
       connection.stub(:send_response, ->(*args) {}) do
-        server.send(:handle_request, connection, stream, early_data: false)
+        server.instance_variable_get(:@request_handler).call(connection, stream, early_data: false)
       end
 
       assert app_called, "#{method} should pass through on non-early data"
@@ -64,7 +64,7 @@ class EarlyDataValidationTest < Minitest::Test
         app: ->(env) { received_env = env; [200, {}, ["OK"]] })
 
       connection.stub(:send_response, ->(*args) {}) do
-        server.send(:handle_request, connection, stream, early_data: true)
+        server.instance_variable_get(:@request_handler).call(connection, stream, early_data: true)
       end
 
       assert received_env, "#{method} should reach app in :allow mode"
@@ -80,7 +80,7 @@ class EarlyDataValidationTest < Minitest::Test
       })
 
     connection.stub(:send_response, ->(s, status, h, b) { response_status = status }) do
-      server.send(:handle_request, connection, stream, early_data: true)
+      server.instance_variable_get(:@request_handler).call(connection, stream, early_data: true)
     end
 
     assert_equal 425, response_status
@@ -94,7 +94,7 @@ class EarlyDataValidationTest < Minitest::Test
       app: ->(env) { received_env = env; [200, {}, ["OK"]] })
 
     connection.stub(:send_response, ->(*args) {}) do
-      server.send(:handle_request, connection, stream, early_data: true)
+      server.instance_variable_get(:@request_handler).call(connection, stream, early_data: true)
     end
 
     assert_equal true, received_env["quicsilver.early_data"]
@@ -106,7 +106,7 @@ class EarlyDataValidationTest < Minitest::Test
       app: ->(env) { received_env = env; [200, {}, ["OK"]] })
 
     connection.stub(:send_response, ->(*args) {}) do
-      server.send(:handle_request, connection, stream, early_data: false)
+      server.instance_variable_get(:@request_handler).call(connection, stream, early_data: false)
     end
 
     assert_equal false, received_env["quicsilver.early_data"]
@@ -116,16 +116,16 @@ class EarlyDataValidationTest < Minitest::Test
 
   def setup_request(method, policy:, app: nil)
     app ||= ->(env) { [200, {}, ["OK"]] }
-    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path, early_data_policy: policy)
+    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, early_data_policy: policy)
     server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
 
     data = build_request(":method" => method, ":scheme" => "https",
                          ":authority" => "localhost", ":path" => "/")
-    stream = Quicsilver::QuicStream.new(4)
+    stream = Quicsilver::Transport::InboundStream.new(4)
     stream.stream_handle = 0xBEEF
     stream.append_data(data)
 
-    connection = Quicsilver::Connection.new(12345, [12345, 67890])
+    connection = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
     server.connections[12345] = connection
 
     [server, connection, stream]

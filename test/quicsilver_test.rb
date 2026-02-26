@@ -121,7 +121,7 @@ class QuicsilverTest < Minitest::Test
 
   def test_listener_uses_configured_alpn
     # Server with non-standard ALPN — client uses "h3" so handshake should fail
-    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path, alpn: "not-h3")
+    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, alpn: "not-h3")
     server = Quicsilver::Server.new(4437, server_configuration: config)
     client = Quicsilver::Client.new("localhost", 4437, connection_timeout: 2000)
 
@@ -156,7 +156,7 @@ class QuicsilverTest < Minitest::Test
   private
 
   def default_server_config
-    Quicsilver::ServerConfiguration.new(
+    Quicsilver::Transport::Configuration.new(
       cert_file_path,
       key_file_path,
     )

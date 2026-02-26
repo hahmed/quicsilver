@@ -9,9 +9,9 @@ class BufferLimitsTest < Minitest::Test
     body = "x" * 1025
     data = build_request(post_headers, body)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_body_size: 1024)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_body_size: 1024)
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.parse
     end
   end
@@ -20,7 +20,7 @@ class BufferLimitsTest < Minitest::Test
     body = "x" * 1024
     data = build_request(post_headers, body)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_body_size: 1024)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_body_size: 1024)
     parser.parse
 
     assert_equal 1024, parser.body.size
@@ -29,9 +29,9 @@ class BufferLimitsTest < Minitest::Test
   def test_rejects_cumulative_data_frames_exceeding_limit
     data = build_request(post_headers, "x" * 600, "y" * 600)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_body_size: 1024)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_body_size: 1024)
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.parse
     end
   end
@@ -40,7 +40,7 @@ class BufferLimitsTest < Minitest::Test
     body = "x" * 100_000
     data = build_request(post_headers, body)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
 
     assert_equal 100_000, parser.body.size
@@ -50,9 +50,9 @@ class BufferLimitsTest < Minitest::Test
     big_value = "v" * 2000
     data = build_request(get_headers("x-big" => big_value))
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_header_size: 1024)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_header_size: 1024)
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.parse
     end
   end
@@ -60,7 +60,7 @@ class BufferLimitsTest < Minitest::Test
   def test_accepts_headers_block_within_max_header_size
     data = build_request(get_headers("x-small" => "ok"))
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_header_size: 4096)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_header_size: 4096)
     parser.parse
 
     assert_equal "ok", parser.headers["x-small"]
@@ -70,7 +70,7 @@ class BufferLimitsTest < Minitest::Test
     big_value = "v" * 100_000
     data = build_request(get_headers("x-big" => big_value))
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
 
     assert_equal big_value, parser.headers["x-big"]
@@ -81,9 +81,9 @@ class BufferLimitsTest < Minitest::Test
     51.times { |i| headers["x-h-#{i}"] = "val" }
     data = build_request(headers)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_header_count: 50)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_header_count: 50)
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.parse
     end
   end
@@ -93,7 +93,7 @@ class BufferLimitsTest < Minitest::Test
     10.times { |i| headers["x-h-#{i}"] = "val" }
     data = build_request(headers)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_header_count: 50)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_header_count: 50)
     parser.parse
 
     assert_equal "val", parser.headers["x-h-0"]
@@ -104,7 +104,7 @@ class BufferLimitsTest < Minitest::Test
     200.times { |i| headers["x-h-#{i}"] = "val" }
     data = build_request(headers)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
 
     assert_equal 200 + 4, parser.headers.size # 200 custom + 4 pseudo
@@ -114,9 +114,9 @@ class BufferLimitsTest < Minitest::Test
     body = "x" * 2049
     data = build_request(post_headers, body)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_frame_payload_size: 2048)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_frame_payload_size: 2048)
 
-    assert_raises(Quicsilver::HTTP3::FrameError) do
+    assert_raises(Quicsilver::Protocol::FrameError) do
       parser.parse
     end
   end
@@ -125,7 +125,7 @@ class BufferLimitsTest < Minitest::Test
     body = "x" * 2048
     data = build_request(post_headers, body)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data, max_frame_payload_size: 2048)
+    parser = Quicsilver::Protocol::RequestParser.new(data, max_frame_payload_size: 2048)
     parser.parse
 
     assert_equal 2048, parser.body.size
@@ -135,7 +135,7 @@ class BufferLimitsTest < Minitest::Test
     body = "x" * 100_000
     data = build_request(post_headers, body)
 
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
 
     assert_equal 100_000, parser.body.size
@@ -144,9 +144,9 @@ class BufferLimitsTest < Minitest::Test
   def test_response_rejects_body_exceeding_limit
     data = build_response(200, {}, "x" * 1025)
 
-    parser = Quicsilver::HTTP3::ResponseParser.new(data, max_body_size: 1024)
+    parser = Quicsilver::Protocol::ResponseParser.new(data, max_body_size: 1024)
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.parse
     end
   end
@@ -155,9 +155,9 @@ class BufferLimitsTest < Minitest::Test
     big_value = "v" * 2000
     data = build_response(200, { "x-big" => big_value })
 
-    parser = Quicsilver::HTTP3::ResponseParser.new(data, max_header_size: 1024)
+    parser = Quicsilver::Protocol::ResponseParser.new(data, max_header_size: 1024)
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.parse
     end
   end
@@ -165,7 +165,7 @@ class BufferLimitsTest < Minitest::Test
   def test_response_accepts_within_limits
     data = build_response(200, { "content-type" => "text/plain" }, "hello")
 
-    parser = Quicsilver::HTTP3::ResponseParser.new(data, max_body_size: 1024, max_header_size: 4096)
+    parser = Quicsilver::Protocol::ResponseParser.new(data, max_body_size: 1024, max_header_size: 4096)
     parser.parse
 
     assert_equal 200, parser.status

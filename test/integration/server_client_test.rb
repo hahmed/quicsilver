@@ -165,7 +165,7 @@ class ServerClientIntegrationTest < Minitest::Test
   private
 
   def start_server(app)
-    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path)
+    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
     @server = Quicsilver::Server.new(@port, app: app, server_configuration: config)
 
     @server_thread = Thread.new { @server.start }

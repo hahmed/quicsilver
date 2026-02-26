@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 require "stringio"
-require_relative "../qpack/header_block_decoder"
+require_relative "qpack/header_block_decoder"
 
 module Quicsilver
-  module HTTP3
+  module Protocol
     class ResponseParser
       attr_reader :frames, :headers, :status
 
@@ -39,8 +39,8 @@ module Quicsilver
         while offset < buffer.bytesize
           break if buffer.bytesize - offset < 2
 
-          type, type_len = HTTP3.decode_varint(buffer.bytes, offset)
-          length, length_len = HTTP3.decode_varint(buffer.bytes, offset + type_len)
+          type, type_len = Protocol.decode_varint(buffer.bytes, offset)
+          length, length_len = Protocol.decode_varint(buffer.bytes, offset + type_len)
           break if type_len == 0 || length_len == 0
 
           header_len = type_len + length_len
@@ -50,22 +50,22 @@ module Quicsilver
           payload = buffer[offset + header_len, length]
           @frames << { type: type, length: length, payload: payload }
 
-          if HTTP3::CONTROL_ONLY_FRAMES.include?(type)
-            raise HTTP3::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
+          if Protocol::CONTROL_ONLY_FRAMES.include?(type)
+            raise Protocol::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
           end
 
           case type
           when 0x01 # HEADERS
             if @max_header_size && length > @max_header_size
-              raise HTTP3::MessageError, "Header block #{length} exceeds limit #{@max_header_size}"
+              raise Protocol::MessageError, "Header block #{length} exceeds limit #{@max_header_size}"
             end
             parse_headers(payload)
             headers_received = true
           when 0x00 # DATA
-            raise HTTP3::FrameError, "DATA frame before HEADERS" unless headers_received
+            raise Protocol::FrameError, "DATA frame before HEADERS" unless headers_received
             @body_io.write(payload)
             if @max_body_size && @body_io.size > @max_body_size
-              raise HTTP3::MessageError, "Body size #{@body_io.size} exceeds limit #{@max_body_size}"
+              raise Protocol::MessageError, "Body size #{@body_io.size} exceeds limit #{@max_body_size}"
             end
           end
 

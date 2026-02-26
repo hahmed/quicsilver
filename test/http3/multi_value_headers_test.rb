@@ -52,7 +52,7 @@ class MultiValueHeadersTest < Minitest::Test
     end
 
     frame = build_headers_frame("\x00\x00".b)
-    parser = Quicsilver::HTTP3::ResponseParser.new(frame, decoder: custom_decoder)
+    parser = Quicsilver::Protocol::ResponseParser.new(frame, decoder: custom_decoder)
     parser.parse
 
     assert_equal "a=1; Path=/\nb=2; HttpOnly", parser.headers["set-cookie"]
@@ -67,7 +67,7 @@ class MultiValueHeadersTest < Minitest::Test
     end
 
     frame = build_headers_frame("\x00\x00".b)
-    parser = Quicsilver::HTTP3::ResponseParser.new(frame, decoder: custom_decoder)
+    parser = Quicsilver::Protocol::ResponseParser.new(frame, decoder: custom_decoder)
     parser.parse
 
     assert_equal "no-cache, no-store", parser.headers["cache-control"]
@@ -81,7 +81,7 @@ class MultiValueHeadersTest < Minitest::Test
     end
 
     frame = build_headers_frame("\x00\x00".b)
-    parser = Quicsilver::HTTP3::ResponseParser.new(frame, decoder: custom_decoder)
+    parser = Quicsilver::Protocol::ResponseParser.new(frame, decoder: custom_decoder)
     parser.parse
 
     assert_equal "a=1; Path=/", parser.headers["set-cookie"]
@@ -122,7 +122,7 @@ class MultiValueHeadersTest < Minitest::Test
   private
 
   def parse_request(payload)
-    parser = Quicsilver::HTTP3::RequestParser.new(build_headers_frame(payload))
+    parser = Quicsilver::Protocol::RequestParser.new(build_headers_frame(payload))
     parser.parse
     parser
   end

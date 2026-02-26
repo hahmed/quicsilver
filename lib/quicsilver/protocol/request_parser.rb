@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 require "stringio"
-require_relative "../qpack/header_block_decoder"
+require_relative "qpack/header_block_decoder"
 
 module Quicsilver
-  module HTTP3
+  module Protocol
     class RequestParser
       attr_reader :frames, :headers, :body
 
@@ -38,19 +38,19 @@ module Quicsilver
         method = @headers[":method"]
 
         if method == "CONNECT"
-          raise HTTP3::MessageError, "CONNECT request must include :authority" unless @headers[":authority"]
-          raise HTTP3::MessageError, "CONNECT request must not include :scheme" if @headers[":scheme"]
-          raise HTTP3::MessageError, "CONNECT request must not include :path" if @headers[":path"]
+          raise Protocol::MessageError, "CONNECT request must include :authority" unless @headers[":authority"]
+          raise Protocol::MessageError, "CONNECT request must not include :scheme" if @headers[":scheme"]
+          raise Protocol::MessageError, "CONNECT request must not include :path" if @headers[":path"]
         else
-          raise HTTP3::MessageError, "Request missing required pseudo-header :method" unless method
-          raise HTTP3::MessageError, "Request missing required pseudo-header :scheme" unless @headers[":scheme"]
-          raise HTTP3::MessageError, "Request missing required pseudo-header :path" unless @headers[":path"]
+          raise Protocol::MessageError, "Request missing required pseudo-header :method" unless method
+          raise Protocol::MessageError, "Request missing required pseudo-header :scheme" unless @headers[":scheme"]
+          raise Protocol::MessageError, "Request missing required pseudo-header :path" unless @headers[":path"]
         end
 
         # Host and :authority consistency (RFC 9114 §4.3.1)
         if @headers[":authority"] && @headers["host"]
           unless @headers[":authority"] == @headers["host"]
-            raise HTTP3::MessageError, ":authority and host header must be consistent"
+            raise Protocol::MessageError, ":authority and host header must be consistent"
           end
         end
 
@@ -59,7 +59,7 @@ module Quicsilver
           expected = @headers["content-length"].to_i
           actual = @body.size
           unless expected == actual
-            raise HTTP3::MessageError, "Content-length mismatch: header=#{expected}, body=#{actual}"
+            raise Protocol::MessageError, "Content-length mismatch: header=#{expected}, body=#{actual}"
           end
         end
       end
@@ -130,8 +130,8 @@ module Quicsilver
         while offset < buffer.bytesize
           break if buffer.bytesize - offset < 2
 
-          type, type_len = HTTP3.decode_varint(buffer.bytes, offset)
-          length, length_len = HTTP3.decode_varint(buffer.bytes, offset + type_len)
+          type, type_len = Protocol.decode_varint(buffer.bytes, offset)
+          length, length_len = Protocol.decode_varint(buffer.bytes, offset + type_len)
           break if type_len == 0 || length_len == 0
 
           header_len = type_len + length_len
@@ -141,27 +141,27 @@ module Quicsilver
           payload = buffer[offset + header_len, length]
 
           if @max_frame_payload_size && length > @max_frame_payload_size
-            raise HTTP3::FrameError, "Frame payload #{length} exceeds limit #{@max_frame_payload_size}"
+            raise Protocol::FrameError, "Frame payload #{length} exceeds limit #{@max_frame_payload_size}"
           end
 
           @frames << { type: type, length: length, payload: payload }
 
-          if HTTP3::CONTROL_ONLY_FRAMES.include?(type)
-            raise HTTP3::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
+          if Protocol::CONTROL_ONLY_FRAMES.include?(type)
+            raise Protocol::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
           end
 
           case type
           when 0x01 # HEADERS
             if @max_header_size && length > @max_header_size
-              raise HTTP3::MessageError, "Header block #{length} exceeds limit #{@max_header_size}"
+              raise Protocol::MessageError, "Header block #{length} exceeds limit #{@max_header_size}"
             end
             parse_headers(payload)
             headers_received = true
           when 0x00 # DATA
-            raise HTTP3::FrameError, "DATA frame before HEADERS" unless headers_received
+            raise Protocol::FrameError, "DATA frame before HEADERS" unless headers_received
             @body.write(payload)
             if @max_body_size && @body.size > @max_body_size
-              raise HTTP3::MessageError, "Body size #{@body.size} exceeds limit #{@max_body_size}"
+              raise Protocol::MessageError, "Body size #{@body.size} exceeds limit #{@max_body_size}"
             end
           end
 
@@ -184,18 +184,18 @@ module Quicsilver
         @decoder.decode(payload) do |name, value|
           # RFC 9114 §4.2: Header field names MUST be lowercase
           if name =~ /[A-Z]/
-            raise HTTP3::MessageError, "Header name '#{name}' contains uppercase characters"
+            raise Protocol::MessageError, "Header name '#{name}' contains uppercase characters"
           end
 
           if name.start_with?(":")
-            raise HTTP3::MessageError, "Pseudo-header '#{name}' after regular header" if pseudo_done
+            raise Protocol::MessageError, "Pseudo-header '#{name}' after regular header" if pseudo_done
 
             unless VALID_PSEUDO_HEADERS.include?(name)
-              raise HTTP3::MessageError, "Unknown pseudo-header '#{name}'"
+              raise Protocol::MessageError, "Unknown pseudo-header '#{name}'"
             end
 
             if @headers.key?(name)
-              raise HTTP3::MessageError, "Duplicate pseudo-header '#{name}'"
+              raise Protocol::MessageError, "Duplicate pseudo-header '#{name}'"
             end
           else
             pseudo_done = true
@@ -219,7 +219,7 @@ module Quicsilver
           @headers[name] = "#{@headers[name]}#{separator}#{value}"
         else
           if @max_header_count && @headers.size >= @max_header_count
-            raise HTTP3::MessageError, "Header count exceeds limit #{@max_header_count}"
+            raise Protocol::MessageError, "Header count exceeds limit #{@max_header_count}"
           end
           @headers[name] = value
         end

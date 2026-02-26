@@ -56,12 +56,12 @@ class StreamEventTest < Minitest::Test
   # Mirrors C extension RECEIVE_FIN format: [handle(8)][payload...]
   def build_receive_fin(handle, payload = "".b)
     raw = [handle].pack("Q") + payload.b
-    Quicsilver::StreamEvent.new(raw, "RECEIVE_FIN")
+    Quicsilver::Transport::StreamEvent.new(raw, "RECEIVE_FIN")
   end
 
   # Mirrors C extension STREAM_RESET/STOP_SENDING format: [handle(8)][error_code(8)]
   def build_error_event(handle, error_code, type)
     raw = [handle, error_code].pack("QQ")
-    Quicsilver::StreamEvent.new(raw, type)
+    Quicsilver::Transport::StreamEvent.new(raw, type)
   end
 end

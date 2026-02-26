@@ -153,7 +153,7 @@ class StreamControlIntegrationTest < Minitest::Test
     }
 
     # Server allows only 2 concurrent bidi streams
-    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path, max_concurrent_requests: 2)
+    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, max_concurrent_requests: 2)
     @server = Quicsilver::Server.new(@port, server_configuration: config, app: app)
     @server_thread = Thread.new { @server.start }
     sleep 0.5
@@ -200,7 +200,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
     @client.handle_stream_event(0, "STREAM_RESET", packed_data, false)
 
-    error = assert_raises(Quicsilver::Request::ResetError) do
+    error = assert_raises(Quicsilver::Client::Request::ResetError) do
       request.response(timeout: 1)
     end
     assert_equal 0x10c, error.error_code
@@ -217,7 +217,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
     @client.handle_stream_event(0, "STOP_SENDING", packed_data, false)
 
-    error = assert_raises(Quicsilver::Request::ResetError) do
+    error = assert_raises(Quicsilver::Client::Request::ResetError) do
       request.response(timeout: 1)
     end
     assert_equal 0x10c, error.error_code
@@ -281,6 +281,6 @@ class StreamControlIntegrationTest < Minitest::Test
   end
 
   def default_server_config
-    Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path)
+    Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
   end
 end

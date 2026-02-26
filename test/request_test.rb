@@ -6,8 +6,8 @@ class RequestTest < Minitest::Test
   def setup
     @mock_client = Object.new
     def @mock_client.request_timeout; 30; end
-    @mock_stream = Quicsilver::Stream.new(12345)
-    @request = Quicsilver::Request.new(@mock_client, @mock_stream)
+    @mock_stream = Quicsilver::Transport::Stream.new(12345)
+    @request = Quicsilver::Client::Request.new(@mock_client, @mock_stream)
   end
 
   def test_initial_state_is_pending
@@ -57,7 +57,7 @@ class RequestTest < Minitest::Test
     sleep 0.01
     @request.fail(0x10c, "Stream reset")
 
-    error = assert_raises(Quicsilver::Request::ResetError) { thread.value }
+    error = assert_raises(Quicsilver::Client::Request::ResetError) { thread.value }
     assert_equal 0x10c, error.error_code
     assert_match(/reset/i, error.message)
   end
@@ -96,8 +96,8 @@ class RequestTest < Minitest::Test
         @request.cancel
       end
     end
-    assert_equal Quicsilver::HTTP3::H3_REQUEST_CANCELLED, reset_code
-    assert_equal Quicsilver::HTTP3::H3_REQUEST_CANCELLED, stop_code
+    assert_equal Quicsilver::Protocol::H3_REQUEST_CANCELLED, reset_code
+    assert_equal Quicsilver::Protocol::H3_REQUEST_CANCELLED, stop_code
   end
 
   def test_cancel_accepts_custom_error_code
@@ -123,11 +123,11 @@ class RequestTest < Minitest::Test
 
   # Error classes
   def test_cancelled_error_exists
-    assert_equal Quicsilver::Request::CancelledError.superclass, StandardError
+    assert_equal Quicsilver::Client::Request::CancelledError.superclass, StandardError
   end
 
   def test_reset_error_has_error_code
-    error = Quicsilver::Request::ResetError.new("test", 0x100)
+    error = Quicsilver::Client::Request::ResetError.new("test", 0x100)
     assert_equal 0x100, error.error_code
     assert_equal "test", error.message
   end

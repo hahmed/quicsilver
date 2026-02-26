@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require_relative "../lib/quicsilver/client"
 
 class ClientTest < Minitest::Test
   def test_initialize_with_hostname_and_port

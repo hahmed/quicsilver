@@ -1,8 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require_relative "../lib/quicsilver/server"
-require_relative "../lib/quicsilver/server_configuration"
 
 class ServerTest < Minitest::Test
   def test_initialize_with_defaults
@@ -10,7 +8,7 @@ class ServerTest < Minitest::Test
 
     assert_equal 4433, server.port
     assert_equal "0.0.0.0", server.address
-    assert_instance_of Quicsilver::ServerConfiguration, server.server_configuration
+    assert_instance_of Quicsilver::Transport::Configuration, server.server_configuration
     refute server.running?
   end
 
@@ -23,13 +21,13 @@ class ServerTest < Minitest::Test
 
   def test_initialize_with_custom_server_configuration_raises_when_cert_missing
     assert_raises(Quicsilver::ServerConfigurationError) do
-      Quicsilver::ServerConfiguration.new("certificates/missing.pem", "certificates/key.pem")
+      Quicsilver::Transport::Configuration.new("certificates/missing.pem", "certificates/key.pem")
     end
   end
 
   def test_initialize_with_custom_server_configuration_raises_when_key_missing
     assert_raises(Quicsilver::ServerConfigurationError) do
-      Quicsilver::ServerConfiguration.new("certificates/server.crt", "certificates/missing_key.pem")
+      Quicsilver::Transport::Configuration.new("certificates/server.crt", "certificates/missing_key.pem")
     end
   end
 
@@ -54,7 +52,7 @@ class ServerTest < Minitest::Test
     connection_data = [connection_handle, 67890]
 
     # Manually create connection
-    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    connection = Quicsilver::Transport::Connection.new(connection_handle, connection_data)
     server.connections[connection_handle] = connection
 
     # Now test receive - data is buffered in Connection
@@ -71,7 +69,7 @@ class ServerTest < Minitest::Test
     connection_data = [connection_handle, 67890]
 
     # Manually create connection
-    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    connection = Quicsilver::Transport::Connection.new(connection_handle, connection_data)
     server.connections[connection_handle] = connection
 
     # Send multiple chunks - data is buffered in Connection
@@ -92,7 +90,7 @@ class ServerTest < Minitest::Test
       connection_handle = 12345
       connection_data = [connection_handle, 67890]
 
-      connection = Quicsilver::Connection.new(connection_handle, connection_data)
+      connection = Quicsilver::Transport::Connection.new(connection_handle, connection_data)
       server.connections[connection_handle] = connection
 
       stream_id = 4
@@ -119,12 +117,12 @@ class ServerTest < Minitest::Test
     connection_handle = 12345
     connection_data = [connection_handle, 67890]
 
-    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    connection = Quicsilver::Transport::Connection.new(connection_handle, connection_data)
     server.connections[connection_handle] = connection
 
     stream_id = 4
     stream_handle = 0xABCD
-    packed_data = [stream_handle, Quicsilver::HTTP3::H3_REQUEST_CANCELLED].pack("QQ")
+    packed_data = [stream_handle, Quicsilver::Protocol::H3_REQUEST_CANCELLED].pack("QQ")
 
     Quicsilver.stub(:stream_reset, ->(*args) { true }) do
       Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data, false)
@@ -139,19 +137,19 @@ class ServerTest < Minitest::Test
     connection_handle = 12345
     connection_data = [connection_handle, 67890]
 
-    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    connection = Quicsilver::Transport::Connection.new(connection_handle, connection_data)
     server.connections[connection_handle] = connection
 
     stream_id = 4
     stream_handle = 0xABCD
-    packed_data = [stream_handle, Quicsilver::HTTP3::H3_REQUEST_CANCELLED].pack("QQ")
+    packed_data = [stream_handle, Quicsilver::Protocol::H3_REQUEST_CANCELLED].pack("QQ")
 
     reset_called_with = nil
     Quicsilver.stub(:stream_reset, ->(*args) { reset_called_with = args; true }) do
       Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data, false)
     end
 
-    assert_equal [stream_handle, Quicsilver::HTTP3::H3_REQUEST_CANCELLED], reset_called_with,
+    assert_equal [stream_handle, Quicsilver::Protocol::H3_REQUEST_CANCELLED], reset_called_with,
       "Should reset the stream with H3_REQUEST_CANCELLED"
   end
 
@@ -170,13 +168,13 @@ class ServerTest < Minitest::Test
 
     connection_handle = 12345
     connection_data = [connection_handle, 67890]
-    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    connection = Quicsilver::Transport::Connection.new(connection_handle, connection_data)
     server.connections[connection_handle] = connection
 
     # Fill the queue so next dispatch overflows
     server.send(:work_queue).push([:dummy, :work])
 
-    stream = Quicsilver::QuicStream.new(4)
+    stream = Quicsilver::Transport::InboundStream.new(4)
     stream.stream_handle = 0xBEEF
 
     error_sent = nil
@@ -201,7 +199,7 @@ class ServerTest < Minitest::Test
     server = create_server_direct(max_connections: 1, app: ->(env) { [200, {}, ["OK"]] })
 
     # Pre-fill to limit
-    connection = Quicsilver::Connection.new(12345, [12345, 67890])
+    connection = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
     server.connections[12345] = connection
 
     new_handle = 99999
@@ -236,10 +234,10 @@ class ServerTest < Minitest::Test
 
     connection_handle = 12345
     connection_data = [connection_handle, 67890]
-    connection = Quicsilver::Connection.new(connection_handle, connection_data)
+    connection = Quicsilver::Transport::Connection.new(connection_handle, connection_data)
     server.connections[connection_handle] = connection
 
-    stream = Quicsilver::QuicStream.new(4)
+    stream = Quicsilver::Transport::InboundStream.new(4)
     stream.stream_handle = 0xBEEF
 
     server.send(:dispatch_request, connection, stream)
@@ -253,12 +251,12 @@ class ServerTest < Minitest::Test
     normalized_cert_file = options.delete(:cert_file) || cert_file_path
     normalized_key_file = options.delete(:key_file) || key_file_path
 
-    server_config = options.delete(:server_configuration) || Quicsilver::ServerConfiguration.new(normalized_cert_file, normalized_key_file)
+    server_config = options.delete(:server_configuration) || Quicsilver::Transport::Configuration.new(normalized_cert_file, normalized_key_file)
     Quicsilver::Server.new(port, server_configuration: server_config, app: app, **options)
   end
 
   def create_server_direct(**kwargs)
-    config = Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path)
+    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
     Quicsilver::Server.new(4433, server_configuration: config, **kwargs)
   end
 end

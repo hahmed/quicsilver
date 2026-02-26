@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module Quicsilver
-  module HTTP3
+  module Protocol
     # HTTP/3 Frame Types (RFC 9114)
     FRAME_DATA = 0x00
     FRAME_HEADERS = 0x01
@@ -252,4 +252,3 @@ module Quicsilver
     end
   end
 end
-

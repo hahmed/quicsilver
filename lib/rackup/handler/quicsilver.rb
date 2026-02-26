@@ -35,7 +35,7 @@ module Quicsilver
         end
       end
 
-      config = ::Quicsilver::ServerConfiguration.new(cert_file, key_file)
+      config = ::Quicsilver::Transport::Configuration.new(cert_file, key_file)
 
       server = ::Quicsilver::Server.new(
         normalized_options[:port],

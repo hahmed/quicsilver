@@ -3,12 +3,12 @@
 require "test_helper"
 
 class QpackDecoderTest < Minitest::Test
-  include Quicsilver::Qpack::Decoder
+  include Quicsilver::Protocol::Qpack::Decoder
 
   # decode_qpack_string with H=1 (Huffman)
   def test_decode_huffman_string
     raw = "www.example.com"
-    encoded = Quicsilver::Qpack::Encoder.new(huffman: true).send(:encode_str, raw)
+    encoded = Quicsilver::Protocol::Qpack::Encoder.new(huffman: true).send(:encode_str, raw)
     result, consumed = decode_qpack_string(encoded.bytes, 0)
 
     assert_equal raw, result
@@ -18,7 +18,7 @@ class QpackDecoderTest < Minitest::Test
   # decode_qpack_string with H=0 (raw)
   def test_decode_raw_string
     raw = "www.example.com"
-    encoded = Quicsilver::Qpack::Encoder.new(huffman: false).send(:encode_str, raw)
+    encoded = Quicsilver::Protocol::Qpack::Encoder.new(huffman: false).send(:encode_str, raw)
     result, consumed = decode_qpack_string(encoded.bytes, 0)
 
     assert_equal raw, result
@@ -26,17 +26,17 @@ class QpackDecoderTest < Minitest::Test
   end
 
   def test_h_bit_set_for_huffman
-    encoded = Quicsilver::Qpack::Encoder.new(huffman: true).send(:encode_str, "www.example.com")
+    encoded = Quicsilver::Protocol::Qpack::Encoder.new(huffman: true).send(:encode_str, "www.example.com")
     assert_equal 0x80, encoded.bytes[0] & 0x80, "H bit should be set"
   end
 
   def test_h_bit_clear_for_raw
-    encoded = Quicsilver::Qpack::Encoder.new(huffman: false).send(:encode_str, "www.example.com")
+    encoded = Quicsilver::Protocol::Qpack::Encoder.new(huffman: false).send(:encode_str, "www.example.com")
     assert_equal 0x00, encoded.bytes[0] & 0x80, "H bit should be clear"
   end
 
   def test_decode_empty_string_huffman
-    encoded = Quicsilver::Qpack::Encoder.new(huffman: true).send(:encode_str, "")
+    encoded = Quicsilver::Protocol::Qpack::Encoder.new(huffman: true).send(:encode_str, "")
     result, consumed = decode_qpack_string(encoded.bytes, 0)
 
     assert_equal "", result
@@ -44,7 +44,7 @@ class QpackDecoderTest < Minitest::Test
   end
 
   def test_decode_empty_string_raw
-    encoded = Quicsilver::Qpack::Encoder.new(huffman: false).send(:encode_str, "")
+    encoded = Quicsilver::Protocol::Qpack::Encoder.new(huffman: false).send(:encode_str, "")
     result, consumed = decode_qpack_string(encoded.bytes, 0)
 
     assert_equal "", result
@@ -54,7 +54,7 @@ class QpackDecoderTest < Minitest::Test
   # Roundtrip: encode with Huffman, decode back
   def test_roundtrip_huffman_typical_headers
     values = ["application/json", "text/html", "GET", "/api/v1/users", "no-cache", "gzip, deflate"]
-    encoder = Quicsilver::Qpack::Encoder.new(huffman: true)
+    encoder = Quicsilver::Protocol::Qpack::Encoder.new(huffman: true)
 
     values.each do |val|
       encoded = encoder.send(:encode_str, val)
@@ -66,7 +66,7 @@ class QpackDecoderTest < Minitest::Test
   # Roundtrip: encode without Huffman, decode back
   def test_roundtrip_raw_typical_headers
     values = ["application/json", "text/html", "GET", "/api/v1/users", "no-cache", "gzip, deflate"]
-    encoder = Quicsilver::Qpack::Encoder.new(huffman: false)
+    encoder = Quicsilver::Protocol::Qpack::Encoder.new(huffman: false)
 
     values.each do |val|
       encoded = encoder.send(:encode_str, val)
@@ -77,7 +77,7 @@ class QpackDecoderTest < Minitest::Test
 
   # Full QPACK header block: Huffman encoder → request parser
   def test_request_parser_decodes_huffman_headers
-    encoder = Quicsilver::Qpack::Encoder.new(huffman: true)
+    encoder = Quicsilver::Protocol::Qpack::Encoder.new(huffman: true)
     headers_payload = encoder.encode(
       ":method" => "GET",
       ":scheme" => "https",
@@ -85,8 +85,8 @@ class QpackDecoderTest < Minitest::Test
       ":path" => "/test",
       "user-agent" => "Quicsilver/1.0"
     )
-    data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload)
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
 
     assert_equal "GET", parser.headers[":method"]
@@ -96,7 +96,7 @@ class QpackDecoderTest < Minitest::Test
 
   # Full QPACK header block: raw encoder → request parser
   def test_request_parser_decodes_raw_headers
-    encoder = Quicsilver::Qpack::Encoder.new(huffman: false)
+    encoder = Quicsilver::Protocol::Qpack::Encoder.new(huffman: false)
     headers_payload = encoder.encode(
       ":method" => "GET",
       ":scheme" => "https",
@@ -104,8 +104,8 @@ class QpackDecoderTest < Minitest::Test
       ":path" => "/test",
       "user-agent" => "Quicsilver/1.0"
     )
-    data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload)
-    parser = Quicsilver::HTTP3::RequestParser.new(data)
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
     parser.parse
 
     assert_equal "GET", parser.headers[":method"]
@@ -115,14 +115,14 @@ class QpackDecoderTest < Minitest::Test
 
   # Full QPACK header block: raw encoder → response parser
   def test_response_parser_decodes_raw_headers
-    encoder = Quicsilver::Qpack::Encoder.new(huffman: false)
+    encoder = Quicsilver::Protocol::Qpack::Encoder.new(huffman: false)
     headers_payload = encoder.encode(
       ":status" => "200",
       "content-type" => "text/plain",
       "x-custom" => "raw-value"
     )
-    data = build_frame(Quicsilver::HTTP3::FRAME_HEADERS, headers_payload)
-    parser = Quicsilver::HTTP3::ResponseParser.new(data)
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    parser = Quicsilver::Protocol::ResponseParser.new(data)
     parser.parse
 
     assert_equal 200, parser.status
@@ -149,8 +149,8 @@ class QpackDecoderTest < Minitest::Test
   private
 
   def build_frame(type, payload)
-    Quicsilver::HTTP3.encode_varint(type) +
-      Quicsilver::HTTP3.encode_varint(payload.bytesize) +
+    Quicsilver::Protocol.encode_varint(type) +
+      Quicsilver::Protocol.encode_varint(payload.bytesize) +
       payload
   end
 end

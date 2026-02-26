@@ -15,7 +15,7 @@ class HeaderBlockDecoderTest < Minitest::Test
     )
 
     pairs = []
-    Quicsilver::Qpack::HeaderBlockDecoder.new.decode(payload) { |n, v| pairs << [n, v] }
+    Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode(payload) { |n, v| pairs << [n, v] }
 
     assert_includes pairs, [":method", "GET"]
     assert_includes pairs, [":scheme", "https"]
@@ -23,11 +23,11 @@ class HeaderBlockDecoderTest < Minitest::Test
   end
 
   def test_decode_handles_indexed_fields
-    encoder = Quicsilver::Qpack::Encoder.new
+    encoder = Quicsilver::Protocol::Qpack::Encoder.new
     payload = encoder.encode(":method" => "GET")
 
     pairs = []
-    Quicsilver::Qpack::HeaderBlockDecoder.new.decode(payload) { |n, v| pairs << [n, v] }
+    Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode(payload) { |n, v| pairs << [n, v] }
 
     assert_equal [":method", "GET"], pairs.first
   end
@@ -36,7 +36,7 @@ class HeaderBlockDecoderTest < Minitest::Test
     payload = build_qpack_headers("user-agent" => "TestBot/1.0")
 
     pairs = []
-    Quicsilver::Qpack::HeaderBlockDecoder.new.decode(payload) { |n, v| pairs << [n, v] }
+    Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode(payload) { |n, v| pairs << [n, v] }
 
     assert_includes pairs, ["user-agent", "TestBot/1.0"]
   end
@@ -45,21 +45,21 @@ class HeaderBlockDecoderTest < Minitest::Test
     payload = build_qpack_headers("x-custom" => "value")
 
     pairs = []
-    Quicsilver::Qpack::HeaderBlockDecoder.new.decode(payload) { |n, v| pairs << [n, v] }
+    Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode(payload) { |n, v| pairs << [n, v] }
 
     assert_includes pairs, ["x-custom", "value"]
   end
 
   def test_decode_with_empty_payload
     pairs = []
-    Quicsilver::Qpack::HeaderBlockDecoder.new.decode("") { |n, v| pairs << [n, v] }
+    Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode("") { |n, v| pairs << [n, v] }
 
     assert_empty pairs
   end
 
   def test_decode_with_short_payload
     pairs = []
-    Quicsilver::Qpack::HeaderBlockDecoder.new.decode("\x00\x00".b) { |n, v| pairs << [n, v] }
+    Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode("\x00\x00".b) { |n, v| pairs << [n, v] }
 
     assert_empty pairs
   end
@@ -71,8 +71,8 @@ class HeaderBlockDecoderTest < Minitest::Test
       ":method" => "GET", ":scheme" => "https",
       ":authority" => "localhost", ":path" => "/"
     )
-    decoder = Quicsilver::Qpack::HeaderBlockDecoder.new
-    parser = Quicsilver::HTTP3::RequestParser.new(build_headers_frame( payload), decoder: decoder)
+    decoder = Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new
+    parser = Quicsilver::Protocol::RequestParser.new(build_headers_frame( payload), decoder: decoder)
     parser.parse
 
     assert_equal "GET", parser.headers[":method"]
@@ -83,7 +83,7 @@ class HeaderBlockDecoderTest < Minitest::Test
       ":method" => "GET", ":scheme" => "https",
       ":authority" => "localhost", ":path" => "/"
     )
-    parser = Quicsilver::HTTP3::RequestParser.new(build_headers_frame( payload))
+    parser = Quicsilver::Protocol::RequestParser.new(build_headers_frame( payload))
     parser.parse
 
     assert_equal "GET", parser.headers[":method"]
@@ -98,7 +98,7 @@ class HeaderBlockDecoderTest < Minitest::Test
       yield "x-injected", "from-custom-decoder"
     end
 
-    parser = Quicsilver::HTTP3::RequestParser.new(build_headers_frame( "\x00\x00".b), decoder: custom_decoder)
+    parser = Quicsilver::Protocol::RequestParser.new(build_headers_frame( "\x00\x00".b), decoder: custom_decoder)
     parser.parse
 
     assert_equal "from-custom-decoder", parser.headers["x-injected"]
@@ -109,8 +109,8 @@ class HeaderBlockDecoderTest < Minitest::Test
 
   def test_response_parser_accepts_decoder_kwarg
     payload = build_qpack_response_headers(200, "content-type" => "text/plain")
-    decoder = Quicsilver::Qpack::HeaderBlockDecoder.new
-    parser = Quicsilver::HTTP3::ResponseParser.new(build_headers_frame( payload), decoder: decoder)
+    decoder = Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new
+    parser = Quicsilver::Protocol::ResponseParser.new(build_headers_frame( payload), decoder: decoder)
     parser.parse
 
     assert_equal 200, parser.status
@@ -119,7 +119,7 @@ class HeaderBlockDecoderTest < Minitest::Test
 
   def test_response_parser_uses_default_decoder
     payload = build_qpack_response_headers(200)
-    parser = Quicsilver::HTTP3::ResponseParser.new(build_headers_frame( payload))
+    parser = Quicsilver::Protocol::ResponseParser.new(build_headers_frame( payload))
     parser.parse
 
     assert_equal 200, parser.status
@@ -132,7 +132,7 @@ class HeaderBlockDecoderTest < Minitest::Test
       yield "x-injected", "custom"
     end
 
-    parser = Quicsilver::HTTP3::ResponseParser.new(build_headers_frame( "\x00\x00".b), decoder: custom_decoder)
+    parser = Quicsilver::Protocol::ResponseParser.new(build_headers_frame( "\x00\x00".b), decoder: custom_decoder)
     parser.parse
 
     assert_equal 201, parser.status
@@ -147,11 +147,11 @@ class HeaderBlockDecoderTest < Minitest::Test
       ":authority" => "example.com", ":path" => "/",
       "host" => "other.com"
     )
-    decoder = Quicsilver::Qpack::HeaderBlockDecoder.new
-    parser = Quicsilver::HTTP3::RequestParser.new(build_headers_frame( payload), decoder: decoder)
+    decoder = Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new
+    parser = Quicsilver::Protocol::RequestParser.new(build_headers_frame( payload), decoder: decoder)
     parser.parse
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.validate_headers!
     end
   end

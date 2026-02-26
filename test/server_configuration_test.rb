@@ -1,5 +1,4 @@
 require "test_helper"
-require_relative "../lib/quicsilver/server_configuration"
 
 class ServerConfigurationTest < Minitest::Test
   def test_default_initialization
@@ -8,7 +7,7 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal cert_file_path, config.cert_file
     assert_equal key_file_path, config.key_file
     assert_equal 10000, config.idle_timeout_ms
-    assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
+    assert_equal Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
     assert_equal 100, config.max_concurrent_requests
     assert_equal 10, config.max_unidirectional_streams
     assert_equal "h3", config.alpn
@@ -18,7 +17,7 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal 10, config.initial_window_packets
     assert_equal 25, config.max_ack_delay_ms
     assert_equal 0, config.keep_alive_interval_ms
-    assert_equal Quicsilver::ServerConfiguration::CONGESTION_CONTROL_CUBIC, config.congestion_control_algorithm
+    assert_equal Quicsilver::Transport::Configuration::CONGESTION_CONTROL_CUBIC, config.congestion_control_algorithm
     assert_equal true, config.migration_enabled
     assert_equal 16_000, config.disconnect_timeout_ms
     assert_equal 10_000, config.handshake_idle_timeout_ms
@@ -26,20 +25,20 @@ class ServerConfigurationTest < Minitest::Test
 
   def test_initialization_with_custom_cert_files_raises_no_error_when_certs_does_not_exist
     assert_raises(Quicsilver::ServerConfigurationError) do
-      Quicsilver::ServerConfiguration.new("missing.crt", "missing.key")
+      Quicsilver::Transport::Configuration.new("missing.crt", "missing.key")
     end
   end
 
   def test_initialization_with_custom_cert_files_raises_no_error_when_key_does_not_exist
     assert_raises(Quicsilver::ServerConfigurationError) do
-      Quicsilver::ServerConfiguration.new("certificates/server.crt", "missing.key")
+      Quicsilver::Transport::Configuration.new("certificates/server.crt", "missing.key")
     end
   end
 
   def test_initialization_with_options
     options = {
       idle_timeout_ms: 5000,
-      server_resumption_level: Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_ONLY,
+      server_resumption_level: Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_ONLY,
       max_concurrent_requests: 20,
       max_unidirectional_streams: 15,
       alpn: "h3-29"
@@ -48,7 +47,7 @@ class ServerConfigurationTest < Minitest::Test
     config = fetch_server_configuration_with_certs(options)
     
     assert_equal 5000, config.idle_timeout_ms
-    assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_ONLY, config.server_resumption_level
+    assert_equal Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_ONLY, config.server_resumption_level
     assert_equal 20, config.max_concurrent_requests
     assert_equal 15, config.max_unidirectional_streams
     assert_equal "h3-29", config.alpn
@@ -104,7 +103,7 @@ class ServerConfigurationTest < Minitest::Test
       idle_timeout_ms: 5000,
       alpn: "h3-29",
       keep_alive_interval_ms: 20000,
-      congestion_control_algorithm: Quicsilver::ServerConfiguration::CONGESTION_CONTROL_BBR,
+      congestion_control_algorithm: Quicsilver::Transport::Configuration::CONGESTION_CONTROL_BBR,
       migration_enabled: false
     })
 
@@ -114,12 +113,12 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal cert_file_path, hash[:cert_file]
     assert_equal key_file_path, hash[:key_file]
     assert_equal 5000, hash[:idle_timeout_ms]
-    assert_equal Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT, hash[:server_resumption_level]
+    assert_equal Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_AND_ZERORTT, hash[:server_resumption_level]
     assert_equal 100, hash[:max_concurrent_requests]
     assert_equal 10, hash[:max_unidirectional_streams]
     assert_equal "h3-29", hash[:alpn]
     assert_equal 20000, hash[:keep_alive_interval_ms]
-    assert_equal Quicsilver::ServerConfiguration::CONGESTION_CONTROL_BBR, hash[:congestion_control_algorithm]
+    assert_equal Quicsilver::Transport::Configuration::CONGESTION_CONTROL_BBR, hash[:congestion_control_algorithm]
     assert_equal 0, hash[:migration_enabled]
   end
 
@@ -155,10 +154,10 @@ class ServerConfigurationTest < Minitest::Test
   end
 
   def test_server_resumption_constants
-    assert_equal 1, Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_ZERORTT
-    assert_equal 2, Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_ONLY
-    assert_equal 3, Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_REUSE
-    assert_equal 4, Quicsilver::ServerConfiguration::QUIC_SERVER_RESUME_AND_REUSE_ZERORTT
+    assert_equal 1, Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_AND_ZERORTT
+    assert_equal 2, Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_ONLY
+    assert_equal 3, Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_AND_REUSE
+    assert_equal 4, Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_AND_REUSE_ZERORTT
   end
 
   def test_alpn_getter_method
@@ -201,6 +200,6 @@ class ServerConfigurationTest < Minitest::Test
   private
 
   def fetch_server_configuration_with_certs(options={})
-    Quicsilver::ServerConfiguration.new(cert_file_path, key_file_path, options)
+    Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, options)
   end
 end

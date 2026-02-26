@@ -12,7 +12,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     payload += encode_literal("host", "example.com")
     payload += encode_literal(":path", "/")
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parse_headers_frame(payload).parse
     end
   end
@@ -24,7 +24,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     payload += encode_literal(":method", "GET")
     payload += encode_literal(":method", "POST")
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parse_headers_frame(payload).parse
     end
   end
@@ -34,7 +34,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     payload += encode_literal(":path", "/")
     payload += encode_literal(":path", "/other")
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parse_headers_frame(payload).parse
     end
   end
@@ -44,7 +44,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     payload += encode_literal(":scheme", "https")
     payload += encode_literal(":scheme", "http")
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parse_headers_frame(payload).parse
     end
   end
@@ -56,7 +56,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     payload += encode_literal(":method", "GET")
     payload += encode_literal(":bogus", "value")
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parse_headers_frame(payload).parse
     end
   end
@@ -68,7 +68,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     payload += encode_literal(":method", "GET")
     payload += encode_literal("Content-Type", "text/plain")
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parse_headers_frame(payload).parse
     end
   end
@@ -84,7 +84,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     parser = parse_headers_frame(headers)
     parser.parse
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.validate_headers!
     end
   end
@@ -98,7 +98,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     parser = parse_headers_frame(headers)
     parser.parse
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.validate_headers!
     end
   end
@@ -110,7 +110,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     parser = parse_headers_frame(payload)
     parser.parse
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.validate_headers!
     end
   end
@@ -135,7 +135,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     parser = parse_headers_frame(payload)
     parser.parse
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.validate_headers!
     end
   end
@@ -148,7 +148,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     parser = parse_headers_frame(payload)
     parser.parse
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.validate_headers!
     end
   end
@@ -161,7 +161,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     parser = parse_headers_frame(payload)
     parser.parse
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.validate_headers!
     end
   end
@@ -179,7 +179,7 @@ class PseudoHeaderValidationTest < Minitest::Test
     parser = parse_headers_frame(headers)
     parser.parse
 
-    assert_raises(Quicsilver::HTTP3::MessageError) do
+    assert_raises(Quicsilver::Protocol::MessageError) do
       parser.validate_headers!
     end
   end
@@ -234,6 +234,6 @@ class PseudoHeaderValidationTest < Minitest::Test
   private
 
   def parse_headers_frame(payload)
-    Quicsilver::HTTP3::RequestParser.new(build_headers_frame(payload))
+    Quicsilver::Protocol::RequestParser.new(build_headers_frame(payload))
   end
 end

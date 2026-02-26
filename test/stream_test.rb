@@ -4,7 +4,7 @@ require "test_helper"
 
 class StreamTest < Minitest::Test
   def setup
-    @stream = Quicsilver::Stream.new(42)
+    @stream = Quicsilver::Transport::Stream.new(42)
   end
 
   def test_handle
@@ -32,7 +32,7 @@ class StreamTest < Minitest::Test
     Quicsilver.stub(:stream_reset, ->(*args) { called_with = args; true }) do
       @stream.reset
     end
-    assert_equal [42, Quicsilver::HTTP3::H3_REQUEST_CANCELLED], called_with
+    assert_equal [42, Quicsilver::Protocol::H3_REQUEST_CANCELLED], called_with
   end
 
   def test_reset_accepts_custom_error_code
@@ -48,7 +48,7 @@ class StreamTest < Minitest::Test
     Quicsilver.stub(:stream_stop_sending, ->(*args) { called_with = args; true }) do
       @stream.stop_sending
     end
-    assert_equal [42, Quicsilver::HTTP3::H3_REQUEST_CANCELLED], called_with
+    assert_equal [42, Quicsilver::Protocol::H3_REQUEST_CANCELLED], called_with
   end
 
   def test_stop_sending_accepts_custom_error_code

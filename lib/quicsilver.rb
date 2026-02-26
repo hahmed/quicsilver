@@ -2,23 +2,37 @@
 
 require "logger"
 require_relative "quicsilver/version"
-require_relative "quicsilver/client"
-require_relative "quicsilver/connection"
-require_relative "quicsilver/request"
-require_relative "quicsilver/event_loop"
-require_relative "quicsilver/stream"
-require_relative "quicsilver/stream_event"
-require_relative "quicsilver/quic_stream"
-require_relative "quicsilver/listener_data"
-require_relative "quicsilver/request_registry"
-require_relative "quicsilver/server"
-require_relative "quicsilver/server_configuration"
-require_relative "quicsilver/http3"
-require_relative "quicsilver/http3/request_parser"
-require_relative "quicsilver/http3/request_encoder"
-require_relative "quicsilver/http3/response_encoder"
-require_relative "quicsilver/qpack/encoder"
+
+# Protocol layer (pure HTTP/3 codec)
+require_relative "quicsilver/protocol/frames"
+require_relative "quicsilver/protocol/qpack/encoder"
+require_relative "quicsilver/protocol/request_parser"
+require_relative "quicsilver/protocol/request_encoder"
+require_relative "quicsilver/protocol/response_parser"
+require_relative "quicsilver/protocol/response_encoder"
+
+# Transport layer (QUIC primitives)
+require_relative "quicsilver/transport/stream"
+require_relative "quicsilver/transport/stream_event"
+require_relative "quicsilver/transport/inbound_stream"
+require_relative "quicsilver/transport/event_loop"
+require_relative "quicsilver/transport/configuration"
+require_relative "quicsilver/transport/connection"
+
+# Server
+require_relative "quicsilver/server/listener_data"
+require_relative "quicsilver/server/request_registry"
+require_relative "quicsilver/server/request_handler"
+require_relative "quicsilver/server/server"
+
+# Client
+require_relative "quicsilver/client/request"
+require_relative "quicsilver/client/client"
+
+# C extension
 require_relative "quicsilver/quicsilver"
+
+# Rackup handler
 require_relative "rackup/handler/quicsilver"
 
 module Quicsilver

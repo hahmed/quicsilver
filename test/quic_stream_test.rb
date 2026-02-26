@@ -4,12 +4,12 @@ require "test_helper"
 
 class QuicStreamTest < Minitest::Test
   def test_initializes_with_stringio_buffer
-    stream = Quicsilver::QuicStream.new(0)
+    stream = Quicsilver::Transport::InboundStream.new(0)
     assert_instance_of StringIO, stream.buffer
   end
 
   def test_append_data_uses_write_not_concatenation
-    stream = Quicsilver::QuicStream.new(0)
+    stream = Quicsilver::Transport::InboundStream.new(0)
 
     stream.append_data("chunk1")
     stream.append_data("chunk2")
@@ -19,7 +19,7 @@ class QuicStreamTest < Minitest::Test
   end
 
   def test_data_returns_buffer_as_string
-    stream = Quicsilver::QuicStream.new(0)
+    stream = Quicsilver::Transport::InboundStream.new(0)
     stream.append_data("hello")
 
     assert_instance_of String, stream.data
@@ -27,7 +27,7 @@ class QuicStreamTest < Minitest::Test
   end
 
   def test_append_data_handles_binary_data
-    stream = Quicsilver::QuicStream.new(0)
+    stream = Quicsilver::Transport::InboundStream.new(0)
     binary = "\x00\x01\x02\xFF\xFE".b
 
     stream.append_data(binary)
@@ -37,7 +37,7 @@ class QuicStreamTest < Minitest::Test
   end
 
   def test_large_buffer_accumulation_no_memory_explosion
-    stream = Quicsilver::QuicStream.new(0)
+    stream = Quicsilver::Transport::InboundStream.new(0)
     chunk = "x" * 1024  # 1KB chunk
 
     # Simulate 1000 chunks (1MB total) - should not create 1000 intermediate strings
@@ -48,16 +48,16 @@ class QuicStreamTest < Minitest::Test
 
   def test_bidirectional_stream_detection
     # Bidirectional streams have bit 1 unset
-    assert Quicsilver::QuicStream.new(0).bidirectional?
-    assert Quicsilver::QuicStream.new(4).bidirectional?
+    assert Quicsilver::Transport::InboundStream.new(0).bidirectional?
+    assert Quicsilver::Transport::InboundStream.new(4).bidirectional?
 
     # Unidirectional streams have bit 1 set
-    refute Quicsilver::QuicStream.new(2).bidirectional?
-    refute Quicsilver::QuicStream.new(3).bidirectional?
+    refute Quicsilver::Transport::InboundStream.new(2).bidirectional?
+    refute Quicsilver::Transport::InboundStream.new(3).bidirectional?
   end
 
   def test_writable_requires_stream_handle
-    stream = Quicsilver::QuicStream.new(0)
+    stream = Quicsilver::Transport::InboundStream.new(0)
     refute stream.writable?
 
     stream.stream_handle = 12345

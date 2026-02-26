@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module Quicsilver
-  module HTTP3
+  module Protocol
     class ResponseEncoder
       def initialize(status, headers, body, encoder: Qpack::Encoder.new)
         @status = status
@@ -58,7 +58,7 @@ module Quicsilver
 
       def build_frame(type, payload)
         payload = payload.to_s.b
-        HTTP3.encode_varint(type) + HTTP3.encode_varint(payload.bytesize) + payload
+        Protocol.encode_varint(type) + Protocol.encode_varint(payload.bytesize) + payload
       end
     end
   end

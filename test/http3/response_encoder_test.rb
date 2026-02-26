@@ -1,9 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require_relative "../../lib/quicsilver/http3"
-require_relative "../../lib/quicsilver/http3/response_encoder"
-require_relative "../../lib/quicsilver/http3/response_parser"
 
 class ResponseEncoderTest < Minitest::Test
   def test_encode_200_response
@@ -213,8 +210,8 @@ class ResponseEncoderTest < Minitest::Test
 
     parser = parse_response(data)
     assert_equal 2, parser.frames.length # HEADERS + DATA
-    assert_equal Quicsilver::HTTP3::FRAME_HEADERS, parser.frames[0][:type]
-    assert_equal Quicsilver::HTTP3::FRAME_DATA, parser.frames[1][:type]
+    assert_equal Quicsilver::Protocol::FRAME_HEADERS, parser.frames[0][:type]
+    assert_equal Quicsilver::Protocol::FRAME_DATA, parser.frames[1][:type]
   end
 
   # Roundtrip tests
@@ -281,11 +278,11 @@ class ResponseEncoderTest < Minitest::Test
   end
 
   def encoder(status, headers, body)
-    Quicsilver::HTTP3::ResponseEncoder.new(status, headers, body)
+    Quicsilver::Protocol::ResponseEncoder.new(status, headers, body)
   end
 
   def parse_response(data)
-    parser = Quicsilver::HTTP3::ResponseParser.new(data)
+    parser = Quicsilver::Protocol::ResponseParser.new(data)
     parser.parse
     parser
   end

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module Quicsilver
-  module HTTP3
+  module Protocol
     class RequestEncoder
       def initialize(method:, path:, scheme: "https", authority: "localhost:4433", headers: {}, body: nil, encoder: Qpack::Encoder.new)
         @method = method.upcase
@@ -40,7 +40,7 @@ module Quicsilver
       end
 
       def build_frame(type, payload)
-        HTTP3.encode_varint(type) + HTTP3.encode_varint(payload.bytesize) + payload
+        Protocol.encode_varint(type) + Protocol.encode_varint(payload.bytesize) + payload
       end
     end
   end

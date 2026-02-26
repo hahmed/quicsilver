@@ -1,11 +1,5 @@
 # frozen_string_literal: true
 
-require_relative "http3/request_encoder"
-require_relative "http3/response_parser"
-require_relative "event_loop"
-require_relative "request"
-require_relative "stream"
-require_relative "stream_event"
 require "timeout"
 
 module Quicsilver
@@ -137,12 +131,12 @@ module Quicsilver
           (@response_buffers[stream_id] ||= StringIO.new("".b)).write(data)
 
         when "RECEIVE_FIN"
-          event = StreamEvent.new(data, "RECEIVE_FIN")
+          event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
 
           buffer = @response_buffers.delete(stream_id)
           full_data = (buffer&.string || "".b) + event.data
 
-          response_parser = HTTP3::ResponseParser.new(full_data, max_body_size: @max_body_size,
+          response_parser = Protocol::ResponseParser.new(full_data, max_body_size: @max_body_size,
             max_header_size: @max_header_size)
           response_parser.parse
 
@@ -156,12 +150,12 @@ module Quicsilver
           request&.complete(response)
 
         when "STREAM_RESET"
-          event = StreamEvent.new(data, "STREAM_RESET")
+          event = Transport::StreamEvent.new(data, "STREAM_RESET")
           request = @pending_requests.delete(event.handle)
           request&.fail(event.error_code, "Stream reset by peer")
 
         when "STOP_SENDING"
-          event = StreamEvent.new(data, "STOP_SENDING")
+          event = Transport::StreamEvent.new(data, "STOP_SENDING")
           request = @pending_requests.delete(event.handle)
           request&.fail(event.error_code, "Peer sent STOP_SENDING")
         end
@@ -199,17 +193,17 @@ module Quicsilver
 
     def open_stream
       handle = Quicsilver.open_stream(@connection_data, false)
-      Stream.new(handle)
+      Transport::Stream.new(handle)
     end
 
     def open_unidirectional_stream
       handle = Quicsilver.open_stream(@connection_data, true)
-      Stream.new(handle)
+      Transport::Stream.new(handle)
     end
 
     def send_control_stream
       @control_stream = open_unidirectional_stream
-      @control_stream.send(HTTP3.build_control_stream)
+      @control_stream.send(Protocol.build_control_stream)
 
       # RFC 9204: QPACK encoder (0x02) and decoder (0x03) streams
       [0x02, 0x03].each do |type|
@@ -236,7 +230,7 @@ module Quicsilver
     end
 
     def send_to_stream(stream, method, path, headers, body)
-      encoded_response = HTTP3::RequestEncoder.new(
+      encoded_response = Protocol::RequestEncoder.new(
         method: method,
         path: path,
         scheme: "https",

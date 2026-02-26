@@ -7,7 +7,7 @@ module Benchmarks
     # Boot a Quicsilver server on a random port, yield the port, then tear down.
     def self.with_server(app, &block)
       authority = Localhost::Authority.fetch
-      config = Quicsilver::ServerConfiguration.new(
+      config = Quicsilver::Transport::Configuration.new(
         authority.certificate_path,
         authority.key_path
       )
