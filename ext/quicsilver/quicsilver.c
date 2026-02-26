@@ -90,6 +90,7 @@ struct dispatch_ruby_args {
     uint64_t stream_id;
     const char* data;
     size_t data_len;
+    int early_data;
 };
 
 static VALUE
@@ -103,22 +104,24 @@ dispatch_ruby_body(VALUE arg)
             VALUE connection_data = rb_ary_new2(2);
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection));
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection_ctx));
-            VALUE argv[4] = {
+            VALUE argv[5] = {
                 connection_data,
                 ULL2NUM(a->stream_id),
                 rb_str_new_cstr(a->event_type),
-                rb_str_new(a->data, a->data_len)
+                rb_str_new(a->data, a->data_len),
+                a->early_data ? Qtrue : Qfalse
             };
-            rb_funcallv(server_class, rb_intern("handle_stream"), 4, argv);
+            rb_funcallv(server_class, rb_intern("handle_stream"), 5, argv);
         }
     } else {
         if (RB_TYPE_P(a->client_obj, T_OBJECT)) {
-            VALUE argv[3] = {
+            VALUE argv[4] = {
                 ULL2NUM(a->stream_id),
                 rb_str_new_cstr(a->event_type),
-                rb_str_new(a->data, a->data_len)
+                rb_str_new(a->data, a->data_len),
+                a->early_data ? Qtrue : Qfalse
             };
-            rb_funcallv(a->client_obj, rb_intern("handle_stream_event"), 3, argv);
+            rb_funcallv(a->client_obj, rb_intern("handle_stream_event"), 4, argv);
         }
     }
 
@@ -130,7 +133,7 @@ dispatch_ruby_body(VALUE arg)
 static void
 dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
                  const char* event_type, uint64_t stream_id,
-                 const char* data, size_t data_len)
+                 const char* data, size_t data_len, int early_data)
 {
     struct dispatch_ruby_args args;
     args.connection = connection;
@@ -140,6 +143,7 @@ dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
     args.stream_id = stream_id;
     args.data = data;
     args.data_len = data_len;
+    args.early_data = early_data;
 
     int state = 0;
     rb_protect(dispatch_ruby_body, (VALUE)&args, &state);
@@ -280,20 +284,12 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
 
             if (Event->RECEIVE.BufferCount == 0 && has_fin) {
                 // Empty FIN — headers-only request/response with no body
-                // Format: [stream_handle(8)][early_data(1)]
                 uint64_t stream_id = 0;
                 uint32_t stream_id_len = sizeof(stream_id);
                 MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
 
-                size_t total_len = sizeof(HQUIC) + 1;
-                char* combined = (char*)malloc(total_len);
-                if (combined != NULL) {
-                    memcpy(combined, &Stream, sizeof(HQUIC));
-                    combined[sizeof(HQUIC)] = (char)ctx->early_data;
-                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
-                        "RECEIVE_FIN", stream_id, combined, total_len);
-                    free(combined);
-                }
+                dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                    "RECEIVE_FIN", stream_id, (const char*)&Stream, sizeof(HQUIC), ctx->early_data);
                 break;
             }
 
@@ -310,23 +306,22 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                 }
 
                 if (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) {
-                    // Create combined buffer: [stream_handle(8)][early_data(1)][all data]
-                    size_t total_len = sizeof(HQUIC) + 1 + total_data_len;
+                    // Create combined buffer: [stream_handle(8)][all data]
+                    size_t total_len = sizeof(HQUIC) + total_data_len;
                     char* combined = (char*)malloc(total_len);
                     if (combined != NULL) {
                         memcpy(combined, &Stream, sizeof(HQUIC));
-                        combined[sizeof(HQUIC)] = (char)ctx->early_data;
-                        size_t offset = sizeof(HQUIC) + 1;
+                        size_t offset = sizeof(HQUIC);
                         for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
                         }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_len);
+                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_len, ctx->early_data);
                         free(combined);
                     }
                 } else if (Event->RECEIVE.BufferCount == 1) {
                     dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id,
-                        (const char*)Event->RECEIVE.Buffers[0].Buffer, Event->RECEIVE.Buffers[0].Length);
+                        (const char*)Event->RECEIVE.Buffers[0].Buffer, Event->RECEIVE.Buffers[0].Length, 0);
                 } else {
                     char* combined = (char*)malloc(total_data_len);
                     if (combined != NULL) {
@@ -335,7 +330,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
                         }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_data_len);
+                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_data_len, 0);
                         free(combined);
                     }
                 }
@@ -367,7 +362,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             char combined[sizeof(HQUIC) + sizeof(uint64_t)];
             memcpy(combined, &Stream, sizeof(HQUIC));
             memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", stream_id, combined, sizeof(combined));
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", stream_id, combined, sizeof(combined), 0);
             break;
         }
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
@@ -379,7 +374,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             char combined[sizeof(HQUIC) + sizeof(uint64_t)];
             memcpy(combined, &Stream, sizeof(HQUIC));
             memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", stream_id, combined, sizeof(combined));
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", stream_id, combined, sizeof(combined), 0);
             break;
         }
     }
@@ -404,7 +399,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             ctx->connected = 1;
             ctx->failed = 0;
             // Notify Ruby about new connection - pass ctx pointer for building connection_data
-            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC));
+            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
@@ -420,7 +415,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
-            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC));
+            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
             // Free context for all connections (both client and server).
             // Client GC registration must be removed before freeing.
             if (!NIL_P(ctx->client_obj)) {

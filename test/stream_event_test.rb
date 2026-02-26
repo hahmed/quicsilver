@@ -9,17 +9,7 @@ class StreamEventTest < Minitest::Test
 
     assert_equal 0xCAFEBABE, event.handle
     assert_equal payload, event.data
-    assert_equal false, event.early_data
     assert_nil event.error_code
-  end
-
-  def test_receive_fin_with_early_data_flag
-    payload = "HTTP/3 response data"
-    event = build_receive_fin(0xCAFEBABE, payload, early_data: true)
-
-    assert_equal 0xCAFEBABE, event.handle
-    assert_equal payload, event.data
-    assert_equal true, event.early_data
   end
 
   def test_receive_fin_with_empty_payload
@@ -27,7 +17,6 @@ class StreamEventTest < Minitest::Test
 
     assert_equal 123, event.handle
     assert_equal "".b, event.data
-    assert_equal false, event.early_data
   end
 
   def test_stream_reset_extracts_handle_and_error_code
@@ -64,9 +53,9 @@ class StreamEventTest < Minitest::Test
 
   private
 
-  # Mirrors C extension RECEIVE_FIN format: [handle(8)][early_data(1)][payload...]
-  def build_receive_fin(handle, payload = "".b, early_data: false)
-    raw = [handle].pack("Q") + [early_data ? 1 : 0].pack("C") + payload.b
+  # Mirrors C extension RECEIVE_FIN format: [handle(8)][payload...]
+  def build_receive_fin(handle, payload = "".b)
+    raw = [handle].pack("Q") + payload.b
     Quicsilver::StreamEvent.new(raw, "RECEIVE_FIN")
   end
 

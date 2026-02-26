@@ -19,8 +19,8 @@ module Quicsilver
       attr_accessor :instance
 
       # Callback from C extension - delegates to server instance
-      def handle_stream(connection_data, stream_id, event, data)
-        instance&.handle_stream_event(connection_data, stream_id, event, data)
+      def handle_stream(connection_data, stream_id, event, data, early_data)
+        instance&.handle_stream_event(connection_data, stream_id, event, data, early_data)
       end
     end
 
@@ -178,7 +178,7 @@ module Quicsilver
       Quicsilver.logger.info("Graceful shutdown complete")
     end
 
-    def handle_stream_event(connection_data, stream_id, event, data) # :nodoc:
+    def handle_stream_event(connection_data, stream_id, event, data, early_data) # :nodoc:
       connection_handle = connection_data[0]
 
       case event
@@ -216,7 +216,7 @@ module Quicsilver
 
         if stream.bidirectional?
           connection.track_client_stream(stream_id)
-          dispatch_request(connection, stream, early_data: event.early_data)
+          dispatch_request(connection, stream, early_data: early_data)
         else
           connection.handle_unidirectional_stream(stream)
         end

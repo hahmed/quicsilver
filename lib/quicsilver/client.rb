@@ -128,7 +128,7 @@ module Quicsilver
     end
 
     # Called directly by C extension via dispatch_to_ruby
-    def handle_stream_event(stream_id, event, data) # :nodoc:
+    def handle_stream_event(stream_id, event, data, _early_data) # :nodoc:
       return unless FINISHED_EVENTS.include?(event)
 
       @mutex.synchronize do

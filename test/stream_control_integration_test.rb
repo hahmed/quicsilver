@@ -198,7 +198,7 @@ class StreamControlIntegrationTest < Minitest::Test
     request = @client.build_request("GET", "/will-be-reset")
     packed_data = [request.stream.handle, 0x10c].pack("QQ")
 
-    @client.handle_stream_event(0, "STREAM_RESET", packed_data)
+    @client.handle_stream_event(0, "STREAM_RESET", packed_data, false)
 
     error = assert_raises(Quicsilver::Request::ResetError) do
       request.response(timeout: 1)
@@ -215,7 +215,7 @@ class StreamControlIntegrationTest < Minitest::Test
     request = @client.build_request("GET", "/will-get-stop-sending")
     packed_data = [request.stream.handle, 0x10c].pack("QQ")
 
-    @client.handle_stream_event(0, "STOP_SENDING", packed_data)
+    @client.handle_stream_event(0, "STOP_SENDING", packed_data, false)
 
     error = assert_raises(Quicsilver::Request::ResetError) do
       request.response(timeout: 1)

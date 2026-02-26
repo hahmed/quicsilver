@@ -58,7 +58,7 @@ class ServerTest < Minitest::Test
     server.connections[connection_handle] = connection
 
     # Now test receive - data is buffered in Connection
-    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "test data")
+    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "test data", false)
 
     # Verify buffered data via complete_stream
     assert_equal "test data", connection.complete_stream(stream_id, "")
@@ -75,9 +75,9 @@ class ServerTest < Minitest::Test
     server.connections[connection_handle] = connection
 
     # Send multiple chunks - data is buffered in Connection
-    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk1")
-    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk2")
-    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk3")
+    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk1", false)
+    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk2", false)
+    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk3", false)
 
     # Verify accumulated data via complete_stream
     assert_equal "chunk1chunk2chunk3", connection.complete_stream(stream_id, "")
@@ -103,7 +103,7 @@ class ServerTest < Minitest::Test
       error_code = 0x10c
       packed_data = [fake_handle, error_code].pack("QQ")
 
-      Quicsilver::Server.handle_stream(connection_data, stream_id, "STREAM_RESET", packed_data)
+      Quicsilver::Server.handle_stream(connection_data, stream_id, "STREAM_RESET", packed_data, false)
 
       assert server.request_registry.empty?, "Request should be cleaned up after STREAM_RESET"
 
@@ -127,7 +127,7 @@ class ServerTest < Minitest::Test
     packed_data = [stream_handle, Quicsilver::HTTP3::H3_REQUEST_CANCELLED].pack("QQ")
 
     Quicsilver.stub(:stream_reset, ->(*args) { true }) do
-      Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data)
+      Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data, false)
     end
 
     assert server.cancelled_stream?(stream_id), "Stream should be marked as cancelled after STOP_SENDING"
@@ -148,7 +148,7 @@ class ServerTest < Minitest::Test
 
     reset_called_with = nil
     Quicsilver.stub(:stream_reset, ->(*args) { reset_called_with = args; true }) do
-      Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data)
+      Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data, false)
     end
 
     assert_equal [stream_handle, Quicsilver::HTTP3::H3_REQUEST_CANCELLED], reset_called_with,
@@ -209,7 +209,7 @@ class ServerTest < Minitest::Test
 
     shutdown_called = false
     Quicsilver.stub(:connection_shutdown, ->(*args) { shutdown_called = true }) do
-      server.handle_stream_event(new_data, 0, "CONNECTION_ESTABLISHED", nil)
+      server.handle_stream_event(new_data, 0, "CONNECTION_ESTABLISHED", nil, false)
     end
 
     assert shutdown_called, "Should shutdown excess connection"
