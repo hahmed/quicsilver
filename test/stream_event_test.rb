@@ -4,69 +4,75 @@ require "test_helper"
 
 class StreamEventTest < Minitest::Test
   def test_receive_fin_extracts_handle_and_data
-    handle = 0xCAFEBABE
     payload = "HTTP/3 response data"
-    raw = [handle].pack("Q") + payload
+    event = build_receive_fin(0xCAFEBABE, payload)
 
-    event = Quicsilver::StreamEvent.new(raw, "RECEIVE_FIN")
-
-    assert_equal handle, event.handle
+    assert_equal 0xCAFEBABE, event.handle
     assert_equal payload, event.data
+    assert_equal false, event.early_data
     assert_nil event.error_code
   end
 
+  def test_receive_fin_with_early_data_flag
+    payload = "HTTP/3 response data"
+    event = build_receive_fin(0xCAFEBABE, payload, early_data: true)
+
+    assert_equal 0xCAFEBABE, event.handle
+    assert_equal payload, event.data
+    assert_equal true, event.early_data
+  end
+
   def test_receive_fin_with_empty_payload
-    handle = 123
-    raw = [handle].pack("Q")
+    event = build_receive_fin(123)
 
-    event = Quicsilver::StreamEvent.new(raw, "RECEIVE_FIN")
-
-    assert_equal handle, event.handle
+    assert_equal 123, event.handle
     assert_equal "".b, event.data
+    assert_equal false, event.early_data
   end
 
   def test_stream_reset_extracts_handle_and_error_code
-    handle = 0xDEADBEEF
-    error_code = 0x10c
-    raw = [handle, error_code].pack("QQ")
+    event = build_error_event(0xDEADBEEF, 0x10c, "STREAM_RESET")
 
-    event = Quicsilver::StreamEvent.new(raw, "STREAM_RESET")
-
-    assert_equal handle, event.handle
-    assert_equal error_code, event.error_code
+    assert_equal 0xDEADBEEF, event.handle
+    assert_equal 0x10c, event.error_code
     assert_nil event.data
   end
 
   def test_stop_sending_extracts_handle_and_error_code
-    handle = 0xFEEDFACE
-    error_code = 0x0108
-    raw = [handle, error_code].pack("QQ")
+    event = build_error_event(0xFEEDFACE, 0x0108, "STOP_SENDING")
 
-    event = Quicsilver::StreamEvent.new(raw, "STOP_SENDING")
-
-    assert_equal handle, event.handle
-    assert_equal error_code, event.error_code
+    assert_equal 0xFEEDFACE, event.handle
+    assert_equal 0x0108, event.error_code
     assert_nil event.data
   end
 
   def test_receive_fin_with_binary_payload
-    handle = 42
     payload = "\x00\x01\x02\xFF".b
-    raw = [handle].pack("Q") + payload
+    event = build_receive_fin(42, payload)
 
-    event = Quicsilver::StreamEvent.new(raw, "RECEIVE_FIN")
-
-    assert_equal handle, event.handle
+    assert_equal 42, event.handle
     assert_equal payload, event.data
   end
 
   def test_handle_is_always_extracted_regardless_of_event_type
     handle = 99999
-    raw = [handle, 0].pack("QQ")
 
-    %w[RECEIVE_FIN STREAM_RESET STOP_SENDING].each do |type|
-      event = Quicsilver::StreamEvent.new(raw, type)
-      assert_equal handle, event.handle, "Handle should be extracted for #{type}"
-    end
+    assert_equal handle, build_receive_fin(handle).handle
+    assert_equal handle, build_error_event(handle, 0, "STREAM_RESET").handle
+    assert_equal handle, build_error_event(handle, 0, "STOP_SENDING").handle
+  end
+
+  private
+
+  # Mirrors C extension RECEIVE_FIN format: [handle(8)][early_data(1)][payload...]
+  def build_receive_fin(handle, payload = "".b, early_data: false)
+    raw = [handle].pack("Q") + [early_data ? 1 : 0].pack("C") + payload.b
+    Quicsilver::StreamEvent.new(raw, "RECEIVE_FIN")
+  end
+
+  # Mirrors C extension STREAM_RESET/STOP_SENDING format: [handle(8)][error_code(8)]
+  def build_error_event(handle, error_code, type)
+    raw = [handle, error_code].pack("QQ")
+    Quicsilver::StreamEvent.new(raw, type)
   end
 end
