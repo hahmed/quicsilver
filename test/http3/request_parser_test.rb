@@ -263,6 +263,93 @@ class RequestParserTest < Minitest::Test
     assert_nil parser.to_rack_env
   end
 
+  # RFC 9114 §4.2: Connection-specific headers are forbidden in HTTP/3
+  def test_rejects_connection_header
+    headers_payload = build_qpack_headers(
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "localhost:4433", ":path" => "/",
+      "connection" => "keep-alive"
+    )
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)).parse
+    end
+  end
+
+  def test_rejects_transfer_encoding_header
+    headers_payload = build_qpack_headers(
+      ":method" => "POST", ":scheme" => "https",
+      ":authority" => "localhost:4433", ":path" => "/",
+      "transfer-encoding" => "chunked"
+    )
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)).parse
+    end
+  end
+
+  def test_rejects_keep_alive_header
+    headers_payload = build_qpack_headers(
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "localhost:4433", ":path" => "/",
+      "keep-alive" => "timeout=5"
+    )
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)).parse
+    end
+  end
+
+  def test_rejects_upgrade_header
+    headers_payload = build_qpack_headers(
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "localhost:4433", ":path" => "/",
+      "upgrade" => "websocket"
+    )
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)).parse
+    end
+  end
+
+  def test_rejects_proxy_connection_header
+    headers_payload = build_qpack_headers(
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "localhost:4433", ":path" => "/",
+      "proxy-connection" => "keep-alive"
+    )
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)).parse
+    end
+  end
+
+  def test_rejects_te_header
+    headers_payload = build_qpack_headers(
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "localhost:4433", ":path" => "/",
+      "te" => "gzip"
+    )
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)).parse
+    end
+  end
+
+  def test_allows_te_trailers
+    # RFC 9114 §4.2: "te" with value "trailers" is the one exception
+    # This test documents current behavior — we reject all te values.
+    # A future enhancement could allow te: trailers specifically.
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      headers_payload = build_qpack_headers(
+        ":method" => "GET", ":scheme" => "https",
+        ":authority" => "localhost:4433", ":path" => "/",
+        "te" => "trailers"
+      )
+      Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)).parse
+    end
+  end
+
   def test_frames_are_recorded
     headers_payload = build_qpack_headers(
       ":method" => "POST",

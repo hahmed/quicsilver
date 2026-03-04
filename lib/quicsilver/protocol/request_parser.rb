@@ -11,6 +11,9 @@ module Quicsilver
       # Known HTTP/3 request pseudo-headers (RFC 9114 §4.3.1)
       VALID_PSEUDO_HEADERS = %w[:method :scheme :authority :path :protocol].freeze
 
+      # Connection-specific headers forbidden in HTTP/3 (RFC 9114 §4.2)
+      FORBIDDEN_HEADERS = %w[connection transfer-encoding keep-alive upgrade proxy-connection te].freeze
+
       def initialize(data, decoder: Qpack::HeaderBlockDecoder.new,
                      max_body_size: nil, max_header_size: nil,
                      max_header_count: nil, max_frame_payload_size: nil)
@@ -199,6 +202,11 @@ module Quicsilver
             end
           else
             pseudo_done = true
+
+            # RFC 9114 §4.2: Connection-specific headers are malformed in HTTP/3
+            if FORBIDDEN_HEADERS.include?(name)
+              raise Protocol::MessageError, "Connection-specific header '#{name}' forbidden in HTTP/3"
+            end
           end
 
           store_header(name, value)
