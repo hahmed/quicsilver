@@ -187,7 +187,7 @@ module Quicsilver
           break if type_len == 0 || length_len == 0
 
           if first_frame && frame_type != Protocol::FRAME_SETTINGS
-            raise Protocol::FrameError, "First frame on control stream must be SETTINGS"
+            raise Protocol::FrameError.new("First frame on control stream must be SETTINGS", error_code: Protocol::H3_MISSING_SETTINGS)
           end
           first_frame = false
 
@@ -214,7 +214,7 @@ module Quicsilver
           break if id_len == 0 || value_len == 0
 
           if HTTP2_SETTINGS.include?(id)
-            raise Protocol::FrameError, "HTTP/2 setting identifier 0x#{id.to_s(16)} not allowed in HTTP/3"
+            raise Protocol::FrameError.new("HTTP/2 setting identifier 0x#{id.to_s(16)} not allowed in HTTP/3", error_code: Protocol::H3_SETTINGS_ERROR)
           end
 
           raise Protocol::FrameError, "Duplicate setting identifier 0x#{id.to_s(16)}" if seen.include?(id)

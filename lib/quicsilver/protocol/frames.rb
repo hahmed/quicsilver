@@ -14,9 +14,6 @@ module Quicsilver
     # Frame types forbidden on request streams (RFC 9114 Section 7.2.4, 7.2.6, 7.2.7)
     CONTROL_ONLY_FRAMES = [FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID].freeze
 
-    FrameError = Class.new(StandardError)
-    MessageError = Class.new(StandardError)
-
     # HTTP/3 Error Codes (RFC 9114 Section 8.1)
     H3_NO_ERROR = 0x100
     H3_GENERAL_PROTOCOL_ERROR = 0x101
@@ -40,6 +37,25 @@ module Quicsilver
     QPACK_DECOMPRESSION_FAILED = 0x200
     QPACK_ENCODER_STREAM_ERROR = 0x201
     QPACK_DECODER_STREAM_ERROR = 0x202
+
+    # Protocol errors that carry an HTTP/3 error code for CONNECTION_CLOSE / RESET_STREAM.
+    # FrameError → connection error (CONNECTION_CLOSE)
+    # MessageError → stream error (RESET_STREAM) on request streams
+    class FrameError < StandardError
+      attr_reader :error_code
+      def initialize(msg = nil, error_code: H3_FRAME_UNEXPECTED)
+        @error_code = error_code
+        super(msg)
+      end
+    end
+
+    class MessageError < StandardError
+      attr_reader :error_code
+      def initialize(msg = nil, error_code: H3_MESSAGE_ERROR)
+        @error_code = error_code
+        super(msg)
+      end
+    end
 
     # QPACK Static Table Indices (RFC 9204 Appendix A)
     STATIC_TABLE = [
