@@ -107,7 +107,7 @@ class ConnectionTest < Minitest::Test
     stream = build_unidirectional_stream(0x01)
 
     assert_raises(Quicsilver::Protocol::FrameError) do
-      @connection.handle_unidirectional_stream(stream)
+      @connection.handle_unidirectional_stream(stream, fin: false)
     end
   end
 
@@ -123,10 +123,10 @@ class ConnectionTest < Minitest::Test
     stream1 = build_unidirectional_stream(0x02)
     stream2 = build_unidirectional_stream(0x02)
 
-    @connection.handle_unidirectional_stream(stream1)
+    @connection.handle_unidirectional_stream(stream1, fin: false)
 
     assert_raises(Quicsilver::Protocol::FrameError) do
-      @connection.handle_unidirectional_stream(stream2)
+      @connection.handle_unidirectional_stream(stream2, fin: false)
     end
   end
 
@@ -134,10 +134,10 @@ class ConnectionTest < Minitest::Test
     stream1 = build_unidirectional_stream(0x03)
     stream2 = build_unidirectional_stream(0x03)
 
-    @connection.handle_unidirectional_stream(stream1)
+    @connection.handle_unidirectional_stream(stream1, fin: false)
 
     assert_raises(Quicsilver::Protocol::FrameError) do
-      @connection.handle_unidirectional_stream(stream2)
+      @connection.handle_unidirectional_stream(stream2, fin: false)
     end
   end
 
@@ -188,7 +188,7 @@ class ConnectionTest < Minitest::Test
     stream = Quicsilver::Transport::InboundStream.new(3, is_unidirectional: true)
     stream.append_data("\x40\x00".b + build_settings_frame)
 
-    @connection.handle_unidirectional_stream(stream)
+    @connection.handle_unidirectional_stream(stream, fin: false)
     assert_equal 3, @connection.control_stream_id
   end
 
@@ -227,6 +227,59 @@ class ConnectionTest < Minitest::Test
         conn.set_control_stream(1, data_after_settings)
       end
     end
+  end
+
+  # === Critical stream detection ===
+
+  def test_critical_stream_identifies_control_stream
+    @connection.set_control_stream(3, build_settings_frame)
+    assert @connection.critical_stream?(3)
+    refute @connection.critical_stream?(99)
+  end
+
+  def test_critical_stream_identifies_qpack_streams
+    stream_enc = build_unidirectional_stream(0x02)
+    stream_dec = build_unidirectional_stream(0x03)
+
+    @connection.handle_unidirectional_stream(stream_enc, fin: false)
+    @connection.handle_unidirectional_stream(stream_dec, fin: false)
+
+    assert @connection.critical_stream?(3)  # both use stream_id 3 from helper, but let's check properly
+  end
+
+  # === FIN on critical streams ===
+
+  def test_fin_on_control_stream_raises_closed_critical_stream
+    stream = Quicsilver::Transport::InboundStream.new(3, is_unidirectional: true)
+    stream.append_data("\x00".b + build_settings_frame)
+
+    # First open it without FIN
+    @connection.handle_unidirectional_stream(stream, fin: false)
+
+    # Then FIN on a known critical stream
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      @connection.handle_unidirectional_stream(stream, fin: true)
+    end
+    assert_equal Quicsilver::Protocol::H3_CLOSED_CRITICAL_STREAM, error.error_code
+  end
+
+  def test_fin_on_new_control_stream_raises_closed_critical_stream
+    stream = Quicsilver::Transport::InboundStream.new(3, is_unidirectional: true)
+    stream.append_data("\x00".b + build_settings_frame)
+
+    # Stream identified and immediately closed with FIN
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      @connection.handle_unidirectional_stream(stream, fin: true)
+    end
+    assert_equal Quicsilver::Protocol::H3_CLOSED_CRITICAL_STREAM, error.error_code
+  end
+
+  def test_no_fin_on_control_stream_does_not_raise
+    stream = Quicsilver::Transport::InboundStream.new(3, is_unidirectional: true)
+    stream.append_data("\x00".b + build_settings_frame)
+
+    @connection.handle_unidirectional_stream(stream, fin: false)
+    assert_equal 3, @connection.control_stream_id
   end
 
   # === GOAWAY stream ID ===

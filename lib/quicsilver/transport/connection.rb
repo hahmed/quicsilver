@@ -112,7 +112,14 @@ module Quicsilver
 
       # === Control Stream Handling ===
 
-      def handle_unidirectional_stream(stream)
+      def handle_unidirectional_stream(stream, fin: true)
+        stream_id = stream.stream_id
+
+        # Already known as critical stream — closure via FIN is an error
+        if fin && critical_stream?(stream_id)
+          raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
+        end
+
         data = stream.data
         return if data.empty?
 
@@ -121,15 +128,25 @@ module Quicsilver
         payload = data[type_len..-1]
 
         case stream_type
-        when 0x00 then set_control_stream(stream.stream_id, payload)
+        when 0x00
+          set_control_stream(stream_id, payload)
+          if fin
+            raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
+          end
         when 0x01
           raise Protocol::FrameError, "Client must not send push streams"
         when 0x02
           raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
-          @qpack_encoder_stream_id = stream.stream_id
+          @qpack_encoder_stream_id = stream_id
+          if fin
+            raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
+          end
         when 0x03
           raise Protocol::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
-          @qpack_decoder_stream_id = stream.stream_id
+          @qpack_decoder_stream_id = stream_id
+          if fin
+            raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
+          end
         end
       end
 
@@ -141,6 +158,12 @@ module Quicsilver
 
       def settings
         @settings
+      end
+
+      def critical_stream?(stream_id)
+        stream_id == @control_stream_id ||
+          stream_id == @qpack_encoder_stream_id ||
+          stream_id == @qpack_decoder_stream_id
       end
 
       # === Shutdown ===
