@@ -166,6 +166,45 @@ class PseudoHeaderValidationTest < Minitest::Test
     end
   end
 
+  # === RFC 9114 §4.3.1: http/https schemes require :authority or host ===
+
+  def test_validate_rejects_http_scheme_without_authority_or_host
+    payload = qpack_prefix
+    payload += encode_literal(":method", "GET")
+    payload += encode_literal(":scheme", "https")
+    payload += encode_literal(":path", "/")
+
+    parser = parse_headers_frame(payload)
+    parser.parse
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      parser.validate_headers!
+    end
+  end
+
+  def test_validate_accepts_http_scheme_with_host_only
+    headers = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":path" => "/",
+      "host" => "example.com"
+    )
+    parser = parse_headers_frame(headers)
+    parser.parse
+    parser.validate_headers!
+  end
+
+  def test_validate_accepts_custom_scheme_without_authority
+    payload = qpack_prefix
+    payload += encode_literal(":method", "GET")
+    payload += encode_literal(":scheme", "coap")
+    payload += encode_literal(":path", "/")
+
+    parser = parse_headers_frame(payload)
+    parser.parse
+    parser.validate_headers!
+  end
+
   # === RFC 9114 §4.3.1: Host / :authority consistency ===
 
   def test_validate_rejects_inconsistent_host_and_authority

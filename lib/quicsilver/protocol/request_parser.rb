@@ -48,6 +48,12 @@ module Quicsilver
           raise Protocol::MessageError, "Request missing required pseudo-header :method" unless method
           raise Protocol::MessageError, "Request missing required pseudo-header :scheme" unless @headers[":scheme"]
           raise Protocol::MessageError, "Request missing required pseudo-header :path" unless @headers[":path"]
+
+          # RFC 9114 §4.3.1: schemes with mandatory authority (http/https) require :authority or host
+          scheme = @headers[":scheme"]
+          if %w[http https].include?(scheme) && !@headers[":authority"] && !@headers["host"]
+            raise Protocol::MessageError, "Request with #{scheme} scheme must include :authority or host"
+          end
         end
 
         # Host and :authority consistency (RFC 9114 §4.3.1)
