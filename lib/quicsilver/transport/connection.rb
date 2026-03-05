@@ -247,6 +247,43 @@ module Quicsilver
           offset += id_len + value_len
         end
       end
+      # RFC 9204 §4.1.3: Validate QPACK encoder stream instructions.
+      # We advertise QPACK_MAX_TABLE_CAPACITY = 0, so any Set Dynamic Table Capacity
+      # instruction with value > 0 is an error.
+      def validate_qpack_encoder_data(data)
+        return if data.empty?
+        byte = data.bytes[0]
+
+        # Set Dynamic Table Capacity (001xxxxx)
+        if (byte & 0xE0) == 0x20
+          capacity, _ = Protocol.decode_varint(data.bytes, 0)
+          capacity &= 0x1F  # mask off the instruction prefix
+          # We advertised capacity 0, any non-zero is an error
+          raise Protocol::FrameError.new(
+            "Dynamic table capacity exceeds advertised maximum",
+            error_code: Protocol::QPACK_ENCODER_STREAM_ERROR
+          )
+        end
+      end
+
+      # RFC 9204 §4.4.3: Validate QPACK decoder stream instructions.
+      # Insert Count Increment of 0 is a decoder stream error.
+      def validate_qpack_decoder_data(data)
+        return if data.empty?
+        byte = data.bytes[0]
+
+        # Insert Count Increment (00xxxxxx)
+        if (byte & 0xC0) == 0x00
+          increment, _ = Protocol.decode_varint(data.bytes, 0)
+          increment &= 0x3F  # mask off prefix bits
+          if increment == 0
+            raise Protocol::FrameError.new(
+              "Insert Count Increment of 0 on decoder stream",
+              error_code: Protocol::QPACK_DECODER_STREAM_ERROR
+            )
+          end
+        end
+      end
     end
   end
 end

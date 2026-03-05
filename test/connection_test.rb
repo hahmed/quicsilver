@@ -282,6 +282,40 @@ class ConnectionTest < Minitest::Test
     assert_equal 3, @connection.control_stream_id
   end
 
+  # === QPACK stream validation ===
+
+  def test_validate_qpack_encoder_rejects_dynamic_table_capacity
+    # 001xxxxx = Set Dynamic Table Capacity instruction
+    data = "\x20".b  # 0x20 = 001_00000, capacity 0 (but any instruction is invalid for us)
+
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      @connection.send(:validate_qpack_encoder_data, data)
+    end
+    assert_equal Quicsilver::Protocol::QPACK_ENCODER_STREAM_ERROR, error.error_code
+  end
+
+  def test_validate_qpack_encoder_ignores_non_capacity_instructions
+    # 1xxxxxxx = Insert With Name Reference (not a capacity instruction)
+    data = "\x80".b
+    @connection.send(:validate_qpack_encoder_data, data)  # should not raise
+  end
+
+  def test_validate_qpack_decoder_rejects_zero_insert_count_increment
+    # 00xxxxxx = Insert Count Increment, value 0
+    data = "\x00".b
+
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      @connection.send(:validate_qpack_decoder_data, data)
+    end
+    assert_equal Quicsilver::Protocol::QPACK_DECODER_STREAM_ERROR, error.error_code
+  end
+
+  def test_validate_qpack_decoder_accepts_nonzero_insert_count_increment
+    # 00_000001 = Insert Count Increment with value 1
+    data = "\x01".b
+    @connection.send(:validate_qpack_decoder_data, data)  # should not raise
+  end
+
   # === GOAWAY stream ID ===
 
   def test_last_client_stream_id_tracks_bidi_streams
