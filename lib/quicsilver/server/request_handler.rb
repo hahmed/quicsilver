@@ -23,7 +23,7 @@ module Quicsilver
           max_frame_payload_size: @configuration.max_frame_payload_size
         )
         parser.parse
-        parser.validate_headers!
+        parser.validate_headers!  # raises MessageError for missing/invalid pseudo-headers
         env = parser.to_rack_env
 
         if env && @app
@@ -59,6 +59,14 @@ module Quicsilver
         end
       rescue Server::DrainTimeoutError
         Quicsilver.logger.debug("Request interrupted by drain: stream #{stream.stream_id}")
+      rescue Protocol::FrameError => e
+        # Frame errors are connection-level: signal via CONNECTION_CLOSE with H3 error code
+        Quicsilver.logger.error("Frame error: #{e.message} (0x#{e.error_code.to_s(16)})")
+        Quicsilver.connection_shutdown(connection.handle, e.error_code, false) rescue nil
+      rescue Protocol::MessageError => e
+        # Message errors are stream-level: signal via RESET_STREAM with H3 error code
+        Quicsilver.logger.error("Message error: #{e.message} (0x#{e.error_code.to_s(16)})")
+        Quicsilver.stream_reset(stream.stream_handle, e.error_code) if stream.writable?
       rescue => e
         Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
         Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
