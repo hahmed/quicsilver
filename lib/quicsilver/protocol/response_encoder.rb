@@ -3,19 +3,22 @@
 module Quicsilver
   module Protocol
     class ResponseEncoder
-      def initialize(status, headers, body, encoder: Qpack::Encoder.new)
+      def initialize(status, headers, body, encoder: Qpack::Encoder.new, head_request: false)
         @status = status
         @headers = headers
         @body = body
         @encoder = encoder
+        @head_request = head_request
       end
 
       # Buffered encode - returns all frames at once
       def encode
         frames = "".b
         frames << build_frame(FRAME_HEADERS, @encoder.encode(all_headers))
-        @body.each do |chunk|
-          frames << build_frame(FRAME_DATA, chunk) unless chunk.empty?
+        unless @head_request
+          @body.each do |chunk|
+            frames << build_frame(FRAME_DATA, chunk) unless chunk.empty?
+          end
         end
         @body.close if @body.respond_to?(:close)
         frames
@@ -25,14 +28,18 @@ module Quicsilver
       def stream_encode
         yield build_frame(FRAME_HEADERS, @encoder.encode(all_headers)), false
 
-        last_chunk = nil
-        @body.each do |chunk|
-          yield build_frame(FRAME_DATA, last_chunk), false if last_chunk && !last_chunk.empty?
-          last_chunk = chunk
-        end
+        unless @head_request
+          last_chunk = nil
+          @body.each do |chunk|
+            yield build_frame(FRAME_DATA, last_chunk), false if last_chunk && !last_chunk.empty?
+            last_chunk = chunk
+          end
 
-        if last_chunk && !last_chunk.empty?
-          yield build_frame(FRAME_DATA, last_chunk), true
+          if last_chunk && !last_chunk.empty?
+            yield build_frame(FRAME_DATA, last_chunk), true
+          else
+            yield "".b, true
+          end
         else
           yield "".b, true
         end

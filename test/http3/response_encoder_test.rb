@@ -240,6 +240,46 @@ class ResponseEncoderTest < Minitest::Test
     assert_equal '{"data":"test"}', parse_body(data)
   end
 
+  # HEAD request suppresses body
+  def test_head_request_omits_data_frames
+    data = encoder(200, { "content-type" => "text/plain" }, ["Hello World"], head_request: true).encode
+    parser = parse_response(data)
+
+    assert_decoded_status(data, 200)
+    assert_equal 1, parser.frames.length, "HEAD response should only have HEADERS frame"
+    assert_equal Quicsilver::Protocol::FRAME_HEADERS, parser.frames[0][:type]
+    assert_empty parse_body(data)
+  end
+
+  def test_head_request_still_includes_headers
+    headers = { "content-type" => "text/plain", "content-length" => "11" }
+    data = encoder(200, headers, ["Hello World"], head_request: true).encode
+
+    assert_decoded_header(data, "content-type", "text/plain")
+    assert_decoded_header(data, "content-length", "11")
+    assert_empty parse_body(data)
+  end
+
+  def test_head_request_closes_body
+    body_mock = ["content"]
+    def body_mock.close = (@closed = true)
+    def body_mock.closed? = (@closed ||= false)
+
+    encoder(200, {}, body_mock, head_request: true).encode
+    assert body_mock.closed?, "Body should be closed even for HEAD"
+  end
+
+  def test_head_request_stream_encode_omits_data_frames
+    enc = encoder(200, { "content-type" => "text/plain" }, ["Hello"], head_request: true)
+    frames = []
+    enc.stream_encode { |data, fin| frames << [data, fin] }
+
+    assert_equal 2, frames.size
+    assert_equal false, frames[0][1], "HEADERS should have FIN=false"
+    assert_equal true, frames[1][1], "Final frame should have FIN=true"
+    assert_empty frames[1][0], "No DATA payload for HEAD"
+  end
+
   # Streaming tests
   def test_stream_encode_yields_frames_with_fin_flags
     enc = encoder(200, { "content-type" => "text/plain" }, ["Hello"])
@@ -277,8 +317,8 @@ class ResponseEncoderTest < Minitest::Test
     ecoder(status, headers, body).encode
   end
 
-  def encoder(status, headers, body)
-    Quicsilver::Protocol::ResponseEncoder.new(status, headers, body)
+  def encoder(status, headers, body, head_request: false)
+    Quicsilver::Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request)
   end
 
   def parse_response(data)

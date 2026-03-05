@@ -84,8 +84,8 @@ module Quicsilver
         Quicsilver.logger.error("Failed to send GOAWAY: #{e.message}")
       end
 
-      def send_response(stream, status, headers, body)
-        encoder = Protocol::ResponseEncoder.new(status, headers, body)
+      def send_response(stream, status, headers, body, head_request: false)
+        encoder = Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request)
 
         if body.respond_to?(:to_ary)
           Quicsilver.send_stream(stream.stream_handle, encoder.encode, true)

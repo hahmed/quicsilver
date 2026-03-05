@@ -52,7 +52,7 @@ module Quicsilver
 
           raise "Stream handle not found for stream #{stream.stream_id}" unless stream.writable?
 
-          connection.send_response(stream, status, headers, body)
+          connection.send_response(stream, status, headers, body, head_request: env["REQUEST_METHOD"] == "HEAD")
           @request_registry.complete(stream.stream_id)
         else
           connection.send_error(stream, 400, "Bad Request") if stream.writable?
