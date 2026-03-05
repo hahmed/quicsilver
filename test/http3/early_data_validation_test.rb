@@ -79,7 +79,7 @@ class EarlyDataValidationTest < Minitest::Test
         env["quicsilver.early_data"] ? [425, {}, ["Too Early"]] : [200, {}, ["OK"]]
       })
 
-    connection.stub(:send_response, ->(s, status, h, b) { response_status = status }) do
+    connection.stub(:send_response, ->(s, status, h, b, **_kw) { response_status = status }) do
       server.instance_variable_get(:@request_handler).call(connection, stream, early_data: true)
     end
 
