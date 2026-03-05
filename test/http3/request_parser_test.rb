@@ -337,17 +337,16 @@ class RequestParserTest < Minitest::Test
   end
 
   def test_allows_te_trailers
-    # RFC 9114 §4.2: "te" with value "trailers" is the one exception
-    # This test documents current behavior — we reject all te values.
-    # A future enhancement could allow te: trailers specifically.
-    assert_raises(Quicsilver::Protocol::MessageError) do
-      headers_payload = build_qpack_headers(
-        ":method" => "GET", ":scheme" => "https",
-        ":authority" => "localhost:4433", ":path" => "/",
-        "te" => "trailers"
-      )
-      Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)).parse
-    end
+    # RFC 9114 §4.2: "te" with value "trailers" is the one permitted exception
+    headers_payload = build_qpack_headers(
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "localhost:4433", ":path" => "/",
+      "te" => "trailers"
+    )
+    parser = Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload))
+    parser.parse
+
+    assert_equal "trailers", parser.headers["te"]
   end
 
   def test_frames_are_recorded

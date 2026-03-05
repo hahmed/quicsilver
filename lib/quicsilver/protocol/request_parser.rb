@@ -210,8 +210,9 @@ module Quicsilver
             pseudo_done = true
 
             # RFC 9114 §4.2: Connection-specific headers are malformed in HTTP/3
+            # Exception: "te: trailers" is permitted (RFC 9114 §4.2)
             if FORBIDDEN_HEADERS.include?(name)
-              raise Protocol::MessageError, "Connection-specific header '#{name}' forbidden in HTTP/3"
+              raise Protocol::MessageError, "Connection-specific header '#{name}' forbidden in HTTP/3" unless name == "te" && value == "trailers"
             end
           end
 
