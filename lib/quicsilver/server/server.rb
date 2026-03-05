@@ -210,7 +210,19 @@ module Quicsilver
 
       when STREAM_EVENT_RECEIVE
         return unless (connection = @connections[connection_handle])
-        connection.buffer_data(stream_id, data)
+
+        # Unidirectional streams (control, QPACK) must be processed incrementally —
+        # they never send FIN, so waiting for RECEIVE_FIN would mean never parsing.
+        if (stream_id & 0x02) != 0  # unidirectional
+          begin
+            connection.receive_unidirectional_data(stream_id, data)
+          rescue Protocol::FrameError => e
+            Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
+            Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
+          end
+        else
+          connection.buffer_data(stream_id, data)
+        end
 
       when STREAM_EVENT_RECEIVE_FIN
         return unless (connection = @connections[connection_handle])
@@ -226,15 +238,27 @@ module Quicsilver
           connection.track_client_stream(stream_id)
           dispatch_request(connection, stream, early_data: early_data)
         else
-          connection.handle_unidirectional_stream(stream)
+          begin
+            connection.handle_unidirectional_stream(stream)
+          rescue Protocol::FrameError => e
+            Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
+            Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
+          end
         end
 
       when STREAM_EVENT_STREAM_RESET
-        return unless @connections[connection_handle]
+        return unless (connection = @connections[connection_handle])
         event = Transport::StreamEvent.new(data, "STREAM_RESET")
         Quicsilver.logger.debug("Stream #{stream_id} reset by peer with error code: 0x#{event.error_code.to_s(16)}")
-        @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
-        @request_registry.complete(stream_id)
+
+        # Closing a critical unidirectional stream is a connection error (RFC 9114 §6.2.1)
+        if connection.critical_stream?(stream_id)
+          Quicsilver.logger.error("Critical stream #{stream_id} reset by peer")
+          Quicsilver.connection_shutdown(connection_handle, Protocol::H3_CLOSED_CRITICAL_STREAM, false) rescue nil
+        else
+          @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
+          @request_registry.complete(stream_id)
+        end
 
       when STREAM_EVENT_STOP_SENDING
         return unless @connections[connection_handle]
