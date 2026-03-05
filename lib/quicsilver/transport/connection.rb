@@ -112,6 +112,67 @@ module Quicsilver
 
       # === Control Stream Handling ===
 
+      # Process incoming data on a unidirectional stream incrementally.
+      # Called on each RECEIVE event — control streams never send FIN.
+      def receive_unidirectional_data(stream_id, data)
+        @mutex.synchronize do
+          (@response_buffers[stream_id] ||= StringIO.new("".b)).write(data)
+        end
+
+        buf = @mutex.synchronize { @response_buffers[stream_id]&.string || "".b }
+        return if buf.empty?
+
+        # First time seeing this stream: identify stream type
+        unless @uni_stream_types&.key?(stream_id)
+          @uni_stream_types ||= {}
+          stream_type, type_len = Protocol.decode_varint(buf.bytes, 0)
+          return if type_len == 0  # need more data
+
+          case stream_type
+          when 0x00 # Control stream
+            raise Protocol::FrameError, "Duplicate control stream" if @control_stream_id
+            @control_stream_id = stream_id
+            @uni_stream_types[stream_id] = :control
+            # Remove the stream type byte from the buffer
+            @mutex.synchronize { @response_buffers[stream_id] = StringIO.new(buf[type_len..] || "".b) }
+          when 0x01
+            raise Protocol::FrameError, "Client must not send push streams"
+          when 0x02 # QPACK encoder stream
+            raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
+            @qpack_encoder_stream_id = stream_id
+            @uni_stream_types[stream_id] = :qpack_encoder
+            @mutex.synchronize { @response_buffers[stream_id] = StringIO.new(buf[type_len..] || "".b) }
+          when 0x03 # QPACK decoder stream
+            raise Protocol::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
+            @qpack_decoder_stream_id = stream_id
+            @uni_stream_types[stream_id] = :qpack_decoder
+            @mutex.synchronize { @response_buffers[stream_id] = StringIO.new(buf[type_len..] || "".b) }
+          else
+            # Unknown unidirectional stream types MUST be ignored (RFC 9114 §6.2)
+            @uni_stream_types[stream_id] = :unknown
+            return
+          end
+
+          buf = @mutex.synchronize { @response_buffers[stream_id]&.string || "".b }
+        end
+
+        stream_type = @uni_stream_types[stream_id]
+        return if buf.empty?
+
+        case stream_type
+        when :control
+          parse_control_frames(buf)
+          # Clear parsed data from buffer
+          @mutex.synchronize { @response_buffers[stream_id] = StringIO.new("".b) }
+        when :qpack_encoder
+          validate_qpack_encoder_data(buf)
+          @mutex.synchronize { @response_buffers[stream_id] = StringIO.new("".b) }
+        when :qpack_decoder
+          validate_qpack_decoder_data(buf)
+          @mutex.synchronize { @response_buffers[stream_id] = StringIO.new("".b) }
+        end
+      end
+
       def handle_unidirectional_stream(stream, fin: true)
         stream_id = stream.stream_id
 

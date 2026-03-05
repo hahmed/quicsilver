@@ -316,6 +316,50 @@ class ConnectionTest < Minitest::Test
     @connection.send(:validate_qpack_decoder_data, data)  # should not raise
   end
 
+  # === Incremental unidirectional stream processing ===
+
+  def test_receive_unidirectional_data_identifies_control_stream
+    # Stream type 0x00 (control) + SETTINGS frame
+    data = "\x00".b + build_settings_frame
+    @connection.receive_unidirectional_data(3, data)
+
+    assert_equal 3, @connection.control_stream_id
+    assert @connection.critical_stream?(3)
+  end
+
+  def test_receive_unidirectional_data_identifies_qpack_encoder
+    @connection.receive_unidirectional_data(7, "\x02".b)
+    assert @connection.critical_stream?(7)
+  end
+
+  def test_receive_unidirectional_data_identifies_qpack_decoder
+    @connection.receive_unidirectional_data(11, "\x03".b)
+    assert @connection.critical_stream?(11)
+  end
+
+  def test_receive_unidirectional_data_ignores_unknown_stream_type
+    # Stream type 0x21 (unknown/reserved) — must not raise
+    @connection.receive_unidirectional_data(15, "\x21".b)
+    refute @connection.critical_stream?(15)
+  end
+
+  def test_receive_unidirectional_data_handles_incremental_chunks
+    # Send stream type in first chunk, settings in second
+    @connection.receive_unidirectional_data(3, "\x00".b)
+    assert_equal 3, @connection.control_stream_id
+
+    @connection.receive_unidirectional_data(3, build_settings_frame)
+    refute_empty @connection.settings
+  end
+
+  def test_receive_unidirectional_data_rejects_duplicate_control_stream
+    @connection.receive_unidirectional_data(3, "\x00".b + build_settings_frame)
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      @connection.receive_unidirectional_data(7, "\x00".b + build_settings_frame)
+    end
+  end
+
   # === GOAWAY stream ID ===
 
   def test_last_client_stream_id_tracks_bidi_streams
