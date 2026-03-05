@@ -43,6 +43,11 @@ module Quicsilver
               if index < Protocol::STATIC_TABLE.size
                 name, value = Protocol::STATIC_TABLE[index]
                 yield name, value
+              else
+                raise Protocol::FrameError.new(
+                  "Invalid QPACK static table index #{index}",
+                  error_code: Protocol::QPACK_DECOMPRESSION_FAILED
+                )
               end
 
             # Literal with Name Reference (01NTxxxx) — name from static table, literal value
@@ -50,14 +55,17 @@ module Quicsilver
               index, bytes_consumed = decode_prefix_integer(payload.bytes, offset, 4, 0xF0)
               offset += bytes_consumed
 
-              entry = Protocol::STATIC_TABLE[index] if index < Protocol::STATIC_TABLE.size
-              name = entry ? entry[0] : nil
-
-              if name
-                value, consumed = decode_qpack_string(payload.bytes, offset)
-                offset += consumed
-                yield name, value
+              if index >= Protocol::STATIC_TABLE.size
+                raise Protocol::FrameError.new(
+                  "Invalid QPACK static table index #{index}",
+                  error_code: Protocol::QPACK_DECOMPRESSION_FAILED
+                )
               end
+
+              name = Protocol::STATIC_TABLE[index][0]
+              value, consumed = decode_qpack_string(payload.bytes, offset)
+              offset += consumed
+              yield name, value
 
             # Literal with Literal Name (001NHxxx) — both name and value are literals
             elsif (byte & 0xE0) == 0x20

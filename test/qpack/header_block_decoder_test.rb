@@ -64,6 +64,29 @@ class HeaderBlockDecoderTest < Minitest::Test
     assert_empty pairs
   end
 
+  # === Out-of-bounds static table index ===
+
+  def test_indexed_field_with_invalid_static_index_raises
+    # Indexed Field Line: 1T + 6-bit prefix integer for index 99 (table size is 99, max valid = 98)
+    # 0xFF = 11_111111 (T=1, index prefix maxed at 63), then 99-63=36 → 0x24
+    payload = "\x00\x00\xFF\x24".b
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode(payload) { |_n, _v| }
+    end
+  end
+
+  def test_literal_name_ref_with_invalid_static_index_raises
+    # Literal with Name Reference: 01NT + 4-bit prefix integer for index 99
+    # 0x5F = 0101_1111 (N=1,T=0, index prefix maxed at 15), then 99-15=84 → 0x54
+    # Followed by a literal value (length 0)
+    payload = "\x00\x00\x5F\x54\x00".b
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode(payload) { |_n, _v| }
+    end
+  end
+
   # === RequestParser injectable decoder ===
 
   def test_request_parser_accepts_decoder_kwarg
