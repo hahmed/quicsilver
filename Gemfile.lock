@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    quicsilver (0.2.0)
+    quicsilver (0.3.0)
       localhost (~> 1.6)
       logger
       rack (~> 3.0)
