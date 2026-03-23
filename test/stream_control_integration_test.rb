@@ -22,7 +22,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
   def test_client_cancel_sends_reset_to_server
     app = ->(env) {
-      sleep 2
+      sleep 0.2
       [200, {}, ["OK"]]
     }
 
@@ -30,7 +30,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
     request = @client.build_request("GET", "/slow")
 
-    sleep 0.1
+    sleep 0.05
     assert request.pending?, "Request should still be pending"
 
     result = request.cancel
@@ -50,7 +50,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
   def test_block_based_cancel
     app = ->(env) {
-      sleep 2
+      sleep 0.2
       [200, {}, ["OK"]]
     }
 
@@ -61,10 +61,10 @@ class StreamControlIntegrationTest < Minitest::Test
 
     begin
       @client.get("/slow") do |req|
-        sleep 0.1
+        sleep 0.05
         req.cancel
         cancelled = req.cancelled?
-        req.response(timeout: 0.5)
+        req.response(timeout: 0.1)
       end
     rescue Quicsilver::TimeoutError
       timed_out = true
@@ -79,7 +79,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
     app = ->(env) {
       request_started.push(true)
-      sleep 0.5
+      sleep 0.2
       [200, {}, ["OK"]]
     }
 
@@ -88,19 +88,19 @@ class StreamControlIntegrationTest < Minitest::Test
     response_thread = Thread.new { @client.get("/slow") }
     request_started.pop(timeout: 2)
 
-    shutdown_thread = Thread.new { @server.shutdown(timeout: 5) }
+    shutdown_thread = Thread.new { @server.shutdown(timeout: 2) }
 
     response = response_thread.value
     assert_equal 200, response[:status]
 
-    shutdown_thread.join(10)
+    shutdown_thread.join(5)
     refute @server.running?, "Server should be stopped after shutdown"
   end
 
   def test_concurrent_requests_with_cancel
     app = ->(env) {
       path = env["PATH_INFO"]
-      sleep(path == "/slow" ? 2 : 0.1)
+      sleep(path == "/slow" ? 0.2 : 0.02)
       [200, {}, ["Path: #{path}"]]
     }
 
@@ -124,7 +124,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
     app = ->(env) {
       request_started.push(true)
-      sleep 999  # Intentionally blocks forever
+      sleep 30  # Intentionally blocks longer than drain timeout
       [200, {}, ["never"]]
     }
 
@@ -136,8 +136,8 @@ class StreamControlIntegrationTest < Minitest::Test
     request_started.pop(timeout: 2)
 
     # Shutdown with a short drain timeout — forces DrainTimeoutError
-    shutdown_thread = Thread.new { @server.shutdown(timeout: 2) }
-    shutdown_thread.join(10)
+    shutdown_thread = Thread.new { @server.shutdown(timeout: 1) }
+    shutdown_thread.join(5)
 
     refute @server.running?, "Server should be stopped after shutdown"
     assert @server.request_registry.empty?, "Request registry should be cleaned up"
@@ -148,7 +148,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
     app = ->(env) {
       request_count.push(true)
-      sleep 0.3
+      sleep 0.15
       [200, {}, ["OK"]]
     }
 
@@ -156,7 +156,7 @@ class StreamControlIntegrationTest < Minitest::Test
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, max_concurrent_requests: 2)
     @server = Quicsilver::Server.new(@port, server_configuration: config, app: app)
     @server_thread = Thread.new { @server.start }
-    sleep 0.5
+    wait_for_server(@server)
 
     @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 5000, request_timeout: 10)
     @client.connect
@@ -172,14 +172,14 @@ class StreamControlIntegrationTest < Minitest::Test
 
   def test_cancel_after_disconnect_does_not_crash
     app = ->(env) {
-      sleep 2
+      sleep 0.2
       [200, {}, ["OK"]]
     }
 
     start_server_and_client(app)
 
     request = @client.build_request("GET", "/slow")
-    sleep 0.1
+    sleep 0.05
 
     # Disconnect first — stream handle becomes stale
     @client.disconnect
@@ -247,7 +247,7 @@ class StreamControlIntegrationTest < Minitest::Test
 
     app = ->(env) {
       request_started.push(true)
-      sleep 1
+      sleep 0.15
       app_finished.push(true)
       [200, {}, ["Should not be sent"]]
     }
@@ -273,7 +273,7 @@ class StreamControlIntegrationTest < Minitest::Test
   def start_server_and_client(app)
     @server = Quicsilver::Server.new(@port, server_configuration: default_server_config, app: app)
     @server_thread = Thread.new { @server.start }
-    sleep 0.5
+    wait_for_server(@server)
 
     @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 5000, request_timeout: 10)
     @client.connect

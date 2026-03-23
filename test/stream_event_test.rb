@@ -3,6 +3,7 @@
 require "test_helper"
 
 class StreamEventTest < Minitest::Test
+  parallelize_me!
   def test_receive_fin_extracts_handle_and_data
     payload = "HTTP/3 response data"
     event = build_receive_fin(0xCAFEBABE, payload)

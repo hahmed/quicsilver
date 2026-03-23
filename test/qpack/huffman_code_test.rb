@@ -3,6 +3,7 @@
 require "test_helper"
 
 class HuffmanCodeTest < Minitest::Test
+  parallelize_me!
   HuffmanCode = Quicsilver::Protocol::Qpack::Huffman
 
   # Table integrity

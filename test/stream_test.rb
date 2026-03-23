@@ -3,6 +3,7 @@
 require "test_helper"
 
 class StreamTest < Minitest::Test
+  parallelize_me!
   def setup
     @stream = Quicsilver::Transport::Stream.new(42)
   end

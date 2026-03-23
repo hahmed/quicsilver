@@ -3,6 +3,7 @@
 require_relative "../http3_test_helper"
 
 class ContentLengthValidationTest < Minitest::Test
+  parallelize_me!
   include HTTP3TestHelpers
 
   def test_rejects_content_length_greater_than_body

@@ -3,6 +3,7 @@
 require_relative "../http3_test_helper"
 
 class HeaderBlockDecoderTest < Minitest::Test
+  parallelize_me!
   include HTTP3TestHelpers
 
   # === Decoder class exists and works standalone ===

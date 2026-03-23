@@ -3,6 +3,7 @@
 require_relative "../http3_test_helper"
 
 class PseudoHeaderValidationTest < Minitest::Test
+  parallelize_me!
   include HTTP3TestHelpers
 
   # === RFC 9114 §4.3.1: Pseudo-header ordering ===

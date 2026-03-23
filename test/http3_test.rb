@@ -3,6 +3,7 @@
 require "test_helper"
 
 class HTTP3Test < Minitest::Test
+  parallelize_me!
   def test_encode_varint_small_values
     # 0-63: single byte with value directly encoded
     assert_equal "\x00".b, Quicsilver::Protocol.encode_varint(0)

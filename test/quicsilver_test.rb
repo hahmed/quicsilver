@@ -53,10 +53,8 @@ class QuicsilverTest < Minitest::Test
     
     # Start server in a separate thread
     server_thread = Thread.new { server.start }
-    
-    # Give server time to start
-    sleep(0.5)
-    
+    wait_for_server(server)
+
     # Test client connection
     begin
       client.connect
@@ -91,10 +89,8 @@ class QuicsilverTest < Minitest::Test
     
     # Start server in a separate thread
     server_thread = Thread.new { server.start }
-    
-    # Give server time to start
-    sleep(0.5)
-    
+    wait_for_server(server)
+
     # Test multiple clients connecting
     connected_clients = 0
     clients.each_with_index do |client, i|
@@ -126,7 +122,7 @@ class QuicsilverTest < Minitest::Test
     client = Quicsilver::Client.new("localhost", 4437, connection_timeout: 2000)
 
     server_thread = Thread.new { server.start }
-    sleep 0.5
+    wait_for_server(server)
 
     assert_raises(Quicsilver::ConnectionError, Quicsilver::TimeoutError) do
       client.connect
@@ -142,7 +138,7 @@ class QuicsilverTest < Minitest::Test
 
     # Start server in thread (since start blocks)
     server_thread = Thread.new { server.start }
-    sleep 0.3
+    wait_for_server(server)
 
     assert server.running?, "Server should be running after start"
 

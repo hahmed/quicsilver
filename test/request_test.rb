@@ -3,6 +3,7 @@
 require "test_helper"
 
 class RequestTest < Minitest::Test
+  parallelize_me!
   def setup
     @mock_client = Object.new
     def @mock_client.request_timeout; 30; end

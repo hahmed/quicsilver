@@ -32,6 +32,44 @@ Rake::TestTask.new(:test) do |t|
   t.test_files = FileList["test/**/*_test.rb"]
 end
 
+Rake::TestTask.new(:test_unit) do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = FileList["test/**/*_test.rb"].reject { |f|
+    f.include?("integration") || f.include?("stream_control") ||
+    f =~ /quicsilver_test|event_loop_test/
+  }
+end
+
+Rake::TestTask.new(:test_integration) do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = FileList[
+    "test/stream_control_integration_test.rb",
+    "test/integration/**/*_test.rb",
+    "test/quicsilver_test.rb",
+    "test/event_loop_test.rb"
+  ]
+end
+
+desc "Run unit and integration tests in parallel"
+task :test_parallel do
+  threads = []
+  results = {}
+
+  threads << Thread.new {
+    results[:unit] = system("bundle exec rake test_unit 2>&1 > /dev/null")
+  }
+  threads << Thread.new {
+    results[:integration] = system("bundle exec rake test_integration 2>&1 > /dev/null")
+  }
+
+  threads.each(&:join)
+  unless results.values.all?
+    abort "Tests failed: #{results.inspect}"
+  end
+end
+
 namespace :benchmark do
   desc "Run throughput benchmark"
   task :throughput do

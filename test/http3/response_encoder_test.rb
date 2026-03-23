@@ -3,6 +3,7 @@
 require "test_helper"
 
 class ResponseEncoderTest < Minitest::Test
+  parallelize_me!
   def test_encode_200_response
     data = encoder(200, { "content-type" => "text/plain" }, ["Hello World"]).encode
 

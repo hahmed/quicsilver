@@ -3,6 +3,7 @@
 require_relative "../http3_test_helper"
 
 class BufferLimitsTest < Minitest::Test
+  parallelize_me!
   include HTTP3TestHelpers
 
   def test_rejects_body_exceeding_max_body_size

@@ -3,6 +3,7 @@
 require "test_helper"
 
 class ConnectionTest < Minitest::Test
+  parallelize_me!
   def setup
     @connection = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
   end
