@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-23
+
+### Added
+- QPACK Huffman coding with 8-bit decode table and encode/decode caching
+- 0-RTT replay protection for unsafe HTTP methods
+- Bounded backpressure support
+- Buffer size limits to prevent memory exhaustion (configurable `max_body_size`, `max_header_size`, `max_header_count`, `max_frame_payload_size`)
+- Content-length validation
+- Multi-value header support for duplicate header fields
+- Headers validation: reject connection-specific headers, require `:authority` or `host` for http/https schemes
+- Incremental unidirectional stream processing with critical stream protection
+- QPACK encoder and decoder stream instruction validation
+- Spec-correct error signaling with error codes on `FrameError` and `MessageError`
+- Suppress response body for HEAD requests per RFC 9114 §4.1
+- Allow `te: trailers` header in requests per RFC 9114 §4.2
+- Custom ALPN support (no longer hardcoded to `h3`)
+- `Stream` and `StreamEvent` abstractions to encapsulate C extension details
+- Dual-stack (IPv4/IPv6) listener support — fixes TLS handshake failures on macOS
+- Client `PUT` method
+- Integration test suite for curl HTTP/3
+
+### Fixed
+- Memory leaks: free `StreamContext` on `SHUTDOWN_COMPLETE`, free `ConnectionContext` on `CONNECTION_SHUTDOWN_COMPLETE`, close `EventQ`/`ExecContext`/`WakeFd` on shutdown
+- Double-free and handle leaks in C extension
+- `dispatch_to_ruby` safety with `rb_protect`; client use-after-free fix
+- Infinite loop on truncated varint in request/response parsers
+- Frame ordering: `DATA` before `HEADERS` now raises `FrameError`
+- `STOP_SENDING` / `STREAM_RESET` compliance — server properly cancels streams and resets send side
+- Control stream validation: reject duplicate settings, forbidden frame types, and reserved HTTP/2 types
+- QPACK static table index 57/58 casing (`includeSubDomains`)
+- Stale stream handle guard in cancel and C extension
+- Replaced `Thread.kill` with `Thread.raise(DrainTimeoutError)` for clean drain
+- Binary encoding for `buffer_data` and empty FIN handling
+- Linux/GitHub CI: use epoll instead of kqueue on non-Darwin platforms
+- Circular require warning
+
+### Changed
+- Reorganized gem structure: `protocol/`, `server/`, `transport/` directories
+- Server owns the 0-RTT policy
+- QPACK encoder uses O(1) static table lookup with multi-level caching
+- QPACK decoder uses string-based decoding with result caching
+- HTTP/3 parsers optimized with parse-level caching and lazy allocation
+- Varint encoding/decoding optimized with precomputed tables
+- HTTP/3 encoders handle framing only; QPACK handles field encoding (cleaner separation)
+- MsQuic custom execution mode with configurable worker pool and throughput settings
+
+### Limitations
+- Client does not reuse connections
+
 ## [0.2.0] - 2025-12-17
 
 ### Added
