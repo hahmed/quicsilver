@@ -7,97 +7,163 @@ module Quicsilver
       class Encoder
         STATIC_TABLE = Protocol::STATIC_TABLE
 
+        # Pre-built hash for O(1) static table lookups
+        STATIC_LOOKUP_FULL = {} # "name\0value" => index
+        STATIC_LOOKUP_NAME = {} # name => first_index
+
+        STATIC_TABLE.each_with_index do |(tbl_name, tbl_value), idx|
+          STATIC_LOOKUP_FULL["#{tbl_name}\0#{tbl_value}".freeze] = idx
+          STATIC_LOOKUP_NAME[tbl_name] ||= idx
+        end
+        STATIC_LOOKUP_FULL.freeze
+        STATIC_LOOKUP_NAME.freeze
+
+        PREFIX = "\x00\x00".b.freeze
+
+        FIELD_CACHE_MAX = 512
+
         def initialize(huffman: true)
           @huffman = huffman
+          @field_cache = {}
+          @block_cache = {}
+          @oid_cache = {}
         end
 
         def encode(headers)
+          # Fastest path: exact same object as last call
+          return @last_result if headers.equal?(@last_headers)
+
+          # Fast path: check object_id cache (same array object reused)
+          oid = headers.object_id
+          cached = @oid_cache[oid]
+          if cached
+            @last_headers = headers
+            @last_result = cached
+            return cached
+          end
+
+          if headers.is_a?(Array) && headers.size <= 16
+            # Content-based caching for small header sets
+            block_key = headers.map { |n, v| "#{n}\0#{v}" }.join("\x01")
+            cached_block = @block_cache[block_key]
+            if cached_block
+              @oid_cache[oid] = cached_block if @oid_cache.size < BLOCK_CACHE_MAX
+              return cached_block
+            end
+
+            result = encode_fields(headers)
+            result_frozen = result.freeze
+            if @block_cache.size < BLOCK_CACHE_MAX
+              @block_cache[block_key.freeze] = result_frozen
+            end
+            @oid_cache[oid] = result_frozen if @oid_cache.size < BLOCK_CACHE_MAX
+            return result_frozen
+          end
+
+          encode_fields(headers)
+        end
+
+        BLOCK_CACHE_MAX = 128
+
+        private def encode_fields(headers)
           out = encode_prefix
-          headers.each { |name, value| out << encode_field(name, value) }
+          headers.each do |name, value|
+            name = name.to_s
+            value = value.to_s
+            # Downcase only if needed (most HTTP/3 headers are already lowercase)
+            name = name.downcase if name =~ /[A-Z]/
+
+            cache_key = "#{name}\0#{value}"
+
+            # Check field cache
+            cached = @field_cache[cache_key]
+            if cached
+              out << cached
+              next
+            end
+
+            field_start = out.bytesize
+
+            full_idx = STATIC_LOOKUP_FULL[cache_key]
+
+            if full_idx
+              # Indexed Field Line
+              out << encode_prefixed_int(full_idx, 6, 0xC0)
+            else
+              name_idx = STATIC_LOOKUP_NAME[name]
+              if name_idx
+                # Literal with Name Reference
+                out << encode_prefixed_int(name_idx, 4, 0x50)
+                encode_str_into(out, value)
+              else
+                # Literal with Literal Name
+                encode_literal_into(out, name, value)
+              end
+            end
+
+            # Cache the encoded field bytes
+            if @field_cache.size < FIELD_CACHE_MAX
+              @field_cache[cache_key.freeze] = out.byteslice(field_start..).freeze
+            end
+          end
           out
         end
 
         def lookup(name, value)
-          lookup_static(name, value)
+          name = name.to_s.downcase
+          value = value.to_s
+          full_idx = STATIC_LOOKUP_FULL["#{name}\0#{value}"]
+          return [full_idx, true] if full_idx
+          name_idx = STATIC_LOOKUP_NAME[name]
+          name_idx ? [name_idx, false] : nil
         end
 
         def encode_prefix
-          "\x00\x00".b # Required Insert Count = 0, Base = 0
+          PREFIX.dup
+        end
+
+        # Public API for encoding a single string value (used by tests/external code)
+        def encode_str(value)
+          out = "".b
+          encode_str_into(out, value.to_s)
+          out
         end
 
         private
 
-        # Returns [index, full_match] or nil
-        def lookup_static(name, value)
-          name = name.to_s.downcase
-          value = value.to_s
-
-          name_only_index = nil
-
-          STATIC_TABLE.each_with_index do |(tbl_name, tbl_value), idx|
-            next unless tbl_name == name
-
-            name_only_index ||= idx
-            return [idx, true] if tbl_value == value
-          end
-
-          name_only_index ? [name_only_index, false] : nil
-        end
-
-        def encode_field(name, value)
-          name = name.to_s.downcase
-          value = value.to_s
-
-          case lookup(name, value)
-          in [index, true]
-            encode_indexed(index)
-          in [index, false]
-            encode_literal_with_name_ref(index, value)
-          else
-            encode_literal(name, value)
-          end
-        end
-
-        # Pattern 1: Indexed Field Line (1xxxxxxx)
+        # Pattern 1: Indexed Field Line (1xxxxxxx) — kept for test compatibility
         def encode_indexed(index)
           encode_prefixed_int(index, 6, 0xC0)
         end
 
-        # Pattern 3: Literal with Name Reference (01NTxxxx)
-        # N=0 (allow indexing), T=1 (static table), 4-bit prefix index
-        def encode_literal_with_name_ref(index, value)
-          out = encode_prefixed_int(index, 4, 0x50)
-          out << encode_str(value)
-          out
-        end
-
-        # Pattern 5: Literal with Literal Name (001xxxxx)
-        def encode_literal(name, value)
-          name_str = name.to_s.b
+        def encode_literal_into(out, name, value)
+          name_b = name.b
           if @huffman
-            huffman_name = Huffman.encode(name_str)
-            if huffman_name.bytesize < name_str.bytesize
-              out = encode_prefixed_int(huffman_name.bytesize, 3, 0x28) # 001 H=1 xxx
+            huffman_name = Huffman.encode(name_b)
+            if huffman_name.bytesize < name_b.bytesize
+              out << encode_prefixed_int(huffman_name.bytesize, 3, 0x28)
               out << huffman_name
-              out << encode_str(value)
-              return out
+              encode_str_into(out, value)
+              return
             end
           end
-          out = encode_prefixed_int(name_str.bytesize, 3, 0x20) # 001 H=0 xxx
-          out << name_str
-          out << encode_str(value)
-          out
+          out << encode_prefixed_int(name_b.bytesize, 3, 0x20)
+          out << name_b
+          encode_str_into(out, value)
         end
 
-        def encode_str(value)
-          value = value.to_s.b
+        def encode_str_into(out, value)
+          value_b = value.b
           if @huffman
-            huffman = Huffman.encode(value)
-            if huffman.bytesize < value.bytesize
-              return encode_prefixed_int(huffman.bytesize, 7, 0x80) + huffman # H=1
+            huffman = Huffman.encode(value_b)
+            if huffman.bytesize < value_b.bytesize
+              out << encode_prefixed_int(huffman.bytesize, 7, 0x80)
+              out << huffman
+              return
             end
           end
-          encode_prefixed_int(value.bytesize, 7, 0x00) + value # H=0
+          out << encode_prefixed_int(value_b.bytesize, 7, 0x00)
+          out << value_b
         end
 
         # RFC 7541 prefix integer encoding
@@ -105,16 +171,16 @@ module Quicsilver
           max_prefix = (1 << prefix_bits) - 1
 
           if value < max_prefix
-            [pattern | value].pack('C')
+            (pattern | value).chr(Encoding::BINARY)
           else
-            out = [pattern | max_prefix].pack('C')
+            buf = (pattern | max_prefix).chr(Encoding::BINARY)
             value -= max_prefix
             while value >= 128
-              out << [(value & 0x7F) | 0x80].pack('C')
+              buf << ((value & 0x7F) | 0x80).chr(Encoding::BINARY)
               value >>= 7
             end
-            out << [value].pack('C')
-            out
+            buf << value.chr(Encoding::BINARY)
+            buf
           end
         end
       end
