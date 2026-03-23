@@ -278,68 +278,175 @@ module Quicsilver
           node[:value] = byte
         end
 
+        # Build 8-bit-at-a-time decode acceleration table.
+        # DECODE_ACCEL[state_id][byte] = [new_state_id, emitted_bytes_array]
+        # State 0 = root node.
+        DECODE_ACCEL = begin
+          # Assign integer IDs to all tree nodes
+          node_to_id = {}
+          id_to_node = []
+          queue = [REVERSE_TABLE]
+          node_to_id[REVERSE_TABLE.object_id] = 0
+          id_to_node << REVERSE_TABLE
+
+          i = 0
+          while i < queue.size
+            node = queue[i]
+            [0, 1].each do |bit|
+              child = node[bit]
+              next unless child
+              unless node_to_id.key?(child.object_id)
+                node_to_id[child.object_id] = id_to_node.size
+                id_to_node << child
+                queue << child
+              end
+            end
+            i += 1
+          end
+
+          num_states = id_to_node.size
+          table = Array.new(num_states) { Array.new(256) }
+
+          num_states.times do |sid|
+            256.times do |byte_val|
+              node = id_to_node[sid]
+              emitted = []
+              valid = true
+              trailing_bits = 0  # bits since last emitted symbol
+              7.downto(0) do |bit_idx|
+                bit = (byte_val >> bit_idx) & 1
+                child = node[bit]
+                unless child
+                  valid = false
+                  break
+                end
+                if child.key?(:value)
+                  emitted << child[:value]
+                  node = REVERSE_TABLE
+                  trailing_bits = 0
+                else
+                  node = child
+                  trailing_bits += 1
+                end
+              end
+              if valid
+                new_sid = node_to_id[node.object_id]
+                table[sid][byte_val] = [new_sid, emitted, trailing_bits].freeze
+              else
+                table[sid][byte_val] = nil
+              end
+            end
+            table[sid].freeze
+          end
+          table.freeze
+        end
+
+
+
+
+        # Pre-compute flat arrays for faster table access (avoid hash lookup per byte)
+        ENCODE_CODES  = Array.new(256) { |i| TABLE[i][0] }
+        ENCODE_LENGTHS = Array.new(256) { |i| TABLE[i][1] }
+
+        # Thread-safe caches for frequently encoded/decoded strings
+        # Using module-level constants for caches — YJIT can inline constant access
+        HUFF_ENCODE_CACHE = {}
+        HUFF_ENCODE_MUTEX = Mutex.new
+        HUFF_DECODE_CACHE = {}
+        HUFF_DECODE_MUTEX = Mutex.new
+        CACHE_MAX = 256
 
         class << self
           def encode(data)
-            bits = 0
-            bit_length = 0
+            # Check cache first (fast path) — returns frozen string
+            cached = HUFF_ENCODE_CACHE[data]
+            return cached if cached
 
-            data.each_byte do |byte|
-              code, length = TABLE[byte]
-              bits = (bits << length) | code
-              bit_length += length
-            end
+            result = encode_uncached(data)
 
-            # Pad with EOS prefix (1-bits) to next byte boundary
-            padding = (8 - (bit_length % 8)) % 8
-            bits = (bits << padding) | ((1 << padding) - 1)
-            bit_length += padding
-
-            # Pack into bytes
-            byte_count = bit_length / 8
-            bytes = Array.new(byte_count)
-            (byte_count - 1).downto(0) do |i|
-              bytes[i] = bits & 0xff
-              bits >>= 8
-            end
-            bytes.pack("C*")
-          end
-
-          def decode(encoded_data)
-            return "".b if encoded_data.empty?
-
-            node = REVERSE_TABLE
-            output = []
-            symbol_start_bit = 0
-            bit_pos = 0
-            output_at_symbol_start = 0
-
-            encoded_data.each_byte do |byte|
-              7.downto(0) do |i|
-                bit = (byte >> i) & 1
-                next_node = node[bit]
-                return nil unless next_node # invalid code
-                bit_pos += 1
-
-                if next_node.key?(:value)
-                  output << next_node[:value]
-                  node = REVERSE_TABLE
-                  output_at_symbol_start = output.length
-                  symbol_start_bit = bit_pos
-                else
-                  node = next_node
-                end
+            # Cache short strings (frozen)
+            if data.bytesize <= 128 && HUFF_ENCODE_CACHE.size < CACHE_MAX
+              HUFF_ENCODE_MUTEX.synchronize do
+                HUFF_ENCODE_CACHE[data.frozen? ? data : data.dup.freeze] = result.freeze if HUFF_ENCODE_CACHE.size < CACHE_MAX
               end
             end
 
+            result
+          end
+
+          def encode_uncached(data)
+            buf = 0
+            buf_len = 0
+            out = []
+
+            data.each_byte do |byte|
+              code = ENCODE_CODES[byte]
+              length = ENCODE_LENGTHS[byte]
+              buf = (buf << length) | code
+              buf_len += length
+
+              # Flush complete bytes
+              while buf_len >= 8
+                buf_len -= 8
+                out << ((buf >> buf_len) & 0xff)
+              end
+            end
+
+            # Pad with EOS prefix (1-bits) to next byte boundary
+            if buf_len > 0
+              padding = 8 - buf_len
+              out << (((buf << padding) | ((1 << padding) - 1)) & 0xff)
+            end
+
+            out.pack("C*")
+          end
+
+          def decode(encoded_data)
+            # Check cache first (fast path) — returns frozen string
+            cached = HUFF_DECODE_CACHE[encoded_data]
+            return cached if cached
+
+            return "".b if encoded_data.empty?
+
+            result = decode_uncached(encoded_data)
+
+            # Cache short encoded data (frozen)
+            if encoded_data.bytesize <= 128 && result && HUFF_DECODE_CACHE.size < CACHE_MAX
+              HUFF_DECODE_MUTEX.synchronize do
+                key = encoded_data.frozen? ? encoded_data : encoded_data.dup.freeze
+                HUFF_DECODE_CACHE[key] = result.freeze if HUFF_DECODE_CACHE.size < CACHE_MAX
+              end
+            end
+
+            result
+          end
+
+          def decode_uncached(encoded_data)
+            return "".b if encoded_data.empty?
+
+            state = 0
+            output = []
+            bits_since_symbol = 0
+
+            encoded_data.each_byte do |byte|
+              entry = DECODE_ACCEL[state][byte]
+              return nil unless entry # invalid code
+
+              new_state, emitted, trailing = entry
+              output.concat(emitted) unless emitted.empty?
+              # trailing = bits since last emitted symbol within this byte processing
+              # If no symbols were emitted, add 8 to running count
+              bits_since_symbol = emitted.empty? ? bits_since_symbol + 8 : trailing
+              state = new_state
+            end
+
             # Padding validation (RFC 7541 §5.2):
-            padding_bits = bit_pos - symbol_start_bit
-            return nil if padding_bits >= 8
+            return nil if bits_since_symbol >= 8
 
             # Padding bits must all be 1
-            if padding_bits > 0
+            if bits_since_symbol > 0
               last_byte = encoded_data.getbyte(-1)
-              mask = (1 << padding_bits) - 1
+              mask = (1 << bits_since_symbol) - 1
               return nil if (last_byte & mask) != mask
             end
 
