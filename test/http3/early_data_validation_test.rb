@@ -7,6 +7,7 @@ require_relative "../http3_test_helper"
 # The server decides whether to reject unsafe methods on 0-RTT or pass them
 # through to the Rack app with env["quicsilver.early_data"] set.
 class EarlyDataValidationTest < Minitest::Test
+  parallelize_me!
   include HTTP3TestHelpers
 
   SAFE_METHODS = %w[GET HEAD OPTIONS].freeze

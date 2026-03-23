@@ -3,6 +3,7 @@
 require_relative "../http3_test_helper"
 
 class MultiValueHeadersTest < Minitest::Test
+  parallelize_me!
   include HTTP3TestHelpers
 
   def test_request_duplicate_headers_combined_with_comma

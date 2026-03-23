@@ -3,6 +3,7 @@
 require "test_helper"
 
 class ServerTest < Minitest::Test
+  parallelize_me!
   def test_initialize_with_defaults
     server = create_server
 

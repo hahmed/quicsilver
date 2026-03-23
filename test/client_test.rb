@@ -3,6 +3,7 @@
 require "test_helper"
 
 class ClientTest < Minitest::Test
+  parallelize_me!
   def test_initialize_with_hostname_and_port
     client = Quicsilver::Client.new("localhost", 4433)
 

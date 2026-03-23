@@ -4,6 +4,7 @@ require "test_helper"
 require "timeout"
 
 class RequestParserTest < Minitest::Test
+  parallelize_me!
   def test_parses_get
     headers_payload = build_qpack_headers(
       ":method" => "GET",

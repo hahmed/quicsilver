@@ -4,6 +4,7 @@ require "test_helper"
 require "timeout"
 
 class ResponseParserTest < Minitest::Test
+  parallelize_me!
   def test_parses_200_response
     headers_payload = build_qpack_response_headers(200, {
       "content-type" => "text/plain"

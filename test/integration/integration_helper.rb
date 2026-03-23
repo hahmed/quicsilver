@@ -13,10 +13,11 @@ module IntegrationHelpers
     "curl"
   end
 
+  PORT_MUTEX = Mutex.new
   @@integration_port_counter = 7000
 
   def next_port
-    @@integration_port_counter += 1
+    PORT_MUTEX.synchronize { @@integration_port_counter += 1 }
   end
 
   def start_server(app)
@@ -24,7 +25,7 @@ module IntegrationHelpers
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
     @server = Quicsilver::Server.new(@port, app: app, server_configuration: config)
     @server_thread = Thread.new { @server.start }
-    sleep 0.5
+    wait_for_server(@server)
   end
 
   def stop_server
@@ -43,8 +44,15 @@ module IntegrationHelpers
   end
 
   def curl_http3_available?
-    output, = Open3.capture3(CURL_BIN, "--version")
-    output.include?("HTTP3")
+    return @@curl_http3_available if defined?(@@curl_http3_available)
+    # Check for nghttp3 linkage — much faster than `curl --version` (20ms vs 5s on macOS)
+    if RUBY_PLATFORM =~ /darwin/
+      output, = Open3.capture3("otool", "-L", CURL_BIN)
+      @@curl_http3_available = output.include?("nghttp3")
+    else
+      output, = Open3.capture3(CURL_BIN, "--version")
+      @@curl_http3_available = output.include?("HTTP3")
+    end
   end
 
   CurlResult = Struct.new(:stdout, :stderr, :status) do

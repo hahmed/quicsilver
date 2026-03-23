@@ -3,6 +3,7 @@
 require "test_helper"
 
 class QpackEncoderTest < Minitest::Test
+  parallelize_me!
   def setup
     @encoder = Quicsilver::Protocol::Qpack::Encoder.new
   end

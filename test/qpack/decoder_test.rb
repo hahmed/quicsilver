@@ -3,6 +3,7 @@
 require "test_helper"
 
 class QpackDecoderTest < Minitest::Test
+  parallelize_me!
   include Quicsilver::Protocol::Qpack::Decoder
 
   # decode_qpack_string with H=1 (Huffman)

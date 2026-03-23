@@ -165,7 +165,7 @@ module Quicsilver
       drain(timeout: timeout)
 
       # Grace period: let pending responses reach clients
-      sleep 0.5
+      sleep [0.5, timeout * 0.1].min
 
       # Log any requests that didn't complete
       unless @request_registry.empty?
@@ -177,7 +177,7 @@ module Quicsilver
 
       # Phase 3: Shutdown connections
       @connections.each_value(&:shutdown)
-      sleep 0.1
+      sleep [0.1, timeout * 0.05].min
 
       # Phase 4: Hard stop
       stop

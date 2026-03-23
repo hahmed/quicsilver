@@ -1,6 +1,7 @@
 require "test_helper"
 
 class ServerConfigurationTest < Minitest::Test
+  parallelize_me!
   def test_default_initialization
     config = fetch_server_configuration_with_certs
 

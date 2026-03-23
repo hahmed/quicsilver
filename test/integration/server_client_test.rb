@@ -156,7 +156,7 @@ class ServerClientIntegrationTest < Minitest::Test
       client.connect
       assert client.connected?
       client.disconnect
-      sleep 0.1
+      sleep 0.02
     end
 
     assert @server.running?, "Server should still be running after client disconnect cycles"
@@ -169,6 +169,6 @@ class ServerClientIntegrationTest < Minitest::Test
     @server = Quicsilver::Server.new(@port, app: app, server_configuration: config)
 
     @server_thread = Thread.new { @server.start }
-    sleep 0.5 # Wait for server to bind
+    wait_for_server(@server)
   end
 end

@@ -33,7 +33,7 @@ class EventLoopTest < Minitest::Test
   def test_request_completes_under_100ms
     server = create_server(4470)
     server_thread = Thread.new { server.start }
-    sleep(0.3)
+    wait_for_server(server)
 
     client = Quicsilver::Client.new("localhost", 4470, connection_timeout: 5000)
 

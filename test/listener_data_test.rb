@@ -3,6 +3,7 @@
 require "test_helper"
 
 class ListenerDataTest < Minitest::Test
+  parallelize_me!
   def test_initialize_and_defaults
     data = Quicsilver::Server::ListenerData.new(12345, 67890)
 

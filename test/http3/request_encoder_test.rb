@@ -3,6 +3,7 @@
 require "test_helper"
 
 class RequestEncoderTest < Minitest::Test
+  parallelize_me!
   # Core functionality tests
   def test_encode_get_request
     data = encoder("GET", "/test").encode

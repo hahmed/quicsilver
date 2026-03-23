@@ -3,6 +3,7 @@
 require "test_helper"
 
 class QuicStreamTest < Minitest::Test
+  parallelize_me!
   def test_initializes_with_stringio_buffer
     stream = Quicsilver::Transport::InboundStream.new(0)
     assert_instance_of StringIO, stream.buffer
