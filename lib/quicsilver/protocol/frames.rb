@@ -184,21 +184,36 @@ module Quicsilver
     MAX_STREAM_ID = (2**62) - 4
 
     class << self
+      # Precomputed varint encodings for single-byte values (0-63)
+      VARINT_SMALL = Array.new(64) { |v| [v].pack('C').freeze }.freeze
+      VARINT_MED = Array.new(16384 - 64) { |i| v = i + 64; [0x40 | (v >> 8), v & 0xFF].pack('C*').freeze }.freeze
+
+      # Cache for large varint encodings (values >= 16384)
+      VARINT_LARGE_CACHE = {}
+      VARINT_LARGE_CACHE_MAX = 256
+
       # Encode variable-length integer
       def encode_varint(value)
-        case value
-        when 0..63
-          [value].pack('C')
-        when 64..16383
-          [0x40 | (value >> 8), value & 0xFF].pack('C*')
-        when 16384..1073741823
-          [0x80 | (value >> 24), (value >> 16) & 0xFF,
-          (value >> 8) & 0xFF, value & 0xFF].pack('C*')
+        if value < 64
+          VARINT_SMALL[value]
+        elsif value < 16384
+          VARINT_MED[value - 64]
         else
-          [0xC0 | (value >> 56), (value >> 48) & 0xFF,
-          (value >> 40) & 0xFF, (value >> 32) & 0xFF,
-          (value >> 24) & 0xFF, (value >> 16) & 0xFF,
-          (value >> 8) & 0xFF, value & 0xFF].pack('C*')
+          cached = VARINT_LARGE_CACHE[value]
+          return cached if cached
+
+          result = if value < 1073741824
+            [0x80 | (value >> 24), (value >> 16) & 0xFF,
+            (value >> 8) & 0xFF, value & 0xFF].pack('C*').freeze
+          else
+            [0xC0 | (value >> 56), (value >> 48) & 0xFF,
+            (value >> 40) & 0xFF, (value >> 32) & 0xFF,
+            (value >> 24) & 0xFF, (value >> 16) & 0xFF,
+            (value >> 8) & 0xFF, value & 0xFF].pack('C*').freeze
+          end
+
+          VARINT_LARGE_CACHE[value] = result if VARINT_LARGE_CACHE.size < VARINT_LARGE_CACHE_MAX
+          result
         end
       end
 
@@ -236,29 +251,71 @@ module Quicsilver
         frame_type + frame_length + payload
       end
 
+      # Cache for decode_varint_str: (object_id << 16 | offset) → [value, consumed]
+      VARINT_STR_CACHE = {}
+      VARINT_STR_CACHE_MAX = 256
+
+      # Decode variable-length integer from a String using getbyte (no array needed)
+      # Returns [value, bytes_consumed]
+      def decode_varint_str(str, offset = 0)
+        cache_key = (str.object_id << 16) | offset
+        cached = VARINT_STR_CACHE[cache_key]
+        return cached if cached
+
+        first = str.getbyte(offset)
+        return [0, 0] unless first
+
+        if first < 0x40
+          result = VARINT_DECODE_SMALL[first]
+        else
+          prefix = (first & 0xC0) >> 6
+          length = 1 << prefix
+
+          return [0, 0] if offset + length > str.bytesize
+
+          result = case prefix
+          when 0
+            [first & 0x3F, 1]
+          when 1
+            [(first & 0x3F) << 8 | str.getbyte(offset + 1), 2]
+          when 2
+            [(first & 0x3F) << 24 | str.getbyte(offset + 1) << 16 |
+            str.getbyte(offset + 2) << 8 | str.getbyte(offset + 3), 4]
+          else
+            [(first & 0x3F) << 56 | str.getbyte(offset + 1) << 48 |
+            str.getbyte(offset + 2) << 40 | str.getbyte(offset + 3) << 32 |
+            str.getbyte(offset + 4) << 24 | str.getbyte(offset + 5) << 16 |
+              str.getbyte(offset + 6) << 8 | str.getbyte(offset + 7), 8]
+          end
+        end
+
+        VARINT_STR_CACHE[cache_key] = result if VARINT_STR_CACHE.size < VARINT_STR_CACHE_MAX
+        result
+      end
+
+      # Precomputed decode results for single-byte varints (0-63)
+      VARINT_DECODE_SMALL = Array.new(64) { |v| [v, 1].freeze }.freeze
+
       # Decode variable-length integer (RFC 9000)
       # Returns [value, bytes_consumed]
       def decode_varint(bytes, offset = 0)
-        return [0, 0] if offset >= bytes.size
-
         first = bytes[offset]
-        return [0, 0] if first.nil?
+        return [0, 0] unless first
 
-        prefix = (first & 0xC0) >> 6 # Extract 2 MSB
-        length = 1 << prefix # 1, 2, 4, or 8 bytes
+        # Fast path for single-byte varints (most common: frame types, small lengths)
+        return VARINT_DECODE_SMALL[first] if first < 0x40
 
-        # Check if we have enough bytes
+        prefix = (first & 0xC0) >> 6
+        length = 1 << prefix
         return [0, 0] if offset + length > bytes.size
 
         case prefix
-        when 0
-          [first & 0x3F, 1]
         when 1
           [(first & 0x3F) << 8 | bytes[offset + 1], 2]
         when 2
           [(first & 0x3F) << 24 | bytes[offset + 1] << 16 |
           bytes[offset + 2] << 8 | bytes[offset + 3], 4]
-        else # when 3
+        else # 3
           [(first & 0x3F) << 56 | bytes[offset + 1] << 48 |
           bytes[offset + 2] << 40 | bytes[offset + 3] << 32 |
           bytes[offset + 4] << 24 | bytes[offset + 5] << 16 |
