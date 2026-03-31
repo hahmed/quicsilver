@@ -9,7 +9,8 @@ module Quicsilver
         :keep_alive_interval_ms, :congestion_control_algorithm, :migration_enabled,
         :disconnect_timeout_ms, :handshake_idle_timeout_ms,
         :max_body_size, :max_header_size, :max_header_count, :max_frame_payload_size,
-        :early_data_policy
+        :early_data_policy,
+        :mode
 
       QUIC_SERVER_RESUME_AND_ZERORTT = 1
       QUIC_SERVER_RESUME_ONLY = 2
@@ -82,6 +83,14 @@ module Quicsilver
         @early_data_policy = options.fetch(:early_data_policy, :reject)
         unless %i[reject allow].include?(@early_data_policy)
           raise ServerConfigurationError, "Invalid early_data_policy: #{@early_data_policy.inspect} (must be :reject or :allow)"
+        end
+
+        # Application interface mode:
+        # :rack (default) — app is a Rack app, auto-wrapped with Protocol::Rack::Adapter
+        # :falcon — app is a native protocol-http app, used directly
+        @mode = options.fetch(:mode, :rack)
+        unless %i[rack falcon].include?(@mode)
+          raise ServerConfigurationError, "Invalid mode: #{@mode.inspect} (must be :rack or :falcon)"
         end
 
         @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file

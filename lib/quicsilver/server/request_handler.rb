@@ -3,68 +3,31 @@
 module Quicsilver
   class Server
     class RequestHandler
-      # Safe HTTP methods allowed in 0-RTT early data (RFC 9110 §9.2.1)
       SAFE_METHODS = %w[GET HEAD OPTIONS].freeze
 
+      attr_reader :adapter
+
       def initialize(app:, configuration:, request_registry:, cancelled_streams:, cancelled_mutex:)
-        @app = app
         @configuration = configuration
         @request_registry = request_registry
         @cancelled_streams = cancelled_streams
         @cancelled_mutex = cancelled_mutex
+        @adapter = Protocol::Adapter.new(app)
       end
 
       def call(connection, stream, early_data: false)
-        parser = Protocol::RequestParser.new(
-          stream.data,
-          max_body_size: @configuration.max_body_size,
-          max_header_size: @configuration.max_header_size,
-          max_header_count: @configuration.max_header_count,
-          max_frame_payload_size: @configuration.max_frame_payload_size
-        )
-        parser.parse
-        parser.validate_headers!  # raises MessageError for missing/invalid pseudo-headers
-        env = parser.to_rack_env
+        request = parse_request(connection, stream, early_data: early_data)
+        return unless request
 
-        if env && @app
-          env["quicsilver.early_data"] = early_data
+        response = @adapter.call(request)
 
-          # RFC 8470: reject unsafe methods on 0-RTT unless app opted in
-          if @configuration.early_data_policy == :reject &&
-             early_data && !SAFE_METHODS.include?(env["REQUEST_METHOD"])
-            connection.send_error(stream, 425, "Too Early") if stream.writable?
-            return
-          end
-
-          @request_registry.track(
-            stream.stream_id,
-            connection.handle,
-            path: env["PATH_INFO"] || "/",
-            method: env["REQUEST_METHOD"] || "GET"
-          )
-
-          status, headers, body = @app.call(env)
-
-          if cancelled_stream?(stream.stream_id)
-            Quicsilver.logger.debug("Skipping response for cancelled stream #{stream.stream_id}")
-            return
-          end
-
-          raise "Stream handle not found for stream #{stream.stream_id}" unless stream.writable?
-
-          connection.send_response(stream, status, headers, body, head_request: env["REQUEST_METHOD"] == "HEAD")
-          @request_registry.complete(stream.stream_id)
-        else
-          connection.send_error(stream, 400, "Bad Request") if stream.writable?
-        end
+        send_response(connection, stream, request, response)
       rescue Server::DrainTimeoutError
         Quicsilver.logger.debug("Request interrupted by drain: stream #{stream.stream_id}")
       rescue Protocol::FrameError => e
-        # Frame errors are connection-level: signal via CONNECTION_CLOSE with H3 error code
         Quicsilver.logger.error("Frame error: #{e.message} (0x#{e.error_code.to_s(16)})")
         Quicsilver.connection_shutdown(connection.handle, e.error_code, false) rescue nil
       rescue Protocol::MessageError => e
-        # Message errors are stream-level: signal via RESET_STREAM with H3 error code
         Quicsilver.logger.error("Message error: #{e.message} (0x#{e.error_code.to_s(16)})")
         Quicsilver.stream_reset(stream.stream_handle, e.error_code) if stream.writable?
       rescue => e
@@ -77,6 +40,69 @@ module Quicsilver
       end
 
       private
+
+      def parse_request(connection, stream, early_data: false)
+        parser = Protocol::RequestParser.new(
+          stream.data,
+          max_body_size: @configuration.max_body_size,
+          max_header_size: @configuration.max_header_size,
+          max_header_count: @configuration.max_header_count,
+          max_frame_payload_size: @configuration.max_frame_payload_size
+        )
+        parser.parse
+        parser.validate_headers!
+
+        headers = parser.headers
+        unless headers && !headers.empty?
+          connection.send_error(stream, 400, "Bad Request") if stream.writable?
+          return
+        end
+
+        method = headers[":method"]
+
+        if @configuration.early_data_policy == :reject &&
+           early_data && !SAFE_METHODS.include?(method)
+          connection.send_error(stream, 425, "Too Early") if stream.writable?
+          return
+        end
+
+        request = @adapter.build_request(headers)
+        request.headers.add("quicsilver-early-data", early_data.to_s)
+
+        if request.body && parser.body && parser.body.size > 0
+          parser.body.rewind
+          body_data = parser.body.read
+          request.body.write(body_data) unless body_data.empty?
+        end
+        request.body&.close_write
+
+        @request_registry.track(
+          stream.stream_id, connection.handle,
+          path: headers[":path"] || "/", method: method || "GET"
+        )
+
+        request
+      end
+
+      def send_response(connection, stream, request, response)
+        if cancelled_stream?(stream.stream_id)
+          Quicsilver.logger.debug("Skipping response for cancelled stream #{stream.stream_id}")
+          return
+        end
+
+        raise "Stream handle not found for stream #{stream.stream_id}" unless stream.writable?
+
+        response_headers = {}
+        response.headers&.each { |name, value| response_headers[name] = value }
+
+        if response.body&.length && !response_headers.key?("content-length")
+          response_headers["content-length"] = response.body.length.to_s
+        end
+
+        connection.send_response(stream, response.status, response_headers, response.body || [],
+          head_request: request.head?)
+        @request_registry.complete(stream.stream_id)
+      end
 
       def cancelled_stream?(stream_id)
         @cancelled_mutex.synchronize { @cancelled_streams.include?(stream_id) }

@@ -44,6 +44,9 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency "minitest", "~> 5.0"
   spec.add_development_dependency "minitest-focus", "~> 1.3"
   spec.add_development_dependency "benchmark-ips", "~> 2.12"
+  spec.add_dependency "protocol-http", "~> 0.49"
+  spec.add_dependency "protocol-rack", "~> 0.22"
+  spec.add_dependency "console" # TODO: drop when protocol-rack declares this in its gemspec
   spec.add_dependency "logger"
   spec.add_dependency "localhost", "~> 1.6"
   spec.add_dependency "rack", "~> 3.0"

@@ -48,8 +48,17 @@ module Quicsilver
       @cancelled_streams = Set.new
       @cancelled_mutex = Mutex.new
 
+      # Mode controls app wrapping, not the code path:
+      #   :rack (default) — app is a Rack app, wrap with Protocol::Rack::Adapter
+      #   :falcon        — app is a native protocol-http app, use directly
+      protocol_app = case @server_configuration.mode
+        when :rack then ::Protocol::Rack::Adapter.new(@app)
+        when :falcon then @app
+        else ::Protocol::Rack::Adapter.new(@app)
+      end
+
       @request_handler = RequestHandler.new(
-        app: @app,
+        app: protocol_app,
         configuration: @server_configuration,
         request_registry: @request_registry,
         cancelled_streams: @cancelled_streams,

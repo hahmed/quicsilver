@@ -72,6 +72,33 @@ server = Quicsilver::Server.new(4433,
 )
 ```
 
+## Protocol-HTTP Mode
+
+Quicsilver supports [protocol-http](https://github.com/socketry/protocol-http) for integration with [Falcon](https://github.com/socketry/falcon) and other protocol-http based servers.
+
+```ruby
+require "quicsilver"
+
+# Any Rack app works — it's auto-wrapped for protocol-http
+app = ->(env) { [200, {"content-type" => "text/plain"}, ["Hello HTTP/3!"]] }
+
+config = Quicsilver::Transport::Configuration.new(
+  "certificates/server.crt",
+  "certificates/server.key",
+  mode: :protocol_http  # Enable protocol-http interfaces
+)
+
+server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
+server.start
+```
+
+### Modes
+
+| Mode | Interface | Body Handling | Default |
+|------|-----------|---------------|---------|
+| `:rack` | Rack env hash | Buffered (full body before dispatch) | ✅ |
+| `:protocol_http` | `Protocol::HTTP::Request/Response` | Streaming-ready | |
+
 ## Development
 
 ```bash

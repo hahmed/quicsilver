@@ -3,15 +3,19 @@
 require "logger"
 require_relative "quicsilver/version"
 
-# Protocol layer (pure HTTP/3 codec)
+# Protocol layer
 require_relative "quicsilver/protocol/frames"
 require_relative "quicsilver/protocol/qpack/encoder"
 require_relative "quicsilver/protocol/request_parser"
 require_relative "quicsilver/protocol/request_encoder"
 require_relative "quicsilver/protocol/response_parser"
 require_relative "quicsilver/protocol/response_encoder"
+require_relative "quicsilver/protocol/stream_input"
+require_relative "quicsilver/protocol/stream_output"
+require_relative "quicsilver/protocol/adapter"
+require "protocol/rack"
 
-# Transport layer (QUIC primitives)
+# Transport layer
 require_relative "quicsilver/transport/stream"
 require_relative "quicsilver/transport/stream_event"
 require_relative "quicsilver/transport/inbound_stream"

@@ -198,6 +198,27 @@ class ServerConfigurationTest < Minitest::Test
     expected_attrs.each { |a| assert_respond_to config, a, "Missing attr_reader: #{a}" }
   end
 
+  def test_mode_defaults_to_rack
+    config = fetch_server_configuration_with_certs
+    assert_equal :rack, config.mode
+  end
+
+  def test_mode_rack
+    config = fetch_server_configuration_with_certs(mode: :rack)
+    assert_equal :rack, config.mode
+  end
+
+  def test_mode_falcon
+    config = fetch_server_configuration_with_certs(mode: :falcon)
+    assert_equal :falcon, config.mode
+  end
+
+  def test_mode_invalid_raises
+    assert_raises(Quicsilver::ServerConfigurationError) do
+      fetch_server_configuration_with_certs(mode: :bogus)
+    end
+  end
+
   private
 
   def fetch_server_configuration_with_certs(options={})

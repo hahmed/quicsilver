@@ -5,7 +5,7 @@ require_relative "../http3_test_helper"
 
 # Tests 0-RTT early data policy enforcement at the server level (RFC 8470).
 # The server decides whether to reject unsafe methods on 0-RTT or pass them
-# through to the Rack app with env["quicsilver.early_data"] set.
+# through to the Rack app with the early data flag available via headers.
 class EarlyDataValidationTest < Minitest::Test
   parallelize_me!
   include HTTP3TestHelpers
@@ -69,7 +69,7 @@ class EarlyDataValidationTest < Minitest::Test
       end
 
       assert received_env, "#{method} should reach app in :allow mode"
-      assert_equal true, received_env["quicsilver.early_data"]
+      assert_equal "true", received_env["HTTP_QUICSILVER_EARLY_DATA"]
     end
   end
 
@@ -77,7 +77,7 @@ class EarlyDataValidationTest < Minitest::Test
     response_status = nil
     server, connection, stream = setup_request("POST", policy: :allow,
       app: ->(env) {
-        env["quicsilver.early_data"] ? [425, {}, ["Too Early"]] : [200, {}, ["OK"]]
+        env["HTTP_QUICSILVER_EARLY_DATA"] == "true" ? [425, {}, ["Too Early"]] : [200, {}, ["OK"]]
       })
 
     connection.stub(:send_response, ->(s, status, h, b, **_kw) { response_status = status }) do
@@ -87,7 +87,7 @@ class EarlyDataValidationTest < Minitest::Test
     assert_equal 425, response_status
   end
 
-  # --- env["quicsilver.early_data"] is always set ---
+  # --- early data flag is always set ---
 
   def test_env_early_data_true_on_early_data
     received_env = nil
@@ -98,7 +98,7 @@ class EarlyDataValidationTest < Minitest::Test
       server.instance_variable_get(:@request_handler).call(connection, stream, early_data: true)
     end
 
-    assert_equal true, received_env["quicsilver.early_data"]
+    assert_equal "true", received_env["HTTP_QUICSILVER_EARLY_DATA"]
   end
 
   def test_env_early_data_false_on_normal_data
@@ -110,7 +110,7 @@ class EarlyDataValidationTest < Minitest::Test
       server.instance_variable_get(:@request_handler).call(connection, stream, early_data: false)
     end
 
-    assert_equal false, received_env["quicsilver.early_data"]
+    assert_equal "false", received_env["HTTP_QUICSILVER_EARLY_DATA"]
   end
 
   private
