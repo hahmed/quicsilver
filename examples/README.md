@@ -2,94 +2,72 @@
 
 This directory contains examples for testing your Ruby QUIC implementation.
 
+All examples use `example_helper.rb` which uses the [`localhost`](https://github.com/socketry/localhost) gem to generate self-signed TLS certificates — **no manual certificate setup needed**.
+
+In production, you must provide your own cert/key paths to `Quicsilver::Transport::Configuration.new`.
+
 ## 🚀 Quick Start
 
-### 1. Generate Certificates
+### 1. Run the Server
 
 ```bash
-cd examples
-./setup_certs.sh
+# Terminal 1 — pick any example:
+ruby examples/minimal_http3_server.rb
+ruby examples/rack_http3_server.rb
+ruby examples/protocol_http_server.rb
 ```
 
-This creates the necessary certificate files in the `certs/` directory.
-
-### 2. Run the Server
+### 2. Test the Connection
 
 ```bash
-# Terminal 1
-ruby examples/test_server.rb
-```
+# Terminal 2
+curl --http3 -k https://localhost:4433/
 
-### 3. Test the Connection
-
-```bash
-# Terminal 2  
-ruby examples/test_connection.rb
+# Or use the client example (requires a server running)
+ruby examples/simple_client_test.rb
 ```
 
 ## 📁 Files
 
 | File | Purpose |
 |------|---------|
-| `setup_certs.sh` | Generate certificates for testing |
-| `test_server.rb` | Ruby QUIC server |
-| `test_connection.rb` | QUIC client test |
+| `example_helper.rb` | Shared helper — sets up TLS via `localhost` gem |
+| `minimal_http3_server.rb` | Bare-minimum HTTP/3 server |
+| `rack_http3_server.rb` | Rack app with multiple routes |
+| `protocol_http_server.rb` | Rack app using protocol-http internally |
+| `simple_client_test.rb` | QUIC client test |
 
 ## ✅ Expected Output
 
 **Server:**
 ```
-🔥 Quicsilver QUIC Server Test
+🚀 Minimal HTTP/3 Server Example
 ════════════════════════════════════════
-📋 Server Info:
-   server_id: a47271c7ae4276d5
-   address: 127.0.0.1
-   port: 4433
-   running: false
-   cert_file: /path/to/certs/server.crt
-   key_file: /path/to/certs/server.key
-   max_connections: 100
-
-🚀 Starting QUIC server on 127.0.0.1:4433
-✅ QUIC server started successfully!
-   🔗 Listening for connections...
-🎯 Server is running! Press Ctrl+C to stop
+🔧 Starting server...
+✅ Server is running on port 4433
+⏳ Server is running. Press Ctrl+C to stop...
 ```
 
 **Client:**
 ```
-🔗 Testing QUIC Connection to 127.0.0.1:4433...
-
-Connected to 127.0.0.1:4433
-✅ SUCCESS! Connected to QUIC server
-   🕐 Connection time: 13.5ms
-   📊 Connected status: true
-   📋 Connection info: {"connected" => true, "failed" => false, ...}
-
-🧪 Testing connection stability...
-   ⏱️  Tick 1: Connected = true
-   ⏱️  Tick 2: Connected = true  
-   ⏱️  Tick 3: Connected = true
-✅ Connection test completed!
-🔒 Connection closed cleanly
+🔌 Simple HTTP/3 Client Test
+════════════════════════════════════════
+Status: 200
+Headers: {"content-type"=>"text/plain"}
+Body: Hello from Quicsilver!
+👋 Done
 ```
 
-## 🔧 Manual Certificate Setup
+## 🔧 Custom Certificates
 
-If you prefer to create certificates manually:
+If you need to use your own certificates instead of the `localhost` gem:
 
-```bash
-mkdir -p certs
-cd certs
-
-# Generate private key
-openssl genrsa -out server.key 2048
-
-# Generate certificate with proper QUIC extensions
-openssl req -new -x509 -key server.key -out server.crt -days 365 \
-  -subj "/CN=localhost/O=QuicsilverTest/C=US" \
-  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
-  -addext "extendedKeyUsage=serverAuth"
+```ruby
+config = Quicsilver::Transport::Configuration.new(
+  "/path/to/server.crt",
+  "/path/to/server.key"
+)
+server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
 ```
 
 ## 🐛 Troubleshooting
@@ -98,8 +76,6 @@ openssl req -new -x509 -key server.key -out server.crt -days 365 \
 
 **Connection refused:** Make sure the server is running before testing the client.
 
-**Certificate errors:** Run `./setup_certs.sh` to regenerate certificates with proper QUIC extensions.
-
 ---
 
-That's it! No Docker, no external servers, just pure Ruby QUIC. 🎯 
+That's it! No certificate generation, no Docker — just pure Ruby QUIC. 🎯

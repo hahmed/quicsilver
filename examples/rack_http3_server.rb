@@ -1,7 +1,6 @@
 #!/usr/bin/env ruby
 
-require "bundler/setup"
-require "quicsilver"
+require_relative "example_helper"
 
 puts "🚀 Rack HTTP/3 Server Example"
 puts "=" * 40
@@ -31,24 +30,13 @@ app = ->(env) {
   end
 }
 
-# Create and start the server with the Rack app
-server = Quicsilver::Server.new(4433, app: app)
+server = Quicsilver::Server.new(4433, app: app, server_configuration: EXAMPLE_TLS_CONFIG)
 
-puts "🔧 Starting server..."
-server.start
-
-puts "✅ Server is running on port 4433"
 puts "📋 Try these requests:"
-puts "   curl --http3 -k https://127.0.0.1:4433/"
-puts "   curl --http3 -k https://127.0.0.1:4433/api/users"
-puts "   curl --http3 -k https://127.0.0.1:4433/api/status"
+puts "   curl --http3 -k https://localhost:4433/"
+puts "   curl --http3 -k https://localhost:4433/api/users"
+puts "   curl --http3 -k https://localhost:4433/api/status"
+puts "⏳ Press Ctrl+C to stop."
+puts
 
-# Keep the server running
-puts "⏳ Server is running. Press Ctrl+C to stop..."
-begin
-  server.wait_for_connections
-rescue Interrupt
-  puts "\n🛑 Stopping server..."
-  server.stop
-  puts "👋 Server stopped"
-end
+server.start

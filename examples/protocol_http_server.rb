@@ -10,9 +10,7 @@
 #   :rack (default) — Rack app, wrapped with Protocol::Rack::Adapter
 #   :falcon         — native protocol-http app, no wrapping
 
-require "bundler/setup"
-require "quicsilver"
-require "localhost/authority"
+require_relative "example_helper"
 
 # Any standard Rack app works
 app = ->(env) {
@@ -26,13 +24,7 @@ app = ->(env) {
   [200, { "content-type" => "text/plain" }, [body]]
 }
 
-authority = Localhost::Authority.fetch
-config = Quicsilver::Transport::Configuration.new(
-  authority.certificate_path,
-  authority.key_path
-)
-
-server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
+server = Quicsilver::Server.new(4433, app: app, server_configuration: EXAMPLE_TLS_CONFIG)
 
 puts "Starting Quicsilver on https://localhost:4433"
 puts "Test with: curl --http3 -k https://localhost:4433/"

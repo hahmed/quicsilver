@@ -1,26 +1,14 @@
 #!/usr/bin/env ruby
 
-require "bundler/setup"
-require "quicsilver"
+require_relative "example_helper"
 
 puts "🚀 Minimal HTTP/3 Server Example"
 puts "=" * 40
 
-# Create and start the server
-server = Quicsilver::Server.new(4433)
+server = Quicsilver::Server.new(4433, server_configuration: EXAMPLE_TLS_CONFIG)
 
-puts "🔧 Starting server..."
+puts "✅ Listening on https://localhost:4433"
+puts "⏳ Press Ctrl+C to stop."
+puts
+
 server.start
-
-puts "✅ Server is running on port 4433"
-puts "📋 Server info: #{server.server_info}"
-
-# Keep the server running
-puts "⏳ Server is running. Press Ctrl+C to stop..."
-begin
-  server.wait_for_connections
-rescue Interrupt
-  puts "\n🛑 Stopping server..."
-  server.stop
-  puts "👋 Server stopped"
-end 
