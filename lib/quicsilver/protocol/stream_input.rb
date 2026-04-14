@@ -38,10 +38,27 @@ module Quicsilver
 
         super(length, queue: queue)
         @read_timeout = read_timeout
+        @bytes_written = 0
       end
 
       # @attribute [Numeric, nil] Read timeout in seconds.
       attr_reader :read_timeout
+
+      # Track bytes written for content-length validation.
+      def write(chunk)
+        @bytes_written += chunk.bytesize
+        super
+      end
+
+      # Signal that no more data will be written.
+      # Validates content-length if declared (RFC 9114 §4.1.2) — raises
+      # MessageError if total bytes written don't match.
+      def close_write(error = nil)
+        if @length && @bytes_written != @length
+          raise Protocol::MessageError, "Content-length mismatch: header=#{@length}, body=#{@bytes_written}"
+        end
+        super
+      end
 
       # Read the next available chunk, with optional timeout.
       #

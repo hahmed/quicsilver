@@ -407,7 +407,7 @@ module Quicsilver
         max_frame_payload_size: @server_configuration.max_frame_payload_size
       )
       parser.parse
-      parser.validate_headers!(skip_content_length: true)
+      parser.validate_headers!
 
       headers = parser.headers
       return if headers.empty?

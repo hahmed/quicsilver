@@ -27,26 +27,40 @@ class StreamingDispatchTest < Minitest::Test
 
   # --- contains_headers_frame? ---
 
-  # --- validate_headers! skip_content_length ---
+  # --- StreamInput content-length validation ---
 
-  def test_validate_headers_skip_content_length
-    parser = Quicsilver::Protocol::RequestParser.new(
-      build_post_request("hello"),
-      max_body_size: 1024
-    )
-    parser.parse
+  def test_stream_input_validates_content_length_on_close
+    body = Quicsilver::Protocol::StreamInput.new(10)
+    body.write("hello")  # 5 bytes, expected 10
 
-    # Normal validation should fail — content-length says 999 but body is 5
-    headers = parser.headers
-    headers["content-length"] = "999"
-
-    # With skip: no error
-    parser.validate_headers!(skip_content_length: true)
-
-    # Without skip: raises
     assert_raises(Quicsilver::Protocol::MessageError) do
-      parser.validate_headers!(skip_content_length: false)
+      body.close_write
     end
+  end
+
+  def test_stream_input_passes_when_content_length_matches
+    body = Quicsilver::Protocol::StreamInput.new(5)
+    body.write("hello")
+    body.close_write  # should not raise
+
+    assert body.closed?
+  end
+
+  def test_stream_input_skips_validation_without_content_length
+    body = Quicsilver::Protocol::StreamInput.new(nil)
+    body.write("any amount of data")
+    body.close_write  # should not raise
+
+    assert body.closed?
+  end
+
+  def test_stream_input_validates_across_multiple_writes
+    body = Quicsilver::Protocol::StreamInput.new(10)
+    body.write("hello")  # 5
+    body.write("world")  # 10 total
+    body.close_write  # should not raise
+
+    assert body.closed?
   end
 
   # --- Adapter#send_response paths ---

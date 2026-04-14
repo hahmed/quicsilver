@@ -141,7 +141,7 @@ module Quicsilver
 
       # Validate pseudo-header semantics per RFC 9114 §4.3.1.
       # Call after parse to check CONNECT rules, required headers, host/:authority consistency.
-      def validate_headers!(skip_content_length: false)
+      def validate_headers!
         return if @headers.empty?
 
         method = @headers[":method"]
@@ -166,18 +166,6 @@ module Quicsilver
         if @headers[":authority"] && @headers["host"]
           unless @headers[":authority"] == @headers["host"]
             raise Protocol::MessageError, ":authority and host header must be consistent"
-          end
-        end
-
-        # Content-length vs body size (RFC 9114 §4.1.2)
-        # Skip when streaming — body is still arriving via subsequent RECEIVE events.
-        unless skip_content_length
-          if @headers["content-length"]
-            expected = @headers["content-length"].to_i
-            actual = body.size
-            unless expected == actual
-              raise Protocol::MessageError, "Content-length mismatch: header=#{expected}, body=#{actual}"
-            end
           end
         end
       end
