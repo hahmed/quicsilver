@@ -6,7 +6,7 @@ require_relative "qpack/header_block_decoder"
 module Quicsilver
   module Protocol
     class RequestParser
-      attr_reader :headers
+      attr_reader :headers, :bytes_consumed
 
       def frames
         @frames || []
@@ -141,7 +141,7 @@ module Quicsilver
 
       # Validate pseudo-header semantics per RFC 9114 §4.3.1.
       # Call after parse to check CONNECT rules, required headers, host/:authority consistency.
-      def validate_headers!
+      def validate_headers!(skip_content_length: false)
         return if @headers.empty?
 
         method = @headers[":method"]
@@ -170,11 +170,14 @@ module Quicsilver
         end
 
         # Content-length vs body size (RFC 9114 §4.1.2)
-        if @headers["content-length"]
-          expected = @headers["content-length"].to_i
-          actual = body.size
-          unless expected == actual
-            raise Protocol::MessageError, "Content-length mismatch: header=#{expected}, body=#{actual}"
+        # Skip when streaming — body is still arriving via subsequent RECEIVE events.
+        unless skip_content_length
+          if @headers["content-length"]
+            expected = @headers["content-length"].to_i
+            actual = body.size
+            unless expected == actual
+              raise Protocol::MessageError, "Content-length mismatch: header=#{expected}, body=#{actual}"
+            end
           end
         end
       end
@@ -239,6 +242,7 @@ module Quicsilver
 
       def parse!
         @headers = {}
+        @bytes_consumed = 0
         buffer = @data
         offset = 0
         headers_received = false
@@ -304,6 +308,7 @@ module Quicsilver
           offset += header_len + length
         end
 
+        @bytes_consumed = offset
         @body&.rewind
       end
 

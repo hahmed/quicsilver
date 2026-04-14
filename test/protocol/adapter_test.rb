@@ -21,43 +21,44 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
       ":method" => "GET", ":scheme" => "https",
       ":authority" => "example.com", ":path" => "/hello"
     }
-    request = @adapter.build_request(headers)
+    request, body = @adapter.build_request(headers)
 
     assert_equal "GET", request.method
     assert_equal "/hello", request.path
     assert_equal "https", request.scheme
     assert_equal "example.com", request.authority
     assert_equal "HTTP/3", request.version
+    assert_nil body, "GET should not have an input body"
     assert_nil request.body, "GET should not have a body"
   end
 
   def test_bodyless_vs_body_methods
     %w[GET HEAD TRACE].each do |method|
       headers = { ":method" => method, ":scheme" => "https", ":path" => "/", ":authority" => "x.com" }
-      request = @adapter.build_request(headers)
-      assert_nil request.body, "#{method} should not have a body"
+      request, body = @adapter.build_request(headers)
+      assert_nil body, "#{method} should not have an input body"
     end
 
     %w[POST PUT PATCH DELETE OPTIONS].each do |method|
       headers = { ":method" => method, ":scheme" => "https", ":path" => "/", ":authority" => "x.com" }
-      request = @adapter.build_request(headers)
-      assert_instance_of Quicsilver::Protocol::StreamInput, request.body, "#{method} should have a body"
+      request, body = @adapter.build_request(headers)
+      assert_instance_of Quicsilver::Protocol::StreamInput, body, "#{method} should have an input body"
     end
   end
 
   def test_connect_request
     headers = { ":method" => "CONNECT", ":authority" => "proxy.example.com:443" }
-    request = @adapter.build_request(headers)
+    request, body = @adapter.build_request(headers)
 
     assert_equal "CONNECT", request.method
     assert_equal "proxy.example.com:443", request.authority
-    assert_instance_of Quicsilver::Protocol::StreamInput, request.body
+    assert_instance_of Quicsilver::Protocol::StreamInput, body
   end
 
   def test_post_with_empty_body
     headers = { ":method" => "POST", ":scheme" => "https", ":path" => "/", ":authority" => "x.com" }
-    request = @adapter.build_request(headers)
-    request.body.close_write
+    request, body = @adapter.build_request(headers)
+    body.close_write
 
     response = @adapter.call(request)
     assert_equal 200, response.status
@@ -76,14 +77,14 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
     adapter = Quicsilver::Protocol::Adapter.new(app)
 
     headers = { ":method" => "POST", ":scheme" => "https", ":path" => "/upload", ":authority" => "x.com" }
-    request = adapter.build_request(headers)
+    request, body = adapter.build_request(headers)
 
     app_thread = Thread.new { adapter.call(request) }
 
     sleep 0.01
-    request.body.write("part1")
-    request.body.write("part2")
-    request.body.close_write
+    body.write("part1")
+    body.write("part2")
+    body.close_write
 
     response = app_thread.value
     assert_equal 200, response.status

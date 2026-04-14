@@ -162,6 +162,52 @@ class ServerClientIntegrationTest < Minitest::Test
     assert @server.running?, "Server should still be running after client disconnect cycles"
   end
 
+  def test_large_post_body
+    received_body = nil
+    app = ->(env) {
+      received_body = env["rack.input"].read
+      [200, { "content-type" => "text/plain" }, ["received #{received_body.bytesize} bytes"]]
+    }
+
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    client.connect
+
+    # 256KB body — large enough to potentially split across RECEIVE events
+    large_body = "x" * 262_144
+    response = client.post("/upload", body: large_body)
+
+    assert_equal 200, response[:status]
+    assert_equal large_body.bytesize, received_body&.bytesize
+    assert_equal large_body, received_body
+  ensure
+    client&.disconnect
+  end
+
+  def test_post_body_integrity_across_requests
+    bodies = []
+    app = ->(env) {
+      bodies << env["rack.input"].read
+      [200, {}, ["ok"]]
+    }
+
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    client.connect
+
+    payloads = ["small", "a" * 1024, "b" * 65_536]
+    payloads.each { |p| client.post("/", body: p) }
+
+    assert_equal 3, bodies.size
+    payloads.each_with_index do |expected, i|
+      assert_equal expected, bodies[i], "Body mismatch on request #{i}"
+    end
+  ensure
+    client&.disconnect
+  end
+
   private
 
   def start_server(app)

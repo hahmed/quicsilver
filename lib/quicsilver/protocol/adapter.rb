@@ -14,9 +14,9 @@ module Quicsilver
     #
     # Usage:
     #   adapter = Protocol::Adapter.new(app)
-    #   request = adapter.build_request(parsed_headers)
-    #   request.body.write(chunk)       # feed body data
-    #   request.body.close_write        # signal end of body
+    #   request, body = adapter.build_request(parsed_headers)
+    #   body.write(chunk)               # feed body data
+    #   body.close_write                # signal end of body
     #   response = adapter.call(request)
     #   adapter.send_response(response, writer)
     #
@@ -29,12 +29,13 @@ module Quicsilver
 
       # Build a Protocol::HTTP::Request from parsed HTTP/3 headers.
       #
-      # Returns [request, input_body] where input_body is a Protocol::StreamInput that
-      # the transport should feed RECEIVE chunks into.
+      # Returns [request, body] where body is a Protocol::StreamInput that
+      # the transport feeds RECEIVE chunks into.
       #
       # @param headers [Hash] Parsed headers from RequestParser (includes pseudo-headers).
-      # @param content_length [Integer, nil] Content-Length if present.
-      # @return [Array(Protocol::HTTP::Request, Protocol::StreamInput)]
+      # @return [Array(Protocol::HTTP::Request, Protocol::StreamInput)] request and body.
+      #   Body is nil for bodyless methods (GET, HEAD, TRACE).
+      #   Caller feeds RECEIVE data into body via write(), then close_write on FIN.
       def build_request(headers)
         method = headers[":method"]
         scheme = headers[":scheme"] || "https"
@@ -52,10 +53,12 @@ module Quicsilver
           Protocol::StreamInput.new(content_length)
         end
 
-        ::Protocol::HTTP::Request.new(
+        request = ::Protocol::HTTP::Request.new(
           scheme, authority, method, path, VERSION,
           protocol_headers, body
         )
+
+        [request, body]
       end
 
       # Send a Protocol::HTTP::Response via a transport writer.
@@ -73,14 +76,11 @@ module Quicsilver
         body = response.body
 
         if body.nil? || head_request
-          encoder = Quicsilver::Protocol::ResponseEncoder.new(status, headers, [])
-          writer.call(encoder.encode, true)
+          send_headers_only(status, headers, writer)
+        elsif body.respond_to?(:read)
+          stream_response(status, headers, body, writer)
         else
-          header_frames = build_headers_frame(status, headers)
-          writer.call(header_frames, false)
-
-          output = Protocol::StreamOutput.new(body, &writer)
-          output.stream
+          buffer_response(status, headers, body, writer)
         end
       end
 
@@ -101,6 +101,28 @@ module Quicsilver
 
       def bodyless_request?(method)
         BODYLESS_METHODS.include?(method)
+      end
+
+      # No body — send HEADERS with FIN
+      def send_headers_only(status, headers, writer)
+        encoder = Quicsilver::Protocol::ResponseEncoder.new(status, headers, [])
+        writer.call(encoder.encode, true)
+      end
+
+      # Streaming body (protocol-http Body::Readable) — send HEADERS, then
+      # stream DATA frames as chunks arrive. Used by Falcon mode.
+      def stream_response(status, headers, body, writer)
+        writer.call(build_headers_frame(status, headers), false)
+        Protocol::StreamOutput.new(body, &writer).stream
+      end
+
+      # Buffered body (Rack array or enumerable) — encode everything and send.
+      def buffer_response(status, headers, body, writer)
+        parts = body.respond_to?(:each) ? body : [body.to_s]
+        encoder = Quicsilver::Protocol::ResponseEncoder.new(status, headers, parts)
+        writer.call(encoder.encode, true)
+      ensure
+        body.close if body.respond_to?(:close)
       end
 
       # Convert Protocol::HTTP::Headers to a plain Hash for ResponseEncoder

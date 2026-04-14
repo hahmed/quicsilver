@@ -66,15 +66,15 @@ module Quicsilver
           return
         end
 
-        request = @adapter.build_request(headers)
+        request, body = @adapter.build_request(headers)
         request.headers.add("quicsilver-early-data", early_data.to_s)
 
-        if request.body && parser.body && parser.body.size > 0
+        if body && parser.body && parser.body.size > 0
           parser.body.rewind
           body_data = parser.body.read
-          request.body.write(body_data) unless body_data.empty?
+          body.write(body_data) unless body_data.empty?
         end
-        request.body&.close_write
+        body&.close_write
 
         @request_registry.track(
           stream.stream_id, connection.handle,
@@ -95,11 +95,14 @@ module Quicsilver
         response_headers = {}
         response.headers&.each { |name, value| response_headers[name] = value }
 
-        if response.body&.length && !response_headers.key?("content-length")
+        # Protocol-rack moves content-length from headers to body.length —
+        # re-add it so the HTTP/3 response includes the header.
+        if !response_headers.key?("content-length") && response.body&.length
           response_headers["content-length"] = response.body.length.to_s
         end
 
-        connection.send_response(stream, response.status, response_headers, response.body || [],
+        body = response.body || []
+        connection.send_response(stream, response.status, response_headers, body,
           head_request: request.head?)
         @request_registry.complete(stream.stream_id)
       end

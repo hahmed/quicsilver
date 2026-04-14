@@ -85,6 +85,7 @@ module Quicsilver
       end
 
       def send_response(stream, status, headers, body, head_request: false)
+        body = [] if body.nil?
         encoder = Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request)
 
         if body.respond_to?(:to_ary)

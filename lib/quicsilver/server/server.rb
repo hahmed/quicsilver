@@ -15,6 +15,28 @@ module Quicsilver
     ServerStopError = Class.new(StandardError)
     DrainTimeoutError = Class.new(StandardError)
 
+    # Tracks an in-flight streaming request between RECEIVE and RECEIVE_FIN.
+    # The stream handle arrives at RECEIVE_FIN; the worker thread waits for it.
+    PendingStream = Struct.new(:connection, :body, :request, :stream_id, :stream_handle, :handle_ready, :frame_buffer, keyword_init: true) do
+      def initialize(**)
+        super
+        self.handle_ready = Queue.new
+        self.frame_buffer = "".b
+      end
+
+      # Called by RECEIVE_FIN handler to provide the stream handle
+      def complete(handle)
+        self.stream_handle = handle
+        handle_ready.push(true)
+      end
+
+      # Called by worker thread to wait for the stream handle
+      def wait_for_handle(timeout: 30)
+        handle_ready.pop(timeout: timeout)
+        stream_handle
+      end
+    end
+
     class << self
       attr_accessor :instance
 
@@ -47,6 +69,8 @@ module Quicsilver
       @max_connections = max_connections
       @cancelled_streams = Set.new
       @cancelled_mutex = Mutex.new
+      @pending_streams = {}  # stream_id => PendingStream (for streaming dispatch)
+      @pending_mutex = Mutex.new
 
       # Mode controls app wrapping, not the code path:
       #   :rack (default) — app is a Rack app, wrap with Protocol::Rack::Adapter
@@ -216,45 +240,12 @@ module Quicsilver
 
       when STREAM_EVENT_SEND_COMPLETE
         # Buffer cleanup handled in C extension
-
       when STREAM_EVENT_RECEIVE
         return unless (connection = @connections[connection_handle])
-
-        # Unidirectional streams (control, QPACK) must be processed incrementally —
-        # they never send FIN, so waiting for RECEIVE_FIN would mean never parsing.
-        if (stream_id & 0x02) != 0  # unidirectional
-          begin
-            connection.receive_unidirectional_data(stream_id, data)
-          rescue Protocol::FrameError => e
-            Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
-            Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
-          end
-        else
-          connection.buffer_data(stream_id, data)
-        end
-
+        handle_receive(connection, connection_handle, stream_id, data, early_data: early_data)
       when STREAM_EVENT_RECEIVE_FIN
         return unless (connection = @connections[connection_handle])
-
-        event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
-
-        full_data = connection.complete_stream(stream_id, event.data)
-        stream = Transport::InboundStream.new(stream_id)
-        stream.stream_handle = event.handle
-        stream.append_data(full_data)
-
-        if stream.bidirectional?
-          connection.track_client_stream(stream_id)
-          dispatch_request(connection, stream, early_data: early_data)
-        else
-          begin
-            connection.handle_unidirectional_stream(stream)
-          rescue Protocol::FrameError => e
-            Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
-            Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
-          end
-        end
-
+        handle_receive_fin(connection, connection_handle, stream_id, data, early_data: early_data)
       when STREAM_EVENT_STREAM_RESET
         return unless (connection = @connections[connection_handle])
         event = Transport::StreamEvent.new(data, "STREAM_RESET")
@@ -266,9 +257,10 @@ module Quicsilver
           Quicsilver.connection_shutdown(connection_handle, Protocol::H3_CLOSED_CRITICAL_STREAM, false) rescue nil
         else
           @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
+          pending = @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
+          pending&.body&.close(RuntimeError.new("Stream #{stream_id} reset by peer"))
           @request_registry.complete(stream_id)
         end
-
       when STREAM_EVENT_STOP_SENDING
         return unless @connections[connection_handle]
         event = Transport::StreamEvent.new(data, "STOP_SENDING")
@@ -310,6 +302,74 @@ module Quicsilver
 
     attr_reader :work_queue
 
+    def handle_receive(connection, connection_handle, stream_id, data, early_data: false)
+      # Unidirectional streams (control, QPACK) must be processed incrementally —
+      # they never send FIN, so waiting for RECEIVE_FIN would mean never parsing.
+      if (stream_id & 0x02) != 0  # unidirectional
+        begin
+          connection.receive_unidirectional_data(stream_id, data)
+        rescue Protocol::FrameError => e
+          Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
+          Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
+        end
+      else
+        handle_bidi_receive(connection, connection_handle, stream_id, data, early_data: early_data)
+      end
+    end
+
+    def handle_bidi_receive(connection, connection_handle, stream_id, data, early_data: false)
+      pending = @pending_mutex.synchronize { @pending_streams[stream_id] }
+      if pending
+        # Subsequent RECEIVE — append to frame buffer and extract complete DATA payloads.
+        # MsQuic splits data at arbitrary boundaries, so frames may span callbacks.
+        pending.frame_buffer << data
+        drain_data_frames(pending)
+      elsif contains_headers_frame?(data)
+        dispatch_streaming(connection, connection_handle, stream_id, data, early_data: early_data)
+      else
+        connection.buffer_data(stream_id, data)
+      end
+    end
+
+    def handle_receive_fin(connection, connection_handle, stream_id, data, early_data: false)
+      event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
+
+      pending = @pending_mutex.synchronize { @pending_streams[stream_id] }
+      if pending
+        complete_streaming_request(pending, event)
+      else
+        complete_buffered_request(connection, connection_handle, stream_id, event, early_data: early_data)
+      end
+    end
+
+    def complete_streaming_request(pending, event)
+      if event.data && !event.data.empty?
+        pending.frame_buffer << event.data
+        drain_data_frames(pending)
+      end
+      pending.body.close_write
+      pending.complete(event.handle)
+    end
+
+    def complete_buffered_request(connection, connection_handle, stream_id, event, early_data: false)
+      full_data = connection.complete_stream(stream_id, event.data)
+      stream = Transport::InboundStream.new(stream_id)
+      stream.stream_handle = event.handle
+      stream.append_data(full_data)
+
+      if stream.bidirectional?
+        connection.track_client_stream(stream_id)
+        dispatch_request(connection, stream, early_data: early_data)
+      else
+        begin
+          connection.handle_unidirectional_stream(stream)
+        rescue Protocol::FrameError => e
+          Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
+          Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
+        end
+      end
+    end
+
     def dispatch_request(connection, stream, early_data: false)
       if @work_queue.size >= @max_queue_size
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
@@ -324,12 +384,178 @@ module Quicsilver
         thread = Thread.new do
           while (work = @work_queue.pop)
             break if work == :shutdown
-            connection, stream, early_data = work
-            @request_handler.call(connection, stream, early_data: early_data)
+
+            if work.is_a?(Array) && work[0] == :streaming
+              handle_streaming_request(work[1])
+            else
+              connection, stream, early_data = work
+              @request_handler.call(connection, stream, early_data: early_data)
+            end
           end
         end
         @handler_mutex.synchronize { @handler_threads << thread }
       end
+    end
+
+    # Streaming dispatch: parse headers from first RECEIVE, dispatch immediately.
+    # Body data arrives via subsequent RECEIVE events into StreamInput.
+    def dispatch_streaming(connection, connection_handle, stream_id, data, early_data: false)
+      parser = Protocol::RequestParser.new(
+        data,
+        max_header_size: @server_configuration.max_header_size,
+        max_header_count: @server_configuration.max_header_count,
+        max_frame_payload_size: @server_configuration.max_frame_payload_size
+      )
+      parser.parse
+      parser.validate_headers!(skip_content_length: true)
+
+      headers = parser.headers
+      return if headers.empty?
+
+      method = headers[":method"]
+
+      if @server_configuration.early_data_policy == :reject &&
+         early_data && !RequestHandler::SAFE_METHODS.include?(method)
+        Quicsilver.logger.debug("Rejected 0-RTT #{method} on stream #{stream_id} (no stream handle to send 425)")
+        return
+      end
+
+      request, body = @request_handler.adapter.build_request(headers)
+      request.headers.add("quicsilver-early-data", early_data.to_s)
+
+      # Feed body data from the first RECEIVE.
+      # The parser consumed complete frames (HEADERS + any complete DATA frames).
+      if body
+        # Complete DATA frames the parser extracted
+        if parser.body && parser.body.size > 0
+          parser.body.rewind
+          body_data = parser.body.read
+          body.write(body_data) unless body_data.empty?
+        end
+      end
+
+      pending = PendingStream.new(
+        connection: connection,
+        body: body,
+        request: request,
+        stream_id: stream_id
+      )
+
+      # Unconsumed bytes go into the frame buffer for incremental parsing
+      remainder = data.byteslice(parser.bytes_consumed..-1)
+      if remainder && remainder.bytesize > 0
+        pending.frame_buffer << remainder
+        drain_data_frames(pending)
+      end
+      @pending_mutex.synchronize { @pending_streams[stream_id] = pending }
+
+      connection.track_client_stream(stream_id)
+      @request_registry.track(stream_id, connection_handle,
+        path: headers[":path"] || "/", method: method || "GET")
+
+      if @work_queue.size >= @max_queue_size
+        Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
+        body&.close
+        @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
+      else
+        @work_queue.push([:streaming, pending])
+      end
+    rescue Protocol::FrameError => e
+      Quicsilver.logger.error("Frame error: #{e.message}")
+      Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
+    rescue Protocol::MessageError => e
+      Quicsilver.logger.error("Message error on stream #{stream_id}: #{e.message}")
+    rescue => e
+      Quicsilver.logger.error("Error in streaming dispatch: #{e.class} - #{e.message}")
+    end
+
+    def handle_streaming_request(pending)
+      response = @request_handler.adapter.call(pending.request)
+
+      # Wait for RECEIVE_FIN to provide the stream handle
+      stream_handle = pending.wait_for_handle(timeout: 30)
+      unless stream_handle
+        Quicsilver.logger.error("Timed out waiting for stream handle on stream #{pending.stream_id}")
+        return
+      end
+
+      return if cancelled_stream?(pending.stream_id)
+
+      response_headers = {}
+      response.headers&.each { |name, value| response_headers[name] = value }
+
+      if !response_headers.key?("content-length") && response.body&.length
+        response_headers["content-length"] = response.body.length.to_s
+      end
+
+      stream = Transport::InboundStream.new(pending.stream_id)
+      stream.stream_handle = stream_handle
+
+      pending.connection.send_response(stream, response.status, response_headers, response.body,
+        head_request: pending.request.method == "HEAD")
+      @request_registry.complete(pending.stream_id)
+    rescue => e
+      Quicsilver.logger.error("Streaming request error: #{e.class} - #{e.message}")
+      if pending.stream_handle
+        stream = Transport::InboundStream.new(pending.stream_id)
+        stream.stream_handle = pending.stream_handle
+        pending.connection.send_error(stream, 500, "Internal Server Error") if stream.writable?
+      end
+    ensure
+      @pending_mutex.synchronize { @pending_streams.delete(pending.stream_id) }
+      @request_registry.complete(pending.stream_id) if @request_registry.include?(pending.stream_id)
+      @cancelled_mutex.synchronize { @cancelled_streams.delete(pending.stream_id) }
+    end
+
+    # Incrementally extract complete DATA frame payloads from the frame buffer.
+    # Handles MsQuic splitting frames across RECEIVE callbacks — partial frames
+    # remain in the buffer until the next callback completes them.
+    def drain_data_frames(pending)
+      buf = pending.frame_buffer
+
+      while buf.bytesize >= 2
+        type_byte = buf.getbyte(0)
+        if type_byte < 0x40
+          type = type_byte
+          type_len = 1
+        else
+          type, type_len = Protocol.decode_varint_str(buf, 0)
+          break if type_len == 0
+        end
+
+        len_byte = buf.getbyte(type_len)
+        break unless len_byte
+        if len_byte < 0x40
+          length = len_byte
+          length_len = 1
+        else
+          length, length_len = Protocol.decode_varint_str(buf, type_len)
+          break if length_len == 0
+        end
+
+        header_len = type_len + length_len
+        total = header_len + length
+
+        # Incomplete frame — wait for more data
+        break if buf.bytesize < total
+
+        if type == Protocol::FRAME_DATA
+          pending.body.write(buf.byteslice(header_len, length))
+        end
+        # Skip non-DATA frames (e.g. unknown extension frames)
+
+        buf = buf.byteslice(total..-1) || "".b
+      end
+
+      pending.frame_buffer = buf
+    end
+
+    # Heuristic: check if raw data starts with an HTTP/3 HEADERS frame (type 0x01).
+    # QUIC typically delivers complete frames, but if this misidentifies data,
+    # the parser will fail safely in dispatch_streaming's rescue handlers.
+    def contains_headers_frame?(data)
+      return false if data.nil? || data.bytesize < 2
+      data.getbyte(0) == Protocol::FRAME_HEADERS
     end
 
     def stop_worker_pool
