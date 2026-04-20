@@ -27,7 +27,7 @@ class QuicsilverTest < Minitest::Test
     
     error_raised = false
     begin
-      client.connect
+      client.get("/")
     rescue Quicsilver::ConnectionError
       error_raised = true
     rescue Quicsilver::TimeoutError
@@ -48,8 +48,9 @@ class QuicsilverTest < Minitest::Test
   end
 
   def test_client_server_communication
-    server = Quicsilver::Server.new(4434, server_configuration: default_server_config) # Use different port to avoid conflicts
-    client = Quicsilver::Client.new("localhost", 4434, connection_timeout: 5000)
+    port = find_available_port
+    server = Quicsilver::Server.new(port, server_configuration: default_server_config)
+    client = Quicsilver::Client.new("localhost", port, connection_timeout: 5000)
     
     # Start server in a separate thread
     server_thread = Thread.new { server.start }
@@ -57,13 +58,13 @@ class QuicsilverTest < Minitest::Test
 
     # Test client connection
     begin
-      client.connect
-      assert client.connected?, "Client should be connected to server"
+      response = client.get("/")
+      assert client.connected?, "Client should be connected after first request"
       
       # Test connection info when connected
       info = client.connection_info
       assert_equal "localhost", info[:hostname]
-      assert_equal 4434, info[:port]
+      assert_equal port, info[:port]
       assert info[:uptime] >= 0, "Uptime should be non-negative"
       
     rescue Quicsilver::ConnectionError, Quicsilver::TimeoutError => e
@@ -79,12 +80,13 @@ class QuicsilverTest < Minitest::Test
   end
 
   def test_multiple_clients_connecting
-    server = Quicsilver::Server.new(4435, server_configuration: default_server_config) # Use different port
+    port = find_available_port
+    server = Quicsilver::Server.new(port, server_configuration: default_server_config)
     clients = []
     
     # Create multiple clients
     3.times do |i|
-      clients << Quicsilver::Client.new("localhost", 4435, connection_timeout: 3000)
+      clients << Quicsilver::Client.new("localhost", port, connection_timeout: 3000)
     end
     
     # Start server in a separate thread
@@ -95,7 +97,7 @@ class QuicsilverTest < Minitest::Test
     connected_clients = 0
     clients.each_with_index do |client, i|
       begin
-        client.connect
+        client.get("/")
         if client.connected?
           connected_clients += 1
           assert client.connected?, "Client #{i} should be connected"
@@ -117,15 +119,16 @@ class QuicsilverTest < Minitest::Test
 
   def test_listener_uses_configured_alpn
     # Server with non-standard ALPN — client uses "h3" so handshake should fail
+    port = find_available_port
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, alpn: "not-h3")
-    server = Quicsilver::Server.new(4437, server_configuration: config)
-    client = Quicsilver::Client.new("localhost", 4437, connection_timeout: 2000)
+    server = Quicsilver::Server.new(port, server_configuration: config)
+    client = Quicsilver::Client.new("localhost", port, connection_timeout: 2000)
 
     server_thread = Thread.new { server.start }
     wait_for_server(server)
 
     assert_raises(Quicsilver::ConnectionError, Quicsilver::TimeoutError) do
-      client.connect
+      client.get("/")
     end
   ensure
     client&.disconnect if client&.connected?
@@ -134,7 +137,8 @@ class QuicsilverTest < Minitest::Test
   end
 
   def test_server_restart_after_stop
-    server = Quicsilver::Server.new(4436, server_configuration: default_server_config)
+    port = find_available_port
+    server = Quicsilver::Server.new(port, server_configuration: default_server_config)
 
     # Start server in thread (since start blocks)
     server_thread = Thread.new { server.start }

@@ -1,13 +1,9 @@
 # frozen_string_literal: true
 
-require "timeout"
-
 module Quicsilver
   class Client
     attr_reader :hostname, :port, :unsecure, :connection_timeout, :request_timeout
 
-    AlreadyConnectedError = Class.new(StandardError)
-    NotConnectedError = Class.new(StandardError)
     StreamFailedToOpenError = Class.new(StandardError)
 
     FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING].freeze
@@ -15,7 +11,7 @@ module Quicsilver
     DEFAULT_REQUEST_TIMEOUT = 30  # seconds
     DEFAULT_CONNECTION_TIMEOUT = 5000  # ms
 
-    def initialize(hostname, port = 4433, options = {})
+    def initialize(hostname, port = 4433, **options)
       @hostname = hostname
       @port = port
       @unsecure = options.fetch(:unsecure, true)
@@ -33,53 +29,58 @@ module Quicsilver
       @mutex = Mutex.new
     end
 
-    def connect
-      raise AlreadyConnectedError if @connected
+    # --- Class-level API (automatic pooling) ---
+    #
+    #   Quicsilver::Client.get("example.com", 4433, "/users")
+    #   Quicsilver::Client.post("example.com", 4433, "/data", body: json)
+    #
+    class << self
+      attr_writer :pool
 
-      Quicsilver.open_connection
-      config = Quicsilver.create_configuration(@unsecure)
-      raise ConnectionError, "Failed to create configuration" if config.nil?
+      def pool
+        @pool ||= ConnectionPool.new
+      end
 
-      start_connection(config)
-      @connected = true
-      @connection_start_time = Time.now
-      send_control_stream
-      Quicsilver.event_loop.start
+      def close_pool
+        @pool&.close
+        @pool = nil
+      end
 
-      self
-    rescue => e
-      cleanup_failed_connection
-      raise e.is_a?(ConnectionError) || e.is_a?(TimeoutError) ? e : ConnectionError.new("Connection failed: #{e.message}")
-    ensure
-      Quicsilver.close_configuration(config)
+      # Fire-and-forget HTTP methods with automatic pooling.
+      %i[get post patch delete head put].each do |method|
+        define_method(method) do |hostname, port, path, headers: {}, body: nil, **options, &block|
+          request(hostname, port, method, path, headers: headers, body: body, **options, &block)
+        end
+      end
+
+      def request(hostname, port, method, path, headers: {}, body: nil, **options, &block)
+        client = pool.checkout(hostname, port, **options)
+        client.public_send(method, path, headers: headers, body: body, &block)
+      ensure
+        pool.checkin(client) if client
+      end
     end
 
+    # Disconnect and close the underlying QUIC connection.
     def disconnect
-      return unless @connection_data
+      return unless @connected
 
       @connected = false
 
-      # Fail pending requests
       @mutex.synchronize do
         @pending_requests.each_value { |req| req.fail(0, "Connection closed") }
         @pending_requests.clear
         @response_buffers.clear
       end
 
-      Quicsilver.close_connection_handle(@connection_data) if @connection_data
-      @connection_data = nil
+      close_connection
     end
 
-    # HTTP methods - block gives you request control, no block returns response directly
+    # Instance-level HTTP methods. Auto-connects on first use.
     #
-    #   # Simple (blocking)
-    #   response = client.get("/users")
-    #
-    #   # With control
-    #   client.get("/users") do |req|
-    #     req.cancel if should_abort?
-    #     req.response
-    #   end
+    #   client = Quicsilver::Client.new("example.com", 4433)
+    #   client.get("/users")   # connects automatically
+    #   client.post("/data", body: json)
     #
     %i[get post patch delete head put].each do |method|
       define_method(method) do |path, headers: {}, body: nil, &block|
@@ -88,9 +89,8 @@ module Quicsilver
       end
     end
 
-    # Build and send request, returns Request object for lifecycle control
     def build_request(method, path, headers: {}, body: nil)
-      raise NotConnectedError unless @connected
+      ensure_connected!
 
       stream = open_stream
       raise StreamFailedToOpenError unless stream
@@ -119,6 +119,35 @@ module Quicsilver
 
     def authority
       "#{@hostname}:#{@port}"
+    end
+
+    # :nodoc:
+    def open_connection
+      return self if @connected
+
+      Quicsilver.open_connection
+      config = Quicsilver.create_configuration(@unsecure)
+      raise ConnectionError, "Failed to create configuration" if config.nil?
+
+      start_connection(config)
+      @connected = true
+      @connection_start_time = Time.now
+      send_control_stream
+      Quicsilver.event_loop.start
+
+      self
+    rescue => e
+      cleanup_failed_connection
+      raise e.is_a?(ConnectionError) || e.is_a?(TimeoutError) ? e : ConnectionError.new("Connection failed: #{e.message}")
+    ensure
+      Quicsilver.close_configuration(config) if config
+    end
+
+    # :nodoc:
+    def close_connection
+      Quicsilver.close_connection_handle(@connection_data) if @connection_data
+      @connection_data = nil
+      @connected = false
     end
 
     # Called directly by C extension via dispatch_to_ruby
@@ -167,6 +196,11 @@ module Quicsilver
 
     private
 
+    def ensure_connected!
+      return if @connected
+      open_connection
+    end
+
     def start_connection(config)
       connection_handle, context_handle = create_connection
       unless Quicsilver.start_connection(connection_handle, config, @hostname, @port)
@@ -205,7 +239,6 @@ module Quicsilver
       @control_stream = open_unidirectional_stream
       @control_stream.send(Protocol.build_control_stream)
 
-      # RFC 9204: QPACK encoder (0x02) and decoder (0x03) streams
       [0x02, 0x03].each do |type|
         stream = open_unidirectional_stream
         stream.send([type].pack("C"))

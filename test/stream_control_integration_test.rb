@@ -3,11 +3,8 @@
 require "test_helper"
 
 class StreamControlIntegrationTest < Minitest::Test
-  @@port_counter = 6000
-
   def setup
-    @@port_counter += 1
-    @port = @@port_counter
+    @port = find_available_port
     @client = nil
     @server = nil
     @server_thread = nil
@@ -159,7 +156,6 @@ class StreamControlIntegrationTest < Minitest::Test
     wait_for_server(@server)
 
     @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 5000, request_timeout: 10)
-    @client.connect
 
     # Fire 3 requests concurrently — MsQuic should queue the 3rd
     threads = 3.times.map { |i| Thread.new { @client.get("/req#{i}") } }
@@ -276,8 +272,6 @@ class StreamControlIntegrationTest < Minitest::Test
     wait_for_server(@server)
 
     @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 5000, request_timeout: 10)
-    @client.connect
-    assert @client.connected?, "Client should be connected"
   end
 
   def default_server_config

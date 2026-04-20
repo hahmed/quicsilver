@@ -4,7 +4,6 @@ require "test_helper"
 
 class ServerClientIntegrationTest < Minitest::Test
   def setup
-    @port = 4433 + rand(1000)
     @server = nil
     @server_thread = nil
   end
@@ -22,7 +21,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     response = client.get("/test-path")
 
@@ -42,7 +40,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     response = client.post("/upload", body: "test body content")
 
@@ -62,7 +59,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     responses = 3.times.map { client.get("/") }
 
@@ -83,7 +79,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     client.get("/", headers: {
       "user-agent" => "Quicsilver/Test",
@@ -104,7 +99,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     response = client.get("/")
 
@@ -120,7 +114,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     response = client.put("/resource/123", body: '{"name":"updated"}')
 
@@ -136,7 +129,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(crashing_app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     response = client.get("/")
 
@@ -153,7 +145,7 @@ class ServerClientIntegrationTest < Minitest::Test
 
     3.times do
       client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-      client.connect
+      client.get("/")        # auto-connects
       assert client.connected?
       client.disconnect
       sleep 0.02
@@ -172,7 +164,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     # 256KB body — large enough to potentially split across RECEIVE events
     large_body = "x" * 262_144
@@ -195,7 +186,6 @@ class ServerClientIntegrationTest < Minitest::Test
     start_server(app)
 
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
-    client.connect
 
     payloads = ["small", "a" * 1024, "b" * 65_536]
     payloads.each { |p| client.post("/", body: p) }
@@ -208,13 +198,66 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # --- Connection pool behavior ---
+
+  def test_class_level_get_reuses_connections
+    app = ->(_env) { [200, {}, ["OK"]] }
+    start_server(app)
+
+    Quicsilver::Client.close_pool # start fresh
+
+    5.times { Quicsilver::Client.get("127.0.0.1", @port, "/", unsecure: true) }
+
+    # Pool should have created only 1 connection, not 5
+    assert_equal 1, Quicsilver::Client.pool.size
+  ensure
+    Quicsilver::Client.close_pool
+  end
+
+  def test_instance_client_auto_connects_on_first_request
+    app = ->(_env) { [200, {}, ["OK"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    refute client.connected?
+
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert client.connected?
+  ensure
+    client&.disconnect
+  end
+
+  def test_disconnect_closes_connection
+    app = ->(_env) { [200, {}, ["OK"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    client.get("/")
+    assert client.connected?
+
+    client.disconnect
+    refute client.connected?
+  end
+
   private
 
   def start_server(app)
-    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
-    @server = Quicsilver::Server.new(@port, app: app, server_configuration: config)
+    3.times do |attempt|
+      @port = find_available_port
+      config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
+      @server = Quicsilver::Server.new(@port, app: app, server_configuration: config)
 
-    @server_thread = Thread.new { @server.start }
-    wait_for_server(@server)
+      @server_thread = Thread.new { @server.start }
+      begin
+        wait_for_server(@server)
+        return
+      rescue RuntimeError => e
+        raise unless e.message.include?("failed to start") && attempt < 2
+
+        @server.shutdown rescue nil
+      end
+    end
   end
 end

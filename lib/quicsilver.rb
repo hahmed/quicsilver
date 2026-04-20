@@ -31,6 +31,7 @@ require_relative "quicsilver/server/server"
 
 # Client
 require_relative "quicsilver/client/request"
+require_relative "quicsilver/client/connection_pool"
 require_relative "quicsilver/client/client"
 
 # C extension
@@ -61,6 +62,16 @@ module Quicsilver
       Logger.new($stdout, level: Logger::INFO).tap do |log|
         log.progname = "Quicsilver"
       end
+    end
+  end
+
+  # Release pooled client connections on process exit.
+  # Closes connection handles so the OS doesn't leak UDP sockets.
+  # MsQuic itself is cleaned up by the OS when the process exits.
+  at_exit do
+    begin
+      Client.close_pool
+    rescue StandardError # rubocop:disable Lint/SuppressedException
     end
   end
 end

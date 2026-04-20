@@ -13,15 +13,8 @@ module IntegrationHelpers
     "curl"
   end
 
-  PORT_MUTEX = Mutex.new
-  @@integration_port_counter = 7000
-
-  def next_port
-    PORT_MUTEX.synchronize { @@integration_port_counter += 1 }
-  end
-
   def start_server(app)
-    @port = next_port
+    @port = find_available_port
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
     @server = Quicsilver::Server.new(@port, app: app, server_configuration: config)
     @server_thread = Thread.new { @server.start }

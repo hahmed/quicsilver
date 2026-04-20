@@ -31,16 +31,14 @@ class EventLoopTest < Minitest::Test
   end
 
   def test_request_completes_under_100ms
-    server = create_server(4470)
+    port = find_available_port
+    server = create_server(port)
     server_thread = Thread.new { server.start }
     wait_for_server(server)
 
-    client = Quicsilver::Client.new("localhost", 4470, connection_timeout: 5000)
+    client = Quicsilver::Client.new("localhost", port, connection_timeout: 5000)
 
     begin
-      client.connect
-      assert client.connected?, "Client should be connected"
-
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       response = client.get("/") { |_req| }
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
