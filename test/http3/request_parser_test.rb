@@ -350,6 +350,110 @@ class RequestParserTest < Minitest::Test
     assert_equal "trailers", parser.headers["te"]
   end
 
+  # === Trailer support (RFC 9114 §4.1) ===
+
+  def test_trailers_parsed_from_headers_data_headers_sequence
+    headers_payload = build_qpack_headers(
+      ":method" => "POST",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/"
+    )
+    trailer_payload = build_qpack_headers(
+      "x-checksum" => "abc123"
+    )
+
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    data += build_frame(Quicsilver::Protocol::FRAME_DATA, "body")
+    data += build_frame(Quicsilver::Protocol::FRAME_HEADERS, trailer_payload)
+
+    parser = Quicsilver::Protocol::RequestParser.new(data)
+    parser.parse
+
+    assert_equal "POST", parser.headers[":method"]
+    assert_equal "body", parser.body.read
+    assert_equal "abc123", parser.trailers["x-checksum"]
+  end
+
+  def test_trailers_without_data_frames
+    # HEADERS → HEADERS (no DATA in between) — trailers still valid
+    headers_payload = build_qpack_headers(
+      ":method" => "POST",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/"
+    )
+    trailer_payload = build_qpack_headers("x-checksum" => "abc123")
+
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    data += build_frame(Quicsilver::Protocol::FRAME_HEADERS, trailer_payload)
+
+    parser = Quicsilver::Protocol::RequestParser.new(data)
+    parser.parse
+
+    assert_equal "abc123", parser.trailers["x-checksum"]
+  end
+
+  def test_data_after_trailers_is_rejected
+    headers_payload = build_qpack_headers(
+      ":method" => "POST",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/"
+    )
+    trailer_payload = build_qpack_headers("x-checksum" => "abc123")
+
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    data += build_frame(Quicsilver::Protocol::FRAME_DATA, "body")
+    data += build_frame(Quicsilver::Protocol::FRAME_HEADERS, trailer_payload)
+    data += build_frame(Quicsilver::Protocol::FRAME_DATA, "more data")
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      parser = Quicsilver::Protocol::RequestParser.new(data)
+      parser.parse
+    end
+  end
+
+  def test_third_headers_frame_is_rejected
+    headers_payload = build_qpack_headers(
+      ":method" => "POST",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/"
+    )
+    trailer_payload = build_qpack_headers("x-checksum" => "abc123")
+    extra_headers = build_qpack_headers("x-bad" => "nope")
+
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    data += build_frame(Quicsilver::Protocol::FRAME_DATA, "body")
+    data += build_frame(Quicsilver::Protocol::FRAME_HEADERS, trailer_payload)
+    data += build_frame(Quicsilver::Protocol::FRAME_HEADERS, extra_headers)
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      parser = Quicsilver::Protocol::RequestParser.new(data)
+      parser.parse
+    end
+  end
+
+  def test_trailers_must_not_contain_pseudo_headers
+    headers_payload = build_qpack_headers(
+      ":method" => "POST",
+      ":scheme" => "https",
+      ":authority" => "localhost:4433",
+      ":path" => "/"
+    )
+    trailer_payload = build_qpack_headers(":method" => "GET")
+
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    data += build_frame(Quicsilver::Protocol::FRAME_DATA, "body")
+    data += build_frame(Quicsilver::Protocol::FRAME_HEADERS, trailer_payload)
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      parser = Quicsilver::Protocol::RequestParser.new(data)
+      parser.parse
+    end
+  end
+
   def test_frames_are_recorded
     headers_payload = build_qpack_headers(
       ":method" => "POST",

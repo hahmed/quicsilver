@@ -6,7 +6,7 @@ require_relative "qpack/header_block_decoder"
 module Quicsilver
   module Protocol
     class RequestParser
-      attr_reader :headers, :bytes_consumed
+      attr_reader :headers, :trailers, :bytes_consumed
 
       def frames
         @frames || []
@@ -230,10 +230,12 @@ module Quicsilver
 
       def parse!
         @headers = {}
+        @trailers = {}
         @bytes_consumed = 0
         buffer = @data
         offset = 0
         headers_received = false
+        trailers_received = false
         buf_size = buffer.bytesize
 
         while offset < buf_size
@@ -279,10 +281,19 @@ module Quicsilver
             if @max_header_size && length > @max_header_size
               raise Protocol::MessageError, "Header block #{length} exceeds limit #{@max_header_size}"
             end
-            parse_headers(payload)
-            headers_received = true
+            if trailers_received
+              raise Protocol::FrameError, "HEADERS frame after trailers"
+            elsif headers_received
+              # Second HEADERS = trailers
+              parse_trailers(payload)
+              trailers_received = true
+            else
+              parse_headers(payload)
+              headers_received = true
+            end
           when 0x00 # DATA
             raise Protocol::FrameError, "DATA frame before HEADERS" unless headers_received
+            raise Protocol::FrameError, "DATA frame after trailers" if trailers_received
             unless @body
               @body = StringIO.new
               @body.set_encoding(Encoding::ASCII_8BIT)
@@ -353,6 +364,16 @@ module Quicsilver
         if use_cache && HEADERS_CACHE.size < HEADERS_CACHE_MAX && payload.bytesize <= 512
           key = payload.frozen? ? payload : payload.dup.freeze
           HEADERS_CACHE[key] = @headers.dup.freeze
+        end
+      end
+
+      def parse_trailers(payload)
+        @trailers = {}
+        @decoder.decode(payload) do |name, value|
+          if name.start_with?(":")
+            raise Protocol::MessageError, "Pseudo-header '#{name}' in trailers"
+          end
+          @trailers[name] = value
         end
       end
 

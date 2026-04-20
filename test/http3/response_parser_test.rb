@@ -283,6 +283,52 @@ class ResponseParserTest < Minitest::Test
     assert_equal 'max-age=31536000; includeSubDomains; preload', Quicsilver::Protocol::STATIC_TABLE[58][1]
   end
 
+  # === Trailer support (RFC 9114 §4.1) ===
+
+  def test_trailers_parsed_from_response
+    headers_payload = build_qpack_response_headers(200, { "content-type" => "text/plain" })
+    trailer_payload = build_qpack_response_headers_raw({ "x-checksum" => "abc123" })
+
+    data = build_frame(HEADERS, headers_payload)
+    data += build_frame(DATA, "body")
+    data += build_frame(HEADERS, trailer_payload)
+
+    parser = parse(data)
+
+    assert_equal 200, parser.status
+    assert_equal "body", parser.body.read
+    assert_equal "abc123", parser.trailers["x-checksum"]
+  end
+
+  def test_data_after_response_trailers_is_rejected
+    headers_payload = build_qpack_response_headers(200, {})
+    trailer_payload = build_qpack_response_headers_raw({ "x-checksum" => "abc123" })
+
+    data = build_frame(HEADERS, headers_payload)
+    data += build_frame(DATA, "body")
+    data += build_frame(HEADERS, trailer_payload)
+    data += build_frame(DATA, "more")
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      parse(data)
+    end
+  end
+
+  def test_third_headers_frame_in_response_is_rejected
+    headers_payload = build_qpack_response_headers(200, {})
+    trailer_payload = build_qpack_response_headers_raw({ "x-checksum" => "abc123" })
+    extra = build_qpack_response_headers_raw({ "x-bad" => "nope" })
+
+    data = build_frame(HEADERS, headers_payload)
+    data += build_frame(DATA, "body")
+    data += build_frame(HEADERS, trailer_payload)
+    data += build_frame(HEADERS, extra)
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      parse(data)
+    end
+  end
+
   private
 
   HEADERS = Quicsilver::Protocol::FRAME_HEADERS
@@ -306,6 +352,10 @@ class ResponseParserTest < Minitest::Test
     Quicsilver::Protocol::Qpack::Encoder.new.encode(
       { ":status" => status.to_s }.merge(headers)
     )
+  end
+
+  def build_qpack_response_headers_raw(headers)
+    Quicsilver::Protocol::Qpack::Encoder.new.encode(headers)
   end
 
   def build_indexed_status(status)
