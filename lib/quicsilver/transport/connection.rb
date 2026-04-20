@@ -6,6 +6,7 @@ module Quicsilver
       attr_reader :handle, :data, :streams
       attr_reader :control_stream_id, :qpack_encoder_stream_id, :qpack_decoder_stream_id
       attr_reader :server_control_stream
+      attr_reader :peer_goaway_id
 
       def initialize(handle, data)
         @handle = handle
@@ -24,6 +25,7 @@ module Quicsilver
 
         @settings = {}
         @settings_received = false
+        @peer_goaway_id = nil
       end
 
       # === Setup (called after connection established) ===
@@ -288,6 +290,8 @@ module Quicsilver
             raise Protocol::FrameError, "Duplicate SETTINGS frame on control stream" if @settings_received
             parse_settings(data[offset + type_len + length_len, frame_length])
             @settings_received = true
+          elsif frame_type == Protocol::FRAME_GOAWAY
+            parse_goaway(data[offset + type_len + length_len, frame_length])
           end
 
           offset += type_len + length_len + frame_length
@@ -313,6 +317,31 @@ module Quicsilver
           offset += id_len + value_len
         end
       end
+      # RFC 9114 §7.2.6: Validate incoming GOAWAY frame.
+      # Stream ID must be a client-initiated bidirectional stream ID (divisible by 4)
+      # and must not increase from a previous GOAWAY.
+      def parse_goaway(payload)
+        stream_id, _ = Protocol.decode_varint(payload.bytes, 0)
+
+        # Must be a valid client-initiated bidirectional stream ID (0, 4, 8, ...)
+        unless stream_id % 4 == 0
+          raise Protocol::FrameError.new(
+            "GOAWAY stream ID #{stream_id} is not a client-initiated bidirectional stream ID",
+            error_code: Protocol::H3_ID_ERROR
+          )
+        end
+
+        # Must not increase from previous GOAWAY
+        if @peer_goaway_id && stream_id > @peer_goaway_id
+          raise Protocol::FrameError.new(
+            "GOAWAY stream ID #{stream_id} exceeds previous #{@peer_goaway_id}",
+            error_code: Protocol::H3_ID_ERROR
+          )
+        end
+
+        @peer_goaway_id = stream_id
+      end
+
       # RFC 9204 §4.1.3: Validate QPACK encoder stream instructions.
       # We advertise QPACK_MAX_TABLE_CAPACITY = 0, so any Set Dynamic Table Capacity
       # instruction with value > 0 is an error.

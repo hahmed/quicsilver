@@ -369,6 +369,49 @@ class ConnectionTest < Minitest::Test
     end
   end
 
+  # === GOAWAY validation (RFC 9114 §7.2.6) ===
+
+  def test_goaway_stores_peer_goaway_id
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+    conn.set_control_stream(1, build_settings_frame + build_goaway_frame(8))
+
+    assert_equal 8, conn.peer_goaway_id
+  end
+
+  def test_goaway_id_must_not_increase
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+    conn.set_control_stream(1, build_settings_frame + build_goaway_frame(8))
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      conn.send(:parse_control_frames, build_goaway_frame(12))
+    end
+  end
+
+  def test_goaway_id_can_decrease
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+    conn.set_control_stream(1, build_settings_frame + build_goaway_frame(8))
+    conn.send(:parse_control_frames, build_goaway_frame(4))
+
+    assert_equal 4, conn.peer_goaway_id
+  end
+
+  def test_goaway_id_must_be_valid_request_stream_id
+    # Request stream IDs are divisible by 4 (client-initiated bidirectional)
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+
+    assert_raises(Quicsilver::Protocol::FrameError) do
+      conn.set_control_stream(1, build_settings_frame + build_goaway_frame(5))
+    end
+  end
+
+  def test_goaway_accepts_valid_request_stream_ids
+    [0, 4, 8, 12].each do |id|
+      conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+      conn.set_control_stream(1, build_settings_frame + build_goaway_frame(id))
+      assert_equal id, conn.peer_goaway_id, "Should accept GOAWAY with stream ID #{id}"
+    end
+  end
+
   # === GOAWAY stream ID ===
 
   def test_last_client_stream_id_tracks_bidi_streams
@@ -387,6 +430,10 @@ class ConnectionTest < Minitest::Test
 
   def encode_varint(value)
     Quicsilver::Protocol.encode_varint(value)
+  end
+
+  def build_goaway_frame(stream_id)
+    Quicsilver::Protocol.build_goaway_frame(stream_id)
   end
 
   def build_settings_frame
