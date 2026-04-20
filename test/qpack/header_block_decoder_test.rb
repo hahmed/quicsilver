@@ -88,6 +88,31 @@ class HeaderBlockDecoderTest < Minitest::Test
     end
   end
 
+  # === QPACK prefix decoding (RFC 9204 §4.5.1) ===
+
+  def test_default_decoder_rejects_dynamic_table_references
+    # The built-in HeaderBlockDecoder is static-only. A Required Insert Count > 0
+    # means the peer encoded headers using dynamic table entries we can't resolve.
+    # Apps needing dynamic QPACK inject their own decoder via the decoder: kwarg.
+    payload = "\x01\x00\xD1".b
+
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode(payload) { |_n, _v| }
+    end
+    assert_match(/dynamic/i, error.message)
+  end
+
+  def test_default_decoder_rejects_nonzero_delta_base
+    # Delta Base != 0 also implies dynamic table usage, which the
+    # built-in static-only decoder cannot handle.
+    payload = "\x00\x01\xD1".b
+
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      Quicsilver::Protocol::Qpack::HeaderBlockDecoder.new.decode(payload) { |_n, _v| }
+    end
+    assert_match(/dynamic/i, error.message)
+  end
+
   # === RequestParser injectable decoder ===
 
   def test_request_parser_accepts_decoder_kwarg

@@ -51,7 +51,22 @@ module Quicsilver
           end
 
           headers = []
-          offset = 2 # skip required insert count + delta base prefix
+
+          # Decode Required Insert Count (RFC 9204 §4.5.1) — 8-bit prefix integer
+          required_insert_count, ric_bytes = decode_prefix_integer_str(payload, 0, 8, 0x00)
+          offset = ric_bytes
+
+          # Decode Delta Base (RFC 9204 §4.5.1) — 7-bit prefix integer with sign bit
+          delta_base, db_bytes = decode_prefix_integer_str(payload, offset, 7, 0x80)
+          offset += db_bytes
+
+          # Static-only mode: Required Insert Count and Delta Base must be 0
+          if required_insert_count != 0 || delta_base != 0
+            raise Protocol::FrameError.new(
+              "Dynamic QPACK table not supported (required_insert_count=#{required_insert_count}, delta_base=#{delta_base})",
+              error_code: Protocol::QPACK_DECOMPRESSION_FAILED
+            )
+          end
 
           while offset < payload.bytesize
             byte = payload.getbyte(offset)
