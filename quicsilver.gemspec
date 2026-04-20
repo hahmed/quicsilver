@@ -11,6 +11,7 @@ Gem::Specification.new do |spec|
   spec.summary       = %q{HTTP/3 server implementation for Ruby}
   spec.description   = %q{HTTP/3 server implementation for Ruby}
   spec.homepage      = "https://github.com/hahmed/quicsilver"
+  spec.license       = "MIT"
 
   # Prevent pushing this gem to RubyGems.org. To allow pushes either set the 'allowed_push_host'
   # to allow pushing to a single host or delete this section to allow pushing to any host.
