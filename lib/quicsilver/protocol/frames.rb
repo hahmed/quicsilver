@@ -230,12 +230,18 @@ module Quicsilver
         frame_type + frame_length + payload
       end
 
+      # Generate a random GREASE ID (RFC 9297): 31 * n + 33
+      def grease_id
+        31 * rand(0..20) + 33
+      end
+
       # Build control stream data
       def build_control_stream
         stream_type = [0x00].pack('C')  # Control stream type
         settings = build_settings_frame({
-          0x01 => 0,  # QPACK_MAX_TABLE_CAPACITY = 0 (no dynamic table)
-          0x07 => 0   # QPACK_BLOCKED_STREAMS = 0
+          0x01 => 0,           # QPACK_MAX_TABLE_CAPACITY = 0 (no dynamic table)
+          0x07 => 0,           # QPACK_BLOCKED_STREAMS = 0
+          grease_id => grease_id  # GREASE setting (RFC 9297)
         })
 
         stream_type + settings

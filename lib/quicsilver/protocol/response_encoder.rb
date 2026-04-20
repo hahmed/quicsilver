@@ -14,6 +14,7 @@ module Quicsilver
       # Buffered encode - returns all frames at once
       def encode
         frames = "".b
+        frames << build_grease_frame
         frames << build_frame(FRAME_HEADERS, @encoder.encode(all_headers))
         unless @head_request
           @body.each do |chunk|
@@ -26,7 +27,7 @@ module Quicsilver
 
       # Streaming encode - yields frames as they're ready
       def stream_encode
-        yield build_frame(FRAME_HEADERS, @encoder.encode(all_headers)), false
+        yield build_grease_frame + build_frame(FRAME_HEADERS, @encoder.encode(all_headers)), false
 
         unless @head_request
           last_chunk = nil
@@ -66,6 +67,11 @@ module Quicsilver
       def build_frame(type, payload)
         payload = payload.to_s.b
         Protocol.encode_varint(type) + Protocol.encode_varint(payload.bytesize) + payload
+      end
+
+      # RFC 9297: Send a GREASE frame with random type and empty payload
+      def build_grease_frame
+        build_frame(Protocol.grease_id, "")
       end
     end
   end

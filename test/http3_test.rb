@@ -110,7 +110,78 @@ class HTTP3Test < Minitest::Test
     assert_equal 0, settings[0x07], "QPACK_BLOCKED_STREAMS"
   end
 
+  # === GREASE (RFC 9297) ===
+
+  def test_control_stream_settings_contain_a_grease_id
+    stream = Quicsilver::Protocol.build_control_stream
+    bytes = stream.bytes
+
+    # Parse past stream type (0x00) to SETTINGS frame
+    frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+    frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
+    settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
+
+    grease_settings = settings.keys.select { |id| grease_id?(id) }
+    assert grease_settings.size >= 1, "SETTINGS must contain at least one GREASE identifier"
+  end
+
+  def test_grease_setting_id_varies_across_calls
+    ids = 10.times.map do
+      stream = Quicsilver::Protocol.build_control_stream
+      bytes = stream.bytes
+      frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+      frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
+      settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
+      settings.keys.find { |id| grease_id?(id) }
+    end
+
+    assert ids.uniq.size > 1, "GREASE setting ID should be random, got same value every time"
+  end
+
+  def test_response_includes_grease_frame
+    encoder = Quicsilver::Protocol::ResponseEncoder.new(200, { "content-type" => "text/plain" }, ["hello"])
+    data = encoder.encode
+
+    frames = parse_frames(data)
+    grease_frames = frames.select { |f| grease_id?(f[:type]) }
+    assert grease_frames.size >= 1, "Response must contain at least one GREASE frame"
+  end
+
+  def test_grease_frame_appears_before_headers
+    encoder = Quicsilver::Protocol::ResponseEncoder.new(200, {}, ["body"])
+    data = encoder.encode
+
+    frames = parse_frames(data)
+    first_grease = frames.index { |f| grease_id?(f[:type]) }
+    first_headers = frames.index { |f| f[:type] == Quicsilver::Protocol::FRAME_HEADERS }
+
+    assert first_grease, "Expected a GREASE frame"
+    assert first_headers, "Expected a HEADERS frame"
+    assert first_grease < first_headers, "GREASE frame must appear before HEADERS"
+  end
+
   private
+
+  # RFC 9297: GREASE IDs follow the formula 31 * n + 33
+  def grease_id?(id)
+    id >= 33 && (id - 33) % 31 == 0
+  end
+
+  def parse_frames(data)
+    frames = []
+    offset = 0
+    bytes = data.bytes
+    while offset < bytes.size
+      type, type_len = Quicsilver::Protocol.decode_varint(bytes, offset)
+      break if type_len == 0
+      length, length_len = Quicsilver::Protocol.decode_varint(bytes, offset + type_len)
+      break if length_len == 0
+      payload = data.byteslice(offset + type_len + length_len, length)
+      frames << { type: type, length: length, payload: payload }
+      offset += type_len + length_len + length
+    end
+    frames
+  end
 
   def parse_settings(bytes)
     settings = {}

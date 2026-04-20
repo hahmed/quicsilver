@@ -344,6 +344,14 @@ class ConnectionTest < Minitest::Test
     refute @connection.critical_stream?(15)
   end
 
+  def test_receive_unidirectional_data_ignores_grease_stream_type
+    # GREASE stream types (31*n+33) must be silently ignored
+    grease_type = 31 * 5 + 33  # 188
+    data = Quicsilver::Protocol.encode_varint(grease_type) + "GREASE".b
+    @connection.receive_unidirectional_data(19, data)
+    refute @connection.critical_stream?(19)
+  end
+
   def test_receive_unidirectional_data_handles_incremental_chunks
     # Send stream type in first chunk, settings in second
     @connection.receive_unidirectional_data(3, "\x00".b)

@@ -210,9 +210,10 @@ class ResponseEncoderTest < Minitest::Test
     data = encoder(200, { "content-type" => "text/plain" }, ["test"]).encode
 
     parser = parse_response(data)
-    assert_equal 2, parser.frames.length # HEADERS + DATA
-    assert_equal Quicsilver::Protocol::FRAME_HEADERS, parser.frames[0][:type]
-    assert_equal Quicsilver::Protocol::FRAME_DATA, parser.frames[1][:type]
+    protocol_frames = parser.frames.reject { |f| grease_id?(f[:type]) }
+    assert_equal 2, protocol_frames.length # HEADERS + DATA
+    assert_equal Quicsilver::Protocol::FRAME_HEADERS, protocol_frames[0][:type]
+    assert_equal Quicsilver::Protocol::FRAME_DATA, protocol_frames[1][:type]
   end
 
   # Roundtrip tests
@@ -247,8 +248,9 @@ class ResponseEncoderTest < Minitest::Test
     parser = parse_response(data)
 
     assert_decoded_status(data, 200)
-    assert_equal 1, parser.frames.length, "HEAD response should only have HEADERS frame"
-    assert_equal Quicsilver::Protocol::FRAME_HEADERS, parser.frames[0][:type]
+    protocol_frames = parser.frames.reject { |f| grease_id?(f[:type]) }
+    assert_equal 1, protocol_frames.length, "HEAD response should only have HEADERS frame"
+    assert_equal Quicsilver::Protocol::FRAME_HEADERS, protocol_frames[0][:type]
     assert_empty parse_body(data)
   end
 
@@ -292,16 +294,21 @@ class ResponseEncoderTest < Minitest::Test
     assert_equal true, frames[1][1], "Last DATA should have FIN=true"
   end
 
-  def test_stream_encode_produces_same_result_as_buffered
+  def test_stream_encode_produces_same_response_as_buffered
     body = ["chunk1", "chunk2", "chunk3"]
     headers = { "content-type" => "text/plain" }
 
     buffered = encoder(200, headers, body.dup).encode
-
     streamed = "".b
     encoder(200, headers, body.dup).stream_encode { |data, _fin| streamed << data }
 
-    assert_equal buffered, streamed, "Streaming should produce identical output"
+    # Both paths produce a parseable response with the same status, headers, and body
+    buffered_parser = parse_response(buffered)
+    streamed_parser = parse_response(streamed)
+
+    assert_equal buffered_parser.status, streamed_parser.status
+    assert_equal buffered_parser.headers, streamed_parser.headers
+    assert_equal buffered_parser.body.read, streamed_parser.body.read
   end
 
   def test_stream_encode_handles_empty_body
@@ -316,6 +323,10 @@ class ResponseEncoderTest < Minitest::Test
 
   def request(method, path, headers = {}, body = [])
     ecoder(status, headers, body).encode
+  end
+
+  def grease_id?(id)
+    id >= 33 && (id - 33) % 31 == 0
   end
 
   def encoder(status, headers, body, head_request: false)
