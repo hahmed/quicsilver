@@ -1,16 +1,11 @@
 # frozen_string_literal: true
 
-require "stringio"
-require_relative "qpack/header_block_decoder"
+require_relative "frame_parser"
 
 module Quicsilver
   module Protocol
-    class RequestParser
-      attr_reader :headers, :trailers, :bytes_consumed
-
-      def frames
-        @frames || []
-      end
+    class RequestParser < FrameParser
+      attr_reader :bytes_consumed
 
       # Known HTTP/3 request pseudo-headers (RFC 9114 §4.3.1)
       VALID_PSEUDO_HEADERS = %w[:method :scheme :authority :path :protocol].freeze
@@ -20,9 +15,6 @@ module Quicsilver
       FORBIDDEN_HEADERS = %w[connection transfer-encoding keep-alive upgrade proxy-connection te].freeze
       FORBIDDEN_SET = FORBIDDEN_HEADERS.each_with_object({}) { |h, s| s[h] = true }.freeze
 
-      # Frame types forbidden on request streams — use Set-like hash for O(1) lookup
-      CONTROL_ONLY_SET = Protocol::CONTROL_ONLY_FRAMES.each_with_object({}) { |f, h| h[f] = true }.freeze
-
       # Cache for validated header results: payload → headers hash
       # Only used when no custom limits are set (max_header_count, max_header_size)
       HEADERS_CACHE = {}
@@ -31,24 +23,20 @@ module Quicsilver
       DEFAULT_DECODER = Qpack::HeaderBlockDecoder.default
 
       def initialize(data, **opts)
+        decoder = opts.delete(:decoder) || DEFAULT_DECODER
+        @max_header_count = opts.delete(:max_header_count)
+        super(decoder: decoder, max_body_size: opts[:max_body_size],
+              max_header_size: opts[:max_header_size],
+              max_frame_payload_size: opts[:max_frame_payload_size])
         @data = data
-        if opts.empty?
-          @decoder = DEFAULT_DECODER
-          @use_parse_cache = true
-        else
-          @decoder = opts[:decoder] || DEFAULT_DECODER
-          @max_body_size = opts[:max_body_size]
-          @max_header_size = opts[:max_header_size]
-          @max_header_count = opts[:max_header_count]
-          @max_frame_payload_size = opts[:max_frame_payload_size]
-          @use_parse_cache = @decoder.equal?(DEFAULT_DECODER) && !@max_body_size && !@max_header_size && !@max_header_count && !@max_frame_payload_size
-        end
+        @use_parse_cache = @decoder.equal?(DEFAULT_DECODER) && !@max_body_size && !@max_header_size && !@max_header_count && !@max_frame_payload_size
       end
 
       # Reset parser with new data for object reuse (avoids allocation overhead)
       def reset(data)
         @data = data
-        @headers = nil
+        @headers = {}
+        @trailers = {}
         @frames = nil
         @body = nil
         @cached_body_str = nil
@@ -76,7 +64,8 @@ module Quicsilver
             return
           end
         end
-        @headers = nil
+        @headers = {}
+        @trailers = {}
         @frames = nil
         @body = nil
         @cached_body_str = nil
@@ -95,8 +84,6 @@ module Quicsilver
           EMPTY_BODY
         end
       end
-
-      EMPTY_BODY = StringIO.new("".b).tap { |io| io.set_encoding(Encoding::ASCII_8BIT) }
 
       # Class-level parse result cache
       PARSE_CACHE = {}
@@ -229,86 +216,10 @@ module Quicsilver
       private
 
       def parse!
-        @headers = {}
-        @trailers = {}
-        @bytes_consumed = 0
-        buffer = @data
-        offset = 0
-        headers_received = false
-        trailers_received = false
-        buf_size = buffer.bytesize
-
-        while offset < buf_size
-          break if buf_size - offset < 2
-
-          # Inline single-byte varint fast path (covers frame types 0x00-0x3F)
-          type_byte = buffer.getbyte(offset)
-          if type_byte < 0x40
-            type = type_byte
-            type_len = 1
-          else
-            type, type_len = Protocol.decode_varint_str(buffer, offset)
-          end
-
-          len_byte = buffer.getbyte(offset + type_len)
-          if len_byte < 0x40
-            length = len_byte
-            length_len = 1
-          else
-            length, length_len = Protocol.decode_varint_str(buffer, offset + type_len)
-            break if length_len == 0
-          end
-          break if type_len == 0
-
-          header_len = type_len + length_len
-
-          break if buf_size < offset + header_len + length
-
-          payload = buffer.byteslice(offset + header_len, length)
-
-          if @max_frame_payload_size && length > @max_frame_payload_size
-            raise Protocol::FrameError, "Frame payload #{length} exceeds limit #{@max_frame_payload_size}"
-          end
-
-          (@frames ||= []) << { type: type, length: length, payload: payload }
-
-          if CONTROL_ONLY_SET.key?(type)
-            raise Protocol::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
-          end
-
-          case type
-          when 0x01 # HEADERS
-            if @max_header_size && length > @max_header_size
-              raise Protocol::MessageError, "Header block #{length} exceeds limit #{@max_header_size}"
-            end
-            if trailers_received
-              raise Protocol::FrameError, "HEADERS frame after trailers"
-            elsif headers_received
-              # Second HEADERS = trailers
-              parse_trailers(payload)
-              trailers_received = true
-            else
-              parse_headers(payload)
-              headers_received = true
-            end
-          when 0x00 # DATA
-            raise Protocol::FrameError, "DATA frame before HEADERS" unless headers_received
-            raise Protocol::FrameError, "DATA frame after trailers" if trailers_received
-            unless @body
-              @body = StringIO.new
-              @body.set_encoding(Encoding::ASCII_8BIT)
-            end
-            @body.write(payload)
-            if @max_body_size && @body.size > @max_body_size
-              raise Protocol::MessageError, "Body size #{@body.size} exceeds limit #{@max_body_size}"
-            end
-          end
-
-          offset += header_len + length
-        end
-
-        @bytes_consumed = offset
-        @body&.rewind
+        result = walk_frames(@data)
+        @body = result.body
+        @frames = result.frames
+        @bytes_consumed = result.bytes_consumed
       end
 
       # Decode QPACK header block and validate per RFC 9114 §4.2 and §4.3.1:
@@ -364,16 +275,6 @@ module Quicsilver
         if use_cache && HEADERS_CACHE.size < HEADERS_CACHE_MAX && payload.bytesize <= 512
           key = payload.frozen? ? payload : payload.dup.freeze
           HEADERS_CACHE[key] = @headers.dup.freeze
-        end
-      end
-
-      def parse_trailers(payload)
-        @trailers = {}
-        @decoder.decode(payload) do |name, value|
-          if name.start_with?(":")
-            raise Protocol::MessageError, "Pseudo-header '#{name}' in trailers"
-          end
-          @trailers[name] = value
         end
       end
 
