@@ -58,19 +58,6 @@ module Quicsilver
         cache_result if @use_parse_cache
       end
 
-      def body
-        if @body
-          @body.rewind
-          @body
-        elsif @cached_body_str
-          @body = StringIO.new(@cached_body_str)
-          @body.set_encoding(Encoding::ASCII_8BIT)
-          @body
-        else
-          EMPTY_BODY
-        end
-      end
-
       # Class-level parse result cache: data → [status, headers, frames, body_str]
       PARSE_CACHE = {}
       PARSE_CACHE_MAX = 128

@@ -40,6 +40,19 @@ module Quicsilver
         @frames || []
       end
 
+      def body
+        if @body
+          @body.rewind
+          @body
+        elsif @cached_body_str
+          @body = StringIO.new(@cached_body_str)
+          @body.set_encoding(Encoding::ASCII_8BIT)
+          @body
+        else
+          EMPTY_BODY
+        end
+      end
+
       private
 
       def walk_frames(buffer)
