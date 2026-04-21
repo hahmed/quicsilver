@@ -311,6 +311,72 @@ class ResponseEncoderTest < Minitest::Test
     assert_equal buffered_parser.body.read, streamed_parser.body.read
   end
 
+  # === Trailer sending (RFC 9114 §4.1) ===
+
+  def test_encode_with_trailers
+    data = encoder(200, { "content-type" => "text/plain" }, ["Hello"],
+                   trailers: { "x-checksum" => "abc123" }).encode
+
+    parser = parse_response(data)
+    assert_equal 200, parser.status
+    assert_equal "Hello", parser.body.read
+    assert_equal "abc123", parser.trailers["x-checksum"]
+  end
+
+  def test_stream_encode_with_trailers
+    enc = encoder(200, { "content-type" => "text/plain" }, ["Hello"],
+                  trailers: { "x-checksum" => "abc123" })
+    streamed = "".b
+    enc.stream_encode { |data, _fin| streamed << data }
+
+    parser = parse_response(streamed)
+    assert_equal 200, parser.status
+    assert_equal "Hello", parser.body.read
+    assert_equal "abc123", parser.trailers["x-checksum"]
+  end
+
+  def test_encode_without_trailers_unchanged
+    data = encoder(200, {}, ["body"]).encode
+    parser = parse_response(data)
+
+    assert_equal 200, parser.status
+    assert_equal "body", parser.body.read
+    assert_empty parser.trailers
+  end
+
+  def test_encode_trailers_with_empty_body
+    data = encoder(200, { "content-type" => "application/grpc" }, [],
+                   trailers: { "grpc-status" => "14", "grpc-message" => "unavailable" }).encode
+
+    parser = parse_response(data)
+    assert_equal 200, parser.status
+    assert_empty parser.body.read
+    assert_equal "14", parser.trailers["grpc-status"]
+    assert_equal "unavailable", parser.trailers["grpc-message"]
+  end
+
+  def test_stream_encode_trailers_with_empty_body
+    enc = encoder(200, { "content-type" => "application/grpc" }, [],
+                  trailers: { "grpc-status" => "14", "grpc-message" => "unavailable" })
+    streamed = "".b
+    enc.stream_encode { |data, _fin| streamed << data }
+
+    parser = parse_response(streamed)
+    assert_equal 200, parser.status
+    assert_empty parser.body.read
+    assert_equal "14", parser.trailers["grpc-status"]
+  end
+
+  def test_trailers_do_not_include_pseudo_headers
+    data = encoder(200, {}, ["body"],
+                   trailers: { "x-checksum" => "abc" }).encode
+
+    parser = parse_response(data)
+    parser.trailers.each_key do |name|
+      refute name.start_with?(":"), "Trailer must not contain pseudo-header #{name}"
+    end
+  end
+
   def test_stream_encode_handles_empty_body
     enc = encoder(204, {}, [])
     frames = []
@@ -329,8 +395,8 @@ class ResponseEncoderTest < Minitest::Test
     id >= 33 && (id - 33) % 31 == 0
   end
 
-  def encoder(status, headers, body, head_request: false)
-    Quicsilver::Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request)
+  def encoder(status, headers, body, head_request: false, trailers: nil)
+    Quicsilver::Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request, trailers: trailers)
   end
 
   def parse_response(data)

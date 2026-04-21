@@ -3,12 +3,13 @@
 module Quicsilver
   module Protocol
     class ResponseEncoder
-      def initialize(status, headers, body, encoder: Qpack::Encoder.new, head_request: false)
+      def initialize(status, headers, body, encoder: Qpack::Encoder.new, head_request: false, trailers: nil)
         @status = status
         @headers = headers
         @body = body
         @encoder = encoder
         @head_request = head_request
+        @trailers = trailers
       end
 
       # Buffered encode - returns all frames at once
@@ -21,6 +22,7 @@ module Quicsilver
             frames << build_frame(FRAME_DATA, chunk) unless chunk.empty?
           end
         end
+        frames << build_frame(FRAME_HEADERS, @encoder.encode(trailer_headers)) if @trailers&.any?
         @body.close if @body.respond_to?(:close)
         frames
       end
@@ -36,7 +38,10 @@ module Quicsilver
             last_chunk = chunk
           end
 
-          if last_chunk && !last_chunk.empty?
+          if @trailers&.any?
+            yield build_frame(FRAME_DATA, last_chunk), false if last_chunk && !last_chunk.empty?
+            yield build_frame(FRAME_HEADERS, @encoder.encode(trailer_headers)), true
+          elsif last_chunk && !last_chunk.empty?
             yield build_frame(FRAME_DATA, last_chunk), true
           else
             yield "".b, true
@@ -62,6 +67,10 @@ module Quicsilver
           headers << [downcased, value.to_s]
         end
         headers
+      end
+
+      def trailer_headers
+        @trailers.map { |name, value| [name.to_s.downcase, value.to_s] }
       end
 
       def build_frame(type, payload)
