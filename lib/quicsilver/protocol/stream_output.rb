@@ -24,8 +24,10 @@ module Quicsilver
       # Each chunk is wrapped in an HTTP/3 DATA frame (type 0x00) and sent
       # via the writer. The final chunk is sent with fin=true.
       #
+      # @param send_fin [Boolean] Whether to send FIN after the last chunk.
+      #   Set to false when trailers will follow.
       # @return [void]
-      def stream
+      def stream(send_fin: true)
         last_chunk = nil
 
         while (chunk = @body.read)
@@ -36,8 +38,8 @@ module Quicsilver
         end
 
         if last_chunk
-          @writer.call(build_data_frame(last_chunk), true)
-        else
+          @writer.call(build_data_frame(last_chunk), send_fin)
+        elsif send_fin
           @writer.call("".b, true)
         end
       ensure

@@ -91,6 +91,74 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
     assert_equal "part1part2", received_body
   end
 
+  # === Trailer support ===
+
+  def test_send_response_with_trailers
+    headers = Protocol::HTTP::Headers.new
+    headers.add("content-type", "text/plain")
+    headers.trailer!
+    headers.add("x-checksum", "abc123")
+
+    body = Protocol::HTTP::Body::Buffered.wrap("Hello")
+    response = Protocol::HTTP::Response.new("h3", 200, headers, body)
+
+    sent = "".b
+    writer = ->(data, fin) { sent << data }
+
+    @adapter.send_response(response, writer)
+
+    parser = Quicsilver::Protocol::ResponseParser.new(sent)
+    parser.parse
+    assert_equal 200, parser.status
+    assert_equal "Hello", parser.body.read
+    assert_equal "abc123", parser.trailers["x-checksum"]
+  end
+
+  def test_send_response_streaming_with_trailers
+    headers = Protocol::HTTP::Headers.new
+    headers.add("content-type", "text/plain")
+    headers.trailer!
+    headers.add("x-checksum", "abc123")
+
+    body = Protocol::HTTP::Body::Buffered.wrap("streaming body")
+    response = Protocol::HTTP::Response.new("h3", 200, headers, body)
+
+    frames = []
+    writer = ->(data, fin) { frames << [data, fin] }
+
+    @adapter.send_response(response, writer)
+
+    # Last frame should be the trailer with FIN=true
+    assert frames.last[1], "Final frame (trailer) must have FIN=true"
+
+    # Non-final frames should not have FIN
+    frames[0..-2].each_with_index do |frame, i|
+      refute frame[1], "Frame #{i} should not have FIN"
+    end
+
+    # Round-trip: parse all frames together
+    all_data = frames.map(&:first).join
+    parser = Quicsilver::Protocol::ResponseParser.new(all_data)
+    parser.parse
+    assert_equal 200, parser.status
+    assert_equal "streaming body", parser.body.read
+    assert_equal "abc123", parser.trailers["x-checksum"]
+  end
+
+  def test_send_response_without_trailers_has_empty_trailers
+    body = Protocol::HTTP::Body::Buffered.wrap("Hello")
+    response = Protocol::HTTP::Response.new("h3", 200, Protocol::HTTP::Headers.new, body)
+
+    sent = "".b
+    writer = ->(data, fin) { sent << data }
+
+    @adapter.send_response(response, writer)
+
+    parser = Quicsilver::Protocol::ResponseParser.new(sent)
+    parser.parse
+    assert_empty parser.trailers
+  end
+
   def test_send_response_writer_error_propagates
     body = Protocol::HTTP::Body::Buffered.wrap("data")
     response = Protocol::HTTP::Response.new("h3", 200, Protocol::HTTP::Headers.new, body)

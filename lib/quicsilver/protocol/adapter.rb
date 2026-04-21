@@ -72,15 +72,17 @@ module Quicsilver
       # @return [void]
       def send_response(response, writer, head_request: false)
         status = response.status
-        headers = response_headers_hash(response.headers)
+        headers = response.headers
+        trailers = extract_trailers(headers)
+        headers_hash = response_headers_hash(headers)
         body = response.body
 
         if body.nil? || head_request
-          send_headers_only(status, headers, writer)
+          send_headers_only(status, headers_hash, writer, trailers: trailers)
         elsif body.respond_to?(:read)
-          stream_response(status, headers, body, writer)
+          stream_response(status, headers_hash, body, writer, trailers: trailers)
         else
-          buffer_response(status, headers, body, writer)
+          buffer_response(status, headers_hash, body, writer, trailers: trailers)
         end
       end
 
@@ -104,48 +106,68 @@ module Quicsilver
       end
 
       # No body — send HEADERS with FIN
-      def send_headers_only(status, headers, writer)
-        encoder = Quicsilver::Protocol::ResponseEncoder.new(status, headers, [])
+      def send_headers_only(status, headers, writer, trailers: nil)
+        encoder = Quicsilver::Protocol::ResponseEncoder.new(status, headers, [], trailers: trailers)
         writer.call(encoder.encode, true)
       end
 
       # Streaming body (protocol-http Body::Readable) — send HEADERS, then
       # stream DATA frames as chunks arrive. Used by Falcon mode.
-      def stream_response(status, headers, body, writer)
+      def stream_response(status, headers, body, writer, trailers: nil)
+        has_trailers = trailers&.any?
         writer.call(build_headers_frame(status, headers), false)
-        Protocol::StreamOutput.new(body, &writer).stream
+        Protocol::StreamOutput.new(body, &writer).stream(send_fin: !has_trailers)
+        writer.call(build_trailer_frame(trailers), true) if has_trailers
       end
 
       # Buffered body (Rack array or enumerable) — encode everything and send.
-      def buffer_response(status, headers, body, writer)
+      def buffer_response(status, headers, body, writer, trailers: nil)
         parts = body.respond_to?(:each) ? body : [body.to_s]
-        encoder = Quicsilver::Protocol::ResponseEncoder.new(status, headers, parts)
+        encoder = Quicsilver::Protocol::ResponseEncoder.new(status, headers, parts, trailers: trailers)
         writer.call(encoder.encode, true)
       ensure
         body.close if body.respond_to?(:close)
       end
 
-      # Convert Protocol::HTTP::Headers to a plain Hash for ResponseEncoder
-      def response_headers_hash(headers)
-        return {} unless headers
+      # Extract trailers from Protocol::HTTP::Headers if present.
+      # Returns a Hash or nil.
+      def extract_trailers(headers)
+        return nil unless headers.respond_to?(:trailer?) && headers.trailer?
 
         result = {}
-        headers.each do |name, value|
+        headers.trailer.each do |name, value|
           result[name] = value
         end
         result
       end
 
-      # Build just the HEADERS frame for streaming responses
-      def build_headers_frame(status, headers)
-        qpack_encoder = Quicsilver::Protocol::Qpack::Encoder.new
-        header_pairs = [[":status", status.to_s]]
-        headers.each { |name, value| header_pairs << [name.to_s.downcase, value.to_s] }
-        encoded = qpack_encoder.encode(header_pairs)
+      # Convert Protocol::HTTP::Headers to a plain Hash for ResponseEncoder.
+      # Only includes headers, not trailers.
+      def response_headers_hash(headers)
+        return {} unless headers
 
+        headers.header.to_h
+      end
+
+      # Build an HTTP/3 HEADERS frame from key-value pairs
+      def build_qpack_frame(pairs)
+        encoded = Quicsilver::Protocol::Qpack::Encoder.new.encode(pairs)
         Quicsilver::Protocol.encode_varint(Quicsilver::Protocol::FRAME_HEADERS) +
           Quicsilver::Protocol.encode_varint(encoded.bytesize) +
           encoded
+      end
+
+      # Build a response HEADERS frame (with :status pseudo-header)
+      def build_headers_frame(status, headers)
+        pairs = [[":status", status.to_s]]
+        headers.each { |name, value| pairs << [name.to_s.downcase, value.to_s] }
+        build_qpack_frame(pairs)
+      end
+
+      # Build a trailer HEADERS frame
+      def build_trailer_frame(trailers)
+        pairs = trailers.map { |name, value| [name.to_s.downcase, value.to_s] }
+        build_qpack_frame(pairs)
       end
     end
   end
