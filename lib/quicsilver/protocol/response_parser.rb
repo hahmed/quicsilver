@@ -7,8 +7,6 @@ module Quicsilver
     class ResponseParser < FrameParser
       attr_reader :status
 
-      DEFAULT_DECODER = Qpack::HeaderBlockDecoder.default
-
       def initialize(data, **opts)
         decoder = opts.delete(:decoder) || DEFAULT_DECODER
         super(decoder: decoder, max_body_size: opts[:max_body_size],

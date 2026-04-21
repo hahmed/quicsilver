@@ -15,6 +15,10 @@ module Quicsilver
     #   - parse_headers(payload) — decode the first HEADERS frame
     class FrameParser
       # Frame types forbidden on request streams — use hash for O(1) lookup
+      # Static-only QPACK decoder (no dynamic table). Used by default.
+      # Inject a custom decoder via decoder: kwarg for dynamic QPACK support.
+      DEFAULT_DECODER = Qpack::HeaderBlockDecoder.default
+
       CONTROL_ONLY_SET = Protocol::CONTROL_ONLY_FRAMES.each_with_object({}) { |f, h| h[f] = true }.freeze
 
       FrameResult = Struct.new(:headers, :trailers, :body, :frames, :bytes_consumed, keyword_init: true)

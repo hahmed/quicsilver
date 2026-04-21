@@ -20,8 +20,6 @@ module Quicsilver
       HEADERS_CACHE = {}
       HEADERS_CACHE_MAX = 256
 
-      DEFAULT_DECODER = Qpack::HeaderBlockDecoder.default
-
       def initialize(data, **opts)
         decoder = opts.delete(:decoder) || DEFAULT_DECODER
         super(decoder: decoder, max_body_size: opts[:max_body_size],
