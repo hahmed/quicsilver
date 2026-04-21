@@ -24,9 +24,9 @@ module Quicsilver
 
       def initialize(data, **opts)
         decoder = opts.delete(:decoder) || DEFAULT_DECODER
-        @max_header_count = opts.delete(:max_header_count)
         super(decoder: decoder, max_body_size: opts[:max_body_size],
               max_header_size: opts[:max_header_size],
+              max_header_count: opts[:max_header_count],
               max_frame_payload_size: opts[:max_frame_payload_size])
         @data = data
         @use_parse_cache = @decoder.equal?(DEFAULT_DECODER) && !@max_body_size && !@max_header_size && !@max_header_count && !@max_frame_payload_size
@@ -275,26 +275,6 @@ module Quicsilver
         if use_cache && HEADERS_CACHE.size < HEADERS_CACHE_MAX && payload.bytesize <= 512
           key = payload.frozen? ? payload : payload.dup.freeze
           HEADERS_CACHE[key] = @headers.dup.freeze
-        end
-      end
-
-      # RFC 9110 §5.3: Combine duplicate header values.
-      # - set-cookie: join with "\n" (Rack convention, MUST NOT combine with comma)
-      # - cookie: join with "; " (RFC 9114 §4.2.1)
-      # - all others: join with ", "
-      def store_header(name, value)
-        if @headers.key?(name)
-          separator = case name
-            when "set-cookie" then "\n"
-            when "cookie" then "; "
-            else ", "
-          end
-          @headers[name] = "#{@headers[name]}#{separator}#{value}"
-        else
-          if @max_header_count && @headers.size >= @max_header_count
-            raise Protocol::MessageError, "Header count exceeds limit #{@max_header_count}"
-          end
-          @headers[name] = value
         end
       end
     end

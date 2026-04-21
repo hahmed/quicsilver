@@ -22,10 +22,11 @@ module Quicsilver
 
       attr_reader :headers, :trailers
 
-      def initialize(decoder:, max_body_size: nil, max_header_size: nil, max_frame_payload_size: nil)
+      def initialize(decoder:, max_body_size: nil, max_header_size: nil, max_header_count: nil, max_frame_payload_size: nil)
         @decoder = decoder
         @max_body_size = max_body_size
         @max_header_size = max_header_size
+        @max_header_count = max_header_count
         @max_frame_payload_size = max_frame_payload_size
         @headers = {}
         @trailers = {}
@@ -93,6 +94,26 @@ module Quicsilver
           frames: frames || [],
           bytes_consumed: bytes_consumed
         )
+      end
+
+      # RFC 9110 §5.3: Combine duplicate header values.
+      # - set-cookie: join with "\n" (Rack convention, MUST NOT combine with comma)
+      # - cookie: join with "; " (RFC 9114 §4.2.1)
+      # - all others: join with ", "
+      def store_header(name, value)
+        if @headers.key?(name)
+          separator = case name
+            when "set-cookie" then "\n"
+            when "cookie" then "; "
+            else ", "
+          end
+          @headers[name] = "#{@headers[name]}#{separator}#{value}"
+        else
+          if @max_header_count && @headers.size >= @max_header_count
+            raise Protocol::MessageError, "Header count exceeds limit #{@max_header_count}"
+          end
+          @headers[name] = value
+        end
       end
 
       def parse_trailers(payload)
