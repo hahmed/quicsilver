@@ -269,32 +269,25 @@ module Quicsilver
       ].freeze
 
       def parse_control_frames(data)
-        offset = 0
         first_frame = !@settings_received
 
-        while offset < data.bytesize
-          frame_type, type_len = Protocol.decode_varint(data.bytes, offset)
-          frame_length, length_len = Protocol.decode_varint(data.bytes, offset + type_len)
-          break if type_len == 0 || length_len == 0
-
-          if first_frame && frame_type != Protocol::FRAME_SETTINGS
+        Protocol::FrameReader.each(data) do |type, payload|
+          if first_frame && type != Protocol::FRAME_SETTINGS
             raise Protocol::FrameError.new("First frame on control stream must be SETTINGS", error_code: Protocol::H3_MISSING_SETTINGS)
           end
           first_frame = false
 
-          if FORBIDDEN_ON_CONTROL.include?(frame_type)
-            raise Protocol::FrameError, "Frame type 0x#{frame_type.to_s(16)} not allowed on control stream"
+          if FORBIDDEN_ON_CONTROL.include?(type)
+            raise Protocol::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on control stream"
           end
 
-          if frame_type == Protocol::FRAME_SETTINGS
+          if type == Protocol::FRAME_SETTINGS
             raise Protocol::FrameError, "Duplicate SETTINGS frame on control stream" if @settings_received
-            parse_settings(data[offset + type_len + length_len, frame_length])
+            parse_settings(payload)
             @settings_received = true
-          elsif frame_type == Protocol::FRAME_GOAWAY
-            parse_goaway(data[offset + type_len + length_len, frame_length])
+          elsif type == Protocol::FRAME_GOAWAY
+            parse_goaway(payload)
           end
-
-          offset += type_len + length_len + frame_length
         end
       end
 
