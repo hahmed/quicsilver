@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - Unreleased
+
+### Added
+- Client connection pool with automatic reuse (`Quicsilver::Client.get/post` class-level API)
+- GREASE support (RFC 9297) — settings, frames, and unidirectional streams
+- GOAWAY validation (RFC 9114 §7.2.6) — monotonically decreasing IDs, stream ID validation
+- Trailer support (RFC 9114 §4.1) — parse and send trailing HEADERS frames
+- Extensible Priorities (RFC 9218) — parse `priority` header, PRIORITY_UPDATE frames on control stream, MsQuic stream priority mapping
+- FrameParser base class — unified frame walking, ordering, body accumulation, size limits
+- FrameReader module — shared byte-level frame extraction for request/response/control streams
+- Trailer wiring in Adapter and StreamOutput for protocol-http integration
+- MIT license in gemspec
+
+### Fixed
+- QPACK prefix decoding — decode Required Insert Count and Delta Base as varints instead of hardcoded `offset = 2`
+- Default decoder rejects payloads referencing the dynamic table
+- Response parser now enforces `max_frame_payload_size` (was missing)
+- Duplicate `frames` method in FrameParser
+- Consistent `@headers` and `@trailers` initialization (`{}` not `nil`)
+- extconf.rb — force Apple clang on macOS (Homebrew clang produces broken MsQuic binaries)
+
+### Changed
+- RequestParser and ResponseParser inherit from FrameParser (reduced ~230 lines of duplication)
+- `store_header`, `body`, `DEFAULT_DECODER`, `EMPTY_BODY`, `parse!` moved to FrameParser base class
+- `@body_io` renamed to `@body` in ResponseParser for consistency
+- ResponseEncoder accepts optional `trailers:` hash
+- StreamOutput accepts `send_fin:` parameter for trailer support
+
 ## [0.3.0] - 2026-03-23
 
 ### Added
