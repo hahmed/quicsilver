@@ -101,10 +101,6 @@ module Quicsilver
 
       private
 
-      def parse!
-        walk_frames(@data)
-      end
-
       # Cache for validated response header results
       HEADERS_CACHE = {}
       HEADERS_CACHE_MAX = 256

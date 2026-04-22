@@ -58,6 +58,10 @@ module Quicsilver
 
       private
 
+      def parse!
+        walk_frames(@data)
+      end
+
       def walk_frames(buffer)
         @headers = {}
         @trailers = {}

@@ -200,10 +200,6 @@ module Quicsilver
 
       private
 
-      def parse!
-        walk_frames(@data)
-      end
-
       # Decode QPACK header block and validate per RFC 9114 §4.2 and §4.3.1:
       # - Header names MUST be lowercase
       # - Pseudo-headers MUST appear before regular headers
