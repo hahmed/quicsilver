@@ -1,13 +1,25 @@
 # Quicsilver
 
-HTTP/3 server for Ruby with Rack support.
+HTTP/3 server and client for Ruby with Rack support.
 
-**Status:** Experimental (v0.2.0)
+## Features
+
+- **HTTP/3 server** — serve any Rack app over QUIC/HTTP/3
+- **HTTP/3 client** — make requests with automatic connection pooling
+- **Rack integration** — `rackup -s quicsilver` works with Rails, Sinatra, any Rack app
+- **Streaming** — dispatch on HEADERS, stream body chunks as they arrive
+- **Extensible Priorities** (RFC 9218) — CSS before images, server respects client priority hints
+- **Trailers** (RFC 9114 §4.1) — send/receive trailing headers after the body
+- **GREASE** (RFC 9297) — extensibility testing on settings, frames, and streams
+- **GOAWAY** (RFC 9114 §7.2.6) — graceful connection draining with validation
+- **0-RTT** — fast reconnection with replay protection
+- **Connection pooling** — client reuses connections automatically
+- **protocol-http integration** — works with Falcon and protocol-http ecosystem
 
 ## Installation
 
 ```bash
-git clone <repository>
+git clone https://github.com/hahmed/quicsilver
 cd quicsilver
 bundle install
 rake compile
@@ -21,18 +33,11 @@ rake compile
 require "quicsilver"
 
 app = ->(env) {
-  case env['PATH_INFO']
-  when '/'
-    [200, {'content-type' => 'text/plain'}, ["Hello HTTP/3!"]]
-  when '/api/users'
-    [200, {'content-type' => 'application/json'}, ['{"users": ["alice", "bob"]}']]
-  else
-    [404, {'content-type' => 'text/plain'}, ["Not Found"]]
-  end
+  [200, {"content-type" => "text/plain"}, ["Hello HTTP/3!"]]
 }
 
 server = Quicsilver::Server.new(4433, app: app)
-server.start  # Blocks until shutdown
+server.start
 ```
 
 ### Client
@@ -40,71 +45,102 @@ server.start  # Blocks until shutdown
 ```ruby
 require "quicsilver"
 
+# Class-level API with automatic connection pooling
+response = Quicsilver::Client.get("127.0.0.1", 4433, "/")
+puts response[:status]  # => 200
+puts response[:body]    # => "Hello HTTP/3!"
+
+# POST with body
+response = Quicsilver::Client.post("127.0.0.1", 4433, "/api/users",
+  body: '{"name": "alice"}',
+  headers: { "content-type" => "application/json" })
+
+# Instance-level for more control
 client = Quicsilver::Client.new("127.0.0.1", 4433, unsecure: true)
-client.connect
-
-response = client.get("/api/users")
-puts response[:body]
-
-response = client.post("/api/users", body: '{"name": "charlie"}')
-
+response = client.get("/")
 client.disconnect
 ```
 
-## Usage with Rails
+### Rails
 
 ```bash
 rackup -s quicsilver -p 4433
 ```
 
+### curl
+
+```bash
+curl --http3-only https://localhost:4433/
+```
+
 ## Configuration
 
 ```ruby
-config = Quicsilver::ServerConfiguration.new("/path/to/cert.pem", "/path/to/key.pem",
-  idle_timeout_ms: 10_000,        # Connection idle timeout (ms)
-  max_concurrent_requests: 100    # Max concurrent requests per connection
-)
-
-server = Quicsilver::Server.new(4433,
-  app: app,
-  address: "0.0.0.0",
-  server_configuration: config
-)
-```
-
-## Protocol-HTTP Mode
-
-Quicsilver supports [protocol-http](https://github.com/socketry/protocol-http) for integration with [Falcon](https://github.com/socketry/falcon) and other protocol-http based servers.
-
-```ruby
-require "quicsilver"
-
-# Any Rack app works — it's auto-wrapped for protocol-http
-app = ->(env) { [200, {"content-type" => "text/plain"}, ["Hello HTTP/3!"]] }
-
 config = Quicsilver::Transport::Configuration.new(
   "certificates/server.crt",
   "certificates/server.key",
-  mode: :protocol_http  # Enable protocol-http interfaces
+  idle_timeout_ms: 10_000,
+  max_concurrent_requests: 100,
+  max_body_size: 10 * 1024 * 1024,      # 10MB body limit (optional)
+  max_header_size: 64 * 1024,            # 64KB header limit (optional)
+  max_header_count: 128,                 # Header count limit (optional)
+  stream_receive_window: 262_144,        # 256KB per stream
+  connection_flow_control_window: 16_777_216  # 16MB per connection
 )
 
 server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
 server.start
 ```
 
-### Modes
+## Priorities
 
-| Mode | Interface | Body Handling | Default |
-|------|-----------|---------------|---------|
-| `:rack` | Rack env hash | Buffered (full body before dispatch) | ✅ |
-| `:protocol_http` | `Protocol::HTTP::Request/Response` | Streaming-ready | |
+Browsers send priority hints on requests. Quicsilver parses them and tells MsQuic to schedule high-priority streams first.
+
+```
+GET /style.css  → priority: u=0    → sent first (highest urgency)
+GET /app.js     → priority: u=1    → sent second
+GET /hero.png   → priority: u=5    → sent later
+```
+
+No configuration needed — it works automatically.
+
+## Trailers
+
+Send headers after the body — useful for checksums, streaming status, and gRPC.
+
+```ruby
+# Trailers work with protocol-http's Headers#trailer! API
+headers = Protocol::HTTP::Headers.new
+headers.add("content-type", "text/plain")
+headers.trailer!
+headers.add("x-checksum", "abc123")
+```
+
+## Protocol-HTTP Mode
+
+For integration with [Falcon](https://github.com/socketry/falcon) and the protocol-http ecosystem:
+
+```ruby
+config = Quicsilver::Transport::Configuration.new(
+  "certificates/server.crt",
+  "certificates/server.key",
+  mode: :protocol_http
+)
+
+server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
+server.start
+```
+
+| Mode | Body Handling | Use Case |
+|------|---------------|----------|
+| `:rack` (default) | Buffered | Standard Rack apps |
+| `:protocol_http` | Streaming | Falcon, protocol-http apps |
 
 ## Development
 
 ```bash
-rake compile  # Build C extension
+rake compile  # Build C extension (macOS: uses Apple clang automatically)
 rake test     # Run tests
-rake clean    # Clean build artifacts
 ```
 
 ## License
