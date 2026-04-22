@@ -76,6 +76,8 @@ module Quicsilver
         end
         body&.close_write
 
+        connection.apply_stream_priority(stream, parser.priority)
+
         @request_registry.track(
           stream.stream_id, connection.handle,
           path: headers[":path"] || "/", method: method || "GET"

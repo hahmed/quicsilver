@@ -239,9 +239,12 @@ module Quicsilver
       # MsQuic: 0 = lowest, 0xFFFF = highest.
       # HTTP urgency: 0 = highest, 7 = lowest.
       # Maps urgency into evenly spaced bands across the uint16 range.
+      # The priority is queued and applied on the MsQuic event thread.
       def apply_stream_priority(stream, priority)
+        handle = stream.respond_to?(:stream_handle) ? stream.stream_handle : nil
+        return unless handle
         quic_priority = (7 - priority.urgency) * 0x2000
-        Quicsilver.set_stream_priority(stream.stream_handle, quic_priority)
+        Quicsilver.set_stream_priority(handle, quic_priority)
       rescue => e
         Quicsilver.logger.debug("Failed to set stream priority: #{e.message}")
       end

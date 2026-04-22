@@ -79,6 +79,12 @@ typedef struct {
     QUIC_STATUS error_status;
 } StreamContext;
 
+// Pending stream priorities — set from Ruby threads, applied on MsQuic event thread.
+// Simple array-based storage (max 256 pending). Key = stream handle, value = priority + 1.
+#define MAX_PENDING_PRIORITIES 256
+static struct { HQUIC stream; uint16_t priority_plus_one; } PendingPriorities[MAX_PENDING_PRIORITIES];
+static int PendingPriorityCount = 0;
+
 // rb_protect wrapper — catches Ruby exceptions so they don't longjmp
 // through MsQuic callback frames (which would corrupt MsQuic state).
 // All Ruby object construction AND the funcall happen inside rb_protect.
@@ -271,6 +277,17 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
 
     if (ctx == NULL) {
         return QUIC_STATUS_SUCCESS;
+    }
+
+    // Apply pending priority on the event loop thread (safe context for SetParam)
+    for (int i = 0; i < PendingPriorityCount; i++) {
+        if (PendingPriorities[i].stream == Stream) {
+            uint16_t priority = PendingPriorities[i].priority_plus_one - 1;
+            // Remove by swapping with last
+            PendingPriorities[i] = PendingPriorities[--PendingPriorityCount];
+            MsQuic->SetParam(Stream, QUIC_PARAM_STREAM_PRIORITY, sizeof(priority), &priority);
+            break;
+        }
     }
 
     switch (Event->Type) {
@@ -1215,22 +1232,24 @@ quicsilver_stream_reset(VALUE self, VALUE stream_handle, VALUE error_code)
     return Qtrue;
 }
 
-// Set QUIC stream priority (RFC 9218 mapping: urgency 0-7 → QUIC priority)
+// Queue a stream priority change. Called from Ruby threads — just stores the
+// priority. The actual SetParam happens on the MsQuic event thread in StreamCallback.
 static VALUE
 quicsilver_set_stream_priority(VALUE self, VALUE stream_handle, VALUE priority)
 {
-    if (MsQuic == NULL) {
-        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
-        return Qnil;
-    }
+    if (MsQuic == NULL) return Qnil;
 
     HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
     if (Stream == NULL) return Qnil;
 
+    if (PendingPriorityCount >= MAX_PENDING_PRIORITIES) return Qfalse;
+
     uint16_t Priority = (uint16_t)NUM2UINT(priority);
+    PendingPriorities[PendingPriorityCount].stream = Stream;
+    PendingPriorities[PendingPriorityCount].priority_plus_one = Priority + 1;
+    PendingPriorityCount++;
 
-    MsQuic->SetParam(Stream, QUIC_PARAM_STREAM_PRIORITY, sizeof(Priority), &Priority);
-
+    wake_event_loop();
     return Qtrue;
 }
 

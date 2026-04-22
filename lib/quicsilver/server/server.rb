@@ -17,7 +17,7 @@ module Quicsilver
 
     # Tracks an in-flight streaming request between RECEIVE and RECEIVE_FIN.
     # The stream handle arrives at RECEIVE_FIN; the worker thread waits for it.
-    PendingStream = Struct.new(:connection, :body, :request, :stream_id, :stream_handle, :handle_ready, :frame_buffer, keyword_init: true) do
+    PendingStream = Struct.new(:connection, :body, :request, :stream_id, :stream_handle, :handle_ready, :frame_buffer, :priority, keyword_init: true) do
       def initialize(**)
         super
         self.handle_ready = Queue.new
@@ -438,7 +438,8 @@ module Quicsilver
         connection: connection,
         body: body,
         request: request,
-        stream_id: stream_id
+        stream_id: stream_id,
+        priority: parser.priority
       )
 
       # Unconsumed bytes go into the frame buffer for incremental parsing
@@ -491,6 +492,7 @@ module Quicsilver
       stream = Transport::InboundStream.new(pending.stream_id)
       stream.stream_handle = stream_handle
 
+      pending.connection.apply_stream_priority(stream, pending.priority)
       pending.connection.send_response(stream, response.status, response_headers, response.body,
         head_request: pending.request.method == "HEAD")
       @request_registry.complete(pending.stream_id)
