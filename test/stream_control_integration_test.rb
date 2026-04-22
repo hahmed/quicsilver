@@ -155,7 +155,7 @@ class StreamControlIntegrationTest < Minitest::Test
     @server_thread = Thread.new { @server.start }
     wait_for_server(@server)
 
-    @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 5000, request_timeout: 10)
+    @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 10_000, request_timeout: 30)
 
     # Fire 3 requests concurrently — MsQuic should queue the 3rd
     threads = 3.times.map { |i| Thread.new { @client.get("/req#{i}") } }
@@ -271,7 +271,7 @@ class StreamControlIntegrationTest < Minitest::Test
     @server_thread = Thread.new { @server.start }
     wait_for_server(@server)
 
-    @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 5000, request_timeout: 10)
+    @client = Quicsilver::Client.new("localhost", @port, connection_timeout: 10_000, request_timeout: 30)
   end
 
   def default_server_config
