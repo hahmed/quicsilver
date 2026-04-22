@@ -10,6 +10,7 @@ module Quicsilver
     FRAME_PUSH_PROMISE = 0x05
     FRAME_GOAWAY = 0x07
     FRAME_MAX_PUSH_ID = 0x0d
+    FRAME_PRIORITY_UPDATE = 0xF0700  # RFC 9218 — request stream priority update
 
     # Frame types forbidden on request streams (RFC 9114 Section 7.2.4, 7.2.6, 7.2.7)
     CONTROL_ONLY_FRAMES = [FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID].freeze

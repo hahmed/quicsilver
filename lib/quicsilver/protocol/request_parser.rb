@@ -1,10 +1,17 @@
 # frozen_string_literal: true
 
 require_relative "frame_parser"
+require_relative "priority"
 
 module Quicsilver
   module Protocol
     class RequestParser < FrameParser
+
+      # The parsed priority from the `priority` header (RFC 9218).
+      # Returns a Priority with defaults if no header present.
+      def priority
+        @priority ||= Priority.parse(@headers["priority"])
+      end
 
       # Known HTTP/3 request pseudo-headers (RFC 9114 §4.3.1)
       VALID_PSEUDO_HEADERS = %w[:method :scheme :authority :path :protocol].freeze

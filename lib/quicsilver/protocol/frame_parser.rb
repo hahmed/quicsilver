@@ -39,10 +39,6 @@ module Quicsilver
         @trailers = {}
       end
 
-      def frames
-        @frames || []
-      end
-
       def body
         if @body
           @body.rewind

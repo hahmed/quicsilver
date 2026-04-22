@@ -412,6 +412,45 @@ class ConnectionTest < Minitest::Test
     end
   end
 
+  # === PRIORITY_UPDATE (RFC 9218 §7) ===
+
+  def test_priority_update_stores_stream_priority
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+    conn.set_control_stream(1, build_settings_frame + build_priority_update_frame(4, "u=0, i"))
+
+    priority = conn.stream_priority(4)
+    assert_equal 0, priority.urgency
+    assert priority.incremental
+  end
+
+  def test_priority_update_overwrites_previous
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+    conn.set_control_stream(1,
+      build_settings_frame +
+      build_priority_update_frame(4, "u=5") +
+      build_priority_update_frame(4, "u=1, i"))
+
+    priority = conn.stream_priority(4)
+    assert_equal 1, priority.urgency
+    assert priority.incremental
+  end
+
+  def test_priority_update_for_unknown_stream_still_stores
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+    conn.set_control_stream(1, build_settings_frame + build_priority_update_frame(8, "u=2"))
+
+    priority = conn.stream_priority(8)
+    assert_equal 2, priority.urgency
+  end
+
+  def test_stream_priority_returns_default_when_not_set
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+
+    priority = conn.stream_priority(4)
+    assert_equal 3, priority.urgency
+    refute priority.incremental
+  end
+
   # === GOAWAY stream ID ===
 
   def test_last_client_stream_id_tracks_bidi_streams
@@ -430,6 +469,13 @@ class ConnectionTest < Minitest::Test
 
   def encode_varint(value)
     Quicsilver::Protocol.encode_varint(value)
+  end
+
+  def build_priority_update_frame(stream_id, priority_value)
+    payload = Quicsilver::Protocol.encode_varint(stream_id) + priority_value.b
+    Quicsilver::Protocol.encode_varint(Quicsilver::Protocol::FRAME_PRIORITY_UPDATE) +
+      Quicsilver::Protocol.encode_varint(payload.bytesize) +
+      payload
   end
 
   def build_goaway_frame(stream_id)

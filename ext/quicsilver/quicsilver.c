@@ -1215,6 +1215,25 @@ quicsilver_stream_reset(VALUE self, VALUE stream_handle, VALUE error_code)
     return Qtrue;
 }
 
+// Set QUIC stream priority (RFC 9218 mapping: urgency 0-7 → QUIC priority)
+static VALUE
+quicsilver_set_stream_priority(VALUE self, VALUE stream_handle, VALUE priority)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+
+    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    if (Stream == NULL) return Qnil;
+
+    uint16_t Priority = (uint16_t)NUM2UINT(priority);
+
+    MsQuic->SetParam(Stream, QUIC_PARAM_STREAM_PRIORITY, sizeof(Priority), &Priority);
+
+    return Qtrue;
+}
+
 // Stop sending on a QUIC stream (STOP_SENDING frame - requests peer to stop)
 static VALUE
 quicsilver_stream_stop_sending(VALUE self, VALUE stream_handle, VALUE error_code)
@@ -1277,6 +1296,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "send_stream", quicsilver_send_stream, 3);
     rb_define_singleton_method(mQuicsilver, "stream_reset", quicsilver_stream_reset, 2);
     rb_define_singleton_method(mQuicsilver, "stream_stop_sending", quicsilver_stream_stop_sending, 2);
+    rb_define_singleton_method(mQuicsilver, "set_stream_priority", quicsilver_set_stream_priority, 2);
 
     // Event processing (custom execution — app drives MsQuic)
     rb_define_singleton_method(mQuicsilver, "poll", quicsilver_poll, 0);

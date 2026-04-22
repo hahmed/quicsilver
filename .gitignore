@@ -13,3 +13,4 @@
 lib/quicsilver/quicsilver.bundle
 *.gem
 autoresearch.*
+ext/quicsilver/Makefile

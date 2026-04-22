@@ -7,6 +7,7 @@ module Quicsilver
       attr_reader :control_stream_id, :qpack_encoder_stream_id, :qpack_decoder_stream_id
       attr_reader :server_control_stream
       attr_reader :peer_goaway_id
+      attr_reader :stream_priorities
 
       def initialize(handle, data)
         @handle = handle
@@ -26,6 +27,7 @@ module Quicsilver
         @settings = {}
         @settings_received = false
         @peer_goaway_id = nil
+        @stream_priorities = {}
       end
 
       # === Setup (called after connection established) ===
@@ -228,6 +230,22 @@ module Quicsilver
         @settings
       end
 
+      # Get the priority for a stream. Returns default Priority if not set.
+      def stream_priority(stream_id)
+        @stream_priorities[stream_id] || Protocol::Priority.new
+      end
+
+      # Apply priority to a QUIC stream via MsQuic.
+      # MsQuic: 0 = lowest, 0xFFFF = highest.
+      # HTTP urgency: 0 = highest, 7 = lowest.
+      # Maps urgency into evenly spaced bands across the uint16 range.
+      def apply_stream_priority(stream, priority)
+        quic_priority = (7 - priority.urgency) * 0x2000
+        Quicsilver.set_stream_priority(stream.stream_handle, quic_priority)
+      rescue => e
+        Quicsilver.logger.debug("Failed to set stream priority: #{e.message}")
+      end
+
       def critical_stream?(stream_id)
         stream_id == @control_stream_id ||
           stream_id == @qpack_encoder_stream_id ||
@@ -287,6 +305,8 @@ module Quicsilver
             @settings_received = true
           elsif type == Protocol::FRAME_GOAWAY
             parse_goaway(payload)
+          elsif type == Protocol::FRAME_PRIORITY_UPDATE
+            parse_priority_update(payload)
           end
         end
       end
@@ -333,6 +353,14 @@ module Quicsilver
         end
 
         @peer_goaway_id = stream_id
+      end
+
+      # RFC 9218 §7: Parse PRIORITY_UPDATE frame.
+      # Payload is a stream ID varint followed by a Priority Field Value string.
+      def parse_priority_update(payload)
+        stream_id, consumed = Protocol.decode_varint(payload.bytes, 0)
+        priority_value = payload[consumed..]
+        @stream_priorities[stream_id] = Protocol::Priority.parse(priority_value)
       end
 
       # RFC 9204 §4.1.3: Validate QPACK encoder stream instructions.

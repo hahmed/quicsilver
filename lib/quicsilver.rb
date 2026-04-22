@@ -5,6 +5,7 @@ require_relative "quicsilver/version"
 
 # Protocol layer
 require_relative "quicsilver/protocol/frames"
+require_relative "quicsilver/protocol/priority"
 require_relative "quicsilver/protocol/qpack/encoder"
 require_relative "quicsilver/protocol/request_parser"
 require_relative "quicsilver/protocol/request_encoder"

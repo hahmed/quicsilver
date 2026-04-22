@@ -1,5 +1,12 @@
 require 'mkmf'
 
+# On macOS, use Apple clang if available. Homebrew clang can't find
+# system headers and produces broken binaries with MsQuic.
+if RUBY_PLATFORM =~ /darwin/ && File.exist?("/usr/bin/clang")
+  RbConfig::CONFIG["CC"] = "/usr/bin/clang"
+  RbConfig::MAKEFILE_CONFIG["CC"] = "/usr/bin/clang"
+end
+
 # Find MSQUIC in the submodule
 msquic_dir = File.expand_path('../../../vendor/msquic', __FILE__)
 
