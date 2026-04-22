@@ -21,10 +21,13 @@ module Quicsilver
 
       CONTROL_ONLY_SET = Protocol::CONTROL_ONLY_FRAMES.each_with_object({}) { |f, h| h[f] = true }.freeze
 
-      FrameResult = Struct.new(:headers, :trailers, :body, :frames, :bytes_consumed, keyword_init: true)
       EMPTY_BODY = StringIO.new("".b).tap { |io| io.set_encoding(Encoding::ASCII_8BIT) }
 
-      attr_reader :headers, :trailers
+      attr_reader :headers, :trailers, :bytes_consumed
+
+      def frames
+        @frames || []
+      end
 
       def initialize(decoder:, max_body_size: nil, max_header_size: nil, max_header_count: nil, max_frame_payload_size: nil)
         @decoder = decoder
@@ -58,17 +61,18 @@ module Quicsilver
       def walk_frames(buffer)
         @headers = {}
         @trailers = {}
-        body = nil
-        frames = nil
+        @body = nil
+        @frames = nil
+        @bytes_consumed = 0
         headers_received = false
         trailers_received = false
 
-        bytes_consumed = FrameReader.each(buffer) do |type, payload|
+        @bytes_consumed = FrameReader.each(buffer) do |type, payload|
           if @max_frame_payload_size && payload.bytesize > @max_frame_payload_size
             raise Protocol::FrameError, "Frame payload #{payload.bytesize} exceeds limit #{@max_frame_payload_size}"
           end
 
-          (frames ||= []) << { type: type, length: payload.bytesize, payload: payload }
+          (@frames ||= []) << { type: type, length: payload.bytesize, payload: payload }
 
           if CONTROL_ONLY_SET.key?(type)
             raise Protocol::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
@@ -91,26 +95,18 @@ module Quicsilver
           when 0x00 # DATA
             raise Protocol::FrameError, "DATA frame before HEADERS" unless headers_received
             raise Protocol::FrameError, "DATA frame after trailers" if trailers_received
-            unless body
-              body = StringIO.new
-              body.set_encoding(Encoding::ASCII_8BIT)
+            unless @body
+              @body = StringIO.new
+              @body.set_encoding(Encoding::ASCII_8BIT)
             end
-            body.write(payload)
-            if @max_body_size && body.size > @max_body_size
-              raise Protocol::MessageError, "Body size #{body.size} exceeds limit #{@max_body_size}"
+            @body.write(payload)
+            if @max_body_size && @body.size > @max_body_size
+              raise Protocol::MessageError, "Body size #{@body.size} exceeds limit #{@max_body_size}"
             end
           end
         end
 
-        body&.rewind
-
-        FrameResult.new(
-          headers: @headers,
-          trailers: @trailers,
-          body: body,
-          frames: frames || [],
-          bytes_consumed: bytes_consumed
-        )
+        @body&.rewind
       end
 
       # RFC 9110 §5.3: Combine duplicate header values.

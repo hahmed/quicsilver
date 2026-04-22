@@ -102,9 +102,7 @@ module Quicsilver
       private
 
       def parse!
-        result = walk_frames(@data)
-        @body = result.body
-        @frames = result.frames
+        walk_frames(@data)
       end
 
       # Cache for validated response header results

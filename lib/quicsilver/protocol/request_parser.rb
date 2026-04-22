@@ -5,7 +5,6 @@ require_relative "frame_parser"
 module Quicsilver
   module Protocol
     class RequestParser < FrameParser
-      attr_reader :bytes_consumed
 
       # Known HTTP/3 request pseudo-headers (RFC 9114 §4.3.1)
       VALID_PSEUDO_HEADERS = %w[:method :scheme :authority :path :protocol].freeze
@@ -202,10 +201,7 @@ module Quicsilver
       private
 
       def parse!
-        result = walk_frames(@data)
-        @body = result.body
-        @frames = result.frames
-        @bytes_consumed = result.bytes_consumed
+        walk_frames(@data)
       end
 
       # Decode QPACK header block and validate per RFC 9114 §4.2 and §4.3.1:
