@@ -465,6 +465,46 @@ class ConnectionTest < Minitest::Test
     assert_equal 0, @connection.send(:last_client_stream_id)
   end
 
+  # === Two-phase GOAWAY (RFC 9114 §5.2) ===
+
+  def test_send_goaway_sends_frame_and_tracks_id
+    mock_stream = Minitest::Mock.new
+    mock_stream.expect(:send, true, [String])
+    @connection.instance_variable_set(:@server_control_stream, mock_stream)
+
+    @connection.send_goaway(8)
+
+    assert_equal 8, @connection.local_goaway_id
+    mock_stream.verify
+  end
+
+  def test_validate_goaway_id_allows_decreasing
+    @connection.instance_variable_set(:@local_goaway_id, 12)
+
+    @connection.validate_goaway_id!(4)
+    # no error raised
+  end
+
+  def test_validate_goaway_id_allows_equal
+    @connection.instance_variable_set(:@local_goaway_id, 8)
+
+    @connection.validate_goaway_id!(8)
+    # no error raised
+  end
+
+  def test_validate_goaway_id_rejects_increasing
+    @connection.instance_variable_set(:@local_goaway_id, 4)
+
+    assert_raises(ArgumentError) do
+      @connection.validate_goaway_id!(8)
+    end
+  end
+
+  def test_validate_goaway_id_allows_first_goaway
+    @connection.validate_goaway_id!(100)
+    # no error — first GOAWAY has no previous to compare against
+  end
+
   private
 
   def encode_varint(value)

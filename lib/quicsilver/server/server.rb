@@ -197,6 +197,9 @@ module Quicsilver
       # Phase 2: Drain in-flight requests
       drain(timeout: timeout)
 
+      # Phase 2b: Send final GOAWAY with actual last processed stream ID (RFC 9114 §5.2)
+      @connections.each_value { |c| c.send_goaway rescue nil }
+
       # Grace period: let pending responses reach clients
       sleep [0.5, timeout * 0.1].min
 

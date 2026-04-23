@@ -6,7 +6,7 @@ module Quicsilver
       attr_reader :handle, :data, :streams
       attr_reader :control_stream_id, :qpack_encoder_stream_id, :qpack_decoder_stream_id
       attr_reader :server_control_stream
-      attr_reader :peer_goaway_id
+      attr_reader :peer_goaway_id, :local_goaway_id
       attr_reader :stream_priorities
 
       def initialize(handle, data, max_header_size: nil)
@@ -28,6 +28,7 @@ module Quicsilver
         @settings = {}
         @settings_received = false
         @peer_goaway_id = nil
+        @local_goaway_id = nil
         @stream_priorities = {}
       end
 
@@ -88,9 +89,21 @@ module Quicsilver
         return unless @server_control_stream
 
         stream_id ||= last_client_stream_id
+        validate_goaway_id!(stream_id)
+
         @server_control_stream.send(Protocol.build_goaway_frame(stream_id))
+        @local_goaway_id = stream_id
+      rescue ArgumentError
+        raise  # Re-raise validation errors
       rescue => e
         Quicsilver.logger.error("Failed to send GOAWAY: #{e.message}")
+      end
+
+      # RFC 9114 §5.2: GOAWAY IDs MUST NOT increase from a previous value.
+      def validate_goaway_id!(stream_id)
+        if @local_goaway_id && stream_id > @local_goaway_id
+          raise ArgumentError, "GOAWAY stream ID #{stream_id} exceeds previous #{@local_goaway_id}"
+        end
       end
 
       def send_response(stream, status, headers, body, head_request: false)
