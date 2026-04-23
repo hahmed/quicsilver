@@ -5,6 +5,11 @@ module Quicsilver
     class Connection
       include Protocol::ControlStreamParser
 
+      # MsQuic QUIC_STATUS_INVALID_STATE (POSIX errno ETOOMANYREFS = 0x59).
+      # Stream already shut down by peer — raised by StreamSend when the
+      # client has reset or closed the stream.
+      MSQUIC_INVALID_STATE = "0x59"
+
       attr_reader :handle, :data, :streams
       attr_reader :control_stream_id, :qpack_encoder_stream_id, :qpack_decoder_stream_id
       attr_reader :server_control_stream
@@ -108,6 +113,16 @@ module Quicsilver
         end
       end
 
+      # Send an informational (1xx) response before the final response.
+      # RFC 9114 §4.1: encoded as a HEADERS frame, no FIN.
+      def send_informational(stream, status, headers)
+        data = Protocol::ResponseEncoder.encode_informational(status, headers)
+        Quicsilver.send_stream(stream.stream_handle, data, false)
+      rescue RuntimeError => e
+        raise unless e.message.include?(MSQUIC_INVALID_STATE) || e.message.include?("StreamSend failed")
+        Quicsilver.logger.debug("Stream send failed (client likely reset): #{e.message}")
+      end
+
       def send_response(stream, status, headers, body, head_request: false)
         body = [] if body.nil?
         encoder = Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request)
@@ -121,7 +136,7 @@ module Quicsilver
         end
       rescue RuntimeError => e
         # Stream may have been reset by client - this is expected
-        raise unless e.message.include?("0x59") || e.message.include?("StreamSend failed")
+        raise unless e.message.include?(MSQUIC_INVALID_STATE) || e.message.include?("StreamSend failed")
         Quicsilver.logger.debug("Stream send failed (client likely reset): #{e.message}")
       end
 
@@ -131,7 +146,7 @@ module Quicsilver
         Quicsilver.send_stream(stream.stream_handle, encoder.encode, true)
       rescue RuntimeError => e
         # Stream may have been reset by client - this is expected
-        raise unless e.message.include?("0x59") || e.message.include?("StreamSend failed")
+        raise unless e.message.include?(MSQUIC_INVALID_STATE) || e.message.include?("StreamSend failed")
         Quicsilver.logger.debug("Stream send failed (client likely reset): #{e.message}")
       end
 

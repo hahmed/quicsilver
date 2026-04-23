@@ -3,6 +3,20 @@
 module Quicsilver
   module Protocol
     class ResponseEncoder
+      # Encode an informational (1xx) response as a single HEADERS frame.
+      # RFC 9114 §4.1: informational responses are encoded as HEADERS with no body.
+      def self.encode_informational(status, headers, encoder: Qpack::Encoder.new)
+        raise ArgumentError, "Informational status must be 1xx, got #{status}" unless (100..199).include?(status)
+
+        pairs = [[":status", status.to_s]]
+        headers.each { |name, value| pairs << [name.to_s.downcase, value.to_s] }
+        encoded = encoder.encode(pairs)
+
+        Protocol.encode_varint(FRAME_HEADERS) +
+          Protocol.encode_varint(encoded.bytesize) +
+          encoded
+      end
+
       def initialize(status, headers, body, encoder: Qpack::Encoder.new, head_request: false, trailers: nil)
         @status = status
         @headers = headers

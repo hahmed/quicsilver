@@ -72,14 +72,7 @@ module Quicsilver
       @pending_streams = {}  # stream_id => PendingStream (for streaming dispatch)
       @pending_mutex = Mutex.new
 
-      # Mode controls app wrapping, not the code path:
-      #   :rack (default) — app is a Rack app, wrap with Protocol::Rack::Adapter
-      #   :falcon        — app is a native protocol-http app, use directly
-      protocol_app = case @server_configuration.mode
-        when :rack then ::Protocol::Rack::Adapter.new(@app)
-        when :falcon then @app
-        else ::Protocol::Rack::Adapter.new(@app)
-      end
+      protocol_app = wrap_app(@app, @server_configuration.mode)
 
       @request_handler = RequestHandler.new(
         app: protocol_app,
@@ -280,6 +273,30 @@ module Quicsilver
     end
 
     private
+
+    # Wrap the user's app for the configured mode.
+    # Rack mode: inject rack.early_hints support, then wrap with protocol-rack.
+    # Falcon mode: pass through as-is (native protocol-http app).
+    def wrap_app(app, mode)
+      case mode
+      when :falcon then app
+      else ::Protocol::Rack::Adapter.new(with_early_hints(app))
+      end
+    end
+
+    # Bridges protocol-http's interim_response to Rack's rack.early_hints.
+    # In a Rails controller: send_early_hints("link" => '</style.css>; rel=preload')
+    def with_early_hints(app)
+      ->(env) {
+        request = env["protocol.http.request"]
+        if request&.respond_to?(:interim_response) && request.interim_response
+          env["rack.early_hints"] = ->(headers) {
+            request.send_interim_response(103, ::Protocol::HTTP::Headers[headers.map { |k, v| [k, v] }])
+          }
+        end
+        app.call(env)
+      }
+    end
 
     def setup_signal_handlers
       %w[INT TERM].each do |signal|

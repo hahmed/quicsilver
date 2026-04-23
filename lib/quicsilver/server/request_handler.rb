@@ -69,6 +69,13 @@ module Quicsilver
         request, body = @adapter.build_request(headers)
         request.headers.add("quicsilver-early-data", early_data.to_s)
 
+        # Wire interim_response so apps can send 103 Early Hints.
+        # Falcon mode: app calls request.send_interim_response(103, headers)
+        # Rack mode: bridged to rack.early_hints via EarlyHintsMiddleware
+        request.interim_response = ->(status, headers) {
+          connection.send_informational(stream, status, headers)
+        }
+
         if body && parser.body && parser.body.size > 0
           parser.body.rewind
           body_data = parser.body.read
