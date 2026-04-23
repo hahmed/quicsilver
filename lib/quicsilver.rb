@@ -14,6 +14,7 @@ require_relative "quicsilver/protocol/response_encoder"
 require_relative "quicsilver/protocol/stream_input"
 require_relative "quicsilver/protocol/stream_output"
 require_relative "quicsilver/protocol/adapter"
+require_relative "quicsilver/protocol/control_stream_parser"
 require "protocol/rack"
 
 # Transport layer

@@ -198,7 +198,11 @@ module Quicsilver
       drain(timeout: timeout)
 
       # Phase 2b: Send final GOAWAY with actual last processed stream ID (RFC 9114 §5.2)
-      @connections.each_value { |c| c.send_goaway rescue nil }
+      @connections.each_value do |c|
+        c.send_goaway
+      rescue => e
+        Quicsilver.logger.debug("Second GOAWAY failed: #{e.message}")
+      end
 
       # Grace period: let pending responses reach clients
       sleep [0.5, timeout * 0.1].min
