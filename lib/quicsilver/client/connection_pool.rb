@@ -27,16 +27,16 @@ module Quicsilver
         @mutex.synchronize do
           entries = @pools[key] ||= []
 
-          # Evict dead/stale
+          # Evict dead/stale/draining
           entries.reject! do |e|
-            if !e[:checked_out] && (!e[:client].connected? || e[:last_used] < Time.now - @idle_timeout)
+            if !e[:checked_out] && (!e[:client].connected? || e[:client].draining? || e[:last_used] < Time.now - @idle_timeout)
               e[:client].close_connection
               true
             end
           end
 
-          # Reuse an idle client
-          idle = entries.find { |e| !e[:checked_out] && e[:client].connected? }
+          # Reuse an idle client (skip draining ones)
+          idle = entries.find { |e| !e[:checked_out] && e[:client].connected? && !e[:client].draining? }
           if idle
             idle[:checked_out] = true
             idle[:last_used] = Time.now

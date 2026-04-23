@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - FrameParser base class — unified frame walking, ordering, body accumulation, size limits
 - FrameReader module — shared byte-level frame extraction for request/response/control streams
 - Trailer wiring in Adapter and StreamOutput for protocol-http integration
+- Two-phase GOAWAY shutdown (§5.2) — server sends decreasing GOAWAY IDs during graceful shutdown
+- Client processes server SETTINGS (§7.2.4) — parses peer's SETTINGS including MAX_FIELD_SECTION_SIZE
+- Client processes server GOAWAY (§5.2) — tracks peer_goaway_id, blocks new requests, connection pool evicts draining connections
 - MIT license in gemspec
 
 ### Fixed
