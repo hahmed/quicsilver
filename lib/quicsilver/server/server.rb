@@ -230,7 +230,8 @@ module Quicsilver
           return
         end
 
-        connection = Transport::Connection.new(connection_handle, connection_data)
+        connection = Transport::Connection.new(connection_handle, connection_data,
+          max_header_size: @server_configuration.max_header_size)
         @connections[connection_handle] = connection
         connection.setup_http3_streams
 

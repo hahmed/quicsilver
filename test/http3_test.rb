@@ -110,6 +110,35 @@ class HTTP3Test < Minitest::Test
     assert_equal 0, settings[0x07], "QPACK_BLOCKED_STREAMS"
   end
 
+  def test_build_control_stream_with_max_field_section_size
+    stream = Quicsilver::Protocol.build_control_stream(max_field_section_size: 8192)
+    bytes = stream.bytes
+
+    assert_equal 0x00, bytes[0]
+
+    frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+    assert_equal 0x04, frame_type
+
+    frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
+    settings_start = 1 + type_len + length_len
+    settings = parse_settings(bytes[settings_start, frame_length])
+
+    assert_equal 8192, settings[0x06], "SETTINGS_MAX_FIELD_SECTION_SIZE must be 8192"
+    assert_equal 0, settings[0x01], "QPACK_MAX_TABLE_CAPACITY"
+    assert_equal 0, settings[0x07], "QPACK_BLOCKED_STREAMS"
+  end
+
+  def test_build_control_stream_without_max_field_section_size
+    stream = Quicsilver::Protocol.build_control_stream
+    bytes = stream.bytes
+
+    frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+    frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
+    settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
+
+    refute settings.key?(0x06), "SETTINGS_MAX_FIELD_SECTION_SIZE must not be present when not configured"
+  end
+
   # === GREASE (RFC 9297) ===
 
   def test_control_stream_settings_contain_a_grease_id

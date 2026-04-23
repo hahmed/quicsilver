@@ -9,9 +9,10 @@ module Quicsilver
       attr_reader :peer_goaway_id
       attr_reader :stream_priorities
 
-      def initialize(handle, data)
+      def initialize(handle, data, max_header_size: nil)
         @handle = handle
         @data = data
+        @max_header_size = max_header_size
         @streams = {}
         @response_buffers = {}
         @mutex = Mutex.new
@@ -35,7 +36,7 @@ module Quicsilver
       def setup_http3_streams
         # Control stream (required)
         @server_control_stream = open_stream(unidirectional: true)
-        @server_control_stream.send(Protocol.build_control_stream)
+        @server_control_stream.send(Protocol.build_control_stream(max_field_section_size: @max_header_size))
 
         # QPACK encoder/decoder streams
         [0x02, 0x03].each do |type|

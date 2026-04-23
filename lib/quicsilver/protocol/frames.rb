@@ -237,15 +237,18 @@ module Quicsilver
       end
 
       # Build control stream data
-      def build_control_stream
+      # @param max_field_section_size [Integer, nil] Advertise SETTINGS_MAX_FIELD_SECTION_SIZE (0x06)
+      #   to the peer (RFC 9114 §4.2.2 / §7.2.4.1). nil = don't advertise.
+      def build_control_stream(max_field_section_size: nil)
         stream_type = [0x00].pack('C')  # Control stream type
-        settings = build_settings_frame({
+        settings_hash = {
           0x01 => 0,           # QPACK_MAX_TABLE_CAPACITY = 0 (no dynamic table)
           0x07 => 0,           # QPACK_BLOCKED_STREAMS = 0
-          grease_id => grease_id  # GREASE setting (RFC 9297)
-        })
+        }
+        settings_hash[0x06] = max_field_section_size if max_field_section_size  # SETTINGS_MAX_FIELD_SECTION_SIZE
+        settings_hash[grease_id] = grease_id  # GREASE setting (RFC 9297)
 
-        stream_type + settings
+        stream_type + build_settings_frame(settings_hash)
       end
 
       # Build GOAWAY frame (RFC 9114 Section 7.2.6)
