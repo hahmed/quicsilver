@@ -59,7 +59,7 @@ post_elapsed = Benchmark.realtime do
   conn_threads = CONNECTIONS.times.map do |conn_id|
     Thread.new do
       client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
-      client.open_connection
+      client.connect
 
       local_times = []
       local_ids = []
@@ -99,7 +99,7 @@ get_elapsed = Benchmark.realtime do
   conn_threads = CONNECTIONS.times.map do
     Thread.new do
       client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
-      client.open_connection
+      client.connect
 
       local_times = []
 
@@ -132,7 +132,7 @@ delete_elapsed = Benchmark.realtime do
       next if ids.empty?
 
       client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
-      client.open_connection
+      client.connect
 
       local_times = []
 
