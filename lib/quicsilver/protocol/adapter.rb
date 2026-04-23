@@ -41,6 +41,7 @@ module Quicsilver
         scheme = headers[":scheme"] || "https"
         authority = headers[":authority"]
         path = headers[":path"]
+        protocol = headers[":protocol"]
         content_length = headers["content-length"]&.to_i
 
         protocol_headers = ::Protocol::HTTP::Headers.new
@@ -55,7 +56,7 @@ module Quicsilver
 
         request = ::Protocol::HTTP::Request.new(
           scheme, authority, method, path, VERSION,
-          protocol_headers, body
+          protocol_headers, body, protocol
         )
 
         [request, body]

@@ -159,6 +159,23 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
     assert_empty parser.trailers
   end
 
+  # === Extended CONNECT (RFC 9220) ===
+
+  def test_build_request_with_connect_protocol
+    headers = {
+      ":method" => "CONNECT",
+      ":authority" => "example.com",
+      ":path" => "/cable",
+      ":protocol" => "websocket",
+      ":scheme" => "https"
+    }
+    request, body = @adapter.build_request(headers)
+
+    assert_equal "CONNECT", request.method
+    assert_equal "/cable", request.path
+    assert_equal "websocket", request.protocol
+  end
+
   def test_send_response_writer_error_propagates
     body = Protocol::HTTP::Body::Buffered.wrap("data")
     response = Protocol::HTTP::Response.new("h3", 200, Protocol::HTTP::Headers.new, body)

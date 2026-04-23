@@ -13,6 +13,8 @@ module Quicsilver
         @priority ||= Priority.parse(@headers["priority"])
       end
 
+      METHOD_CONNECT = "CONNECT"
+
       # Known HTTP/3 request pseudo-headers (RFC 9114 §4.3.1)
       VALID_PSEUDO_HEADERS = %w[:method :scheme :authority :path :protocol].freeze
       VALID_PSEUDO_SET = VALID_PSEUDO_HEADERS.each_with_object({}) { |h, s| s[h] = true }.freeze
@@ -125,7 +127,13 @@ module Quicsilver
 
         method = @headers[":method"]
 
-        if method == "CONNECT"
+        if method == METHOD_CONNECT && @headers[":protocol"]
+          # Extended CONNECT (RFC 9220) — requires :scheme, :path, :authority, :protocol
+          raise Protocol::MessageError, "Extended CONNECT must include :scheme" unless @headers[":scheme"]
+          raise Protocol::MessageError, "Extended CONNECT must include :path" unless @headers[":path"]
+          raise Protocol::MessageError, "Extended CONNECT must include :authority" unless @headers[":authority"]
+        elsif method == METHOD_CONNECT
+          # Regular CONNECT (RFC 9114 §4.4)
           raise Protocol::MessageError, "CONNECT request must include :authority" unless @headers[":authority"]
           raise Protocol::MessageError, "CONNECT request must not include :scheme" if @headers[":scheme"]
           raise Protocol::MessageError, "CONNECT request must not include :path" if @headers[":path"]
@@ -154,7 +162,7 @@ module Quicsilver
 
         method = @headers[":method"]
 
-        if method == "CONNECT"
+        if method == METHOD_CONNECT
           return nil unless @headers[":authority"]
         else
           return nil unless method && @headers[":scheme"] && @headers[":path"]

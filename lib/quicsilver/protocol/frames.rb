@@ -244,6 +244,7 @@ module Quicsilver
         settings_hash = {
           0x01 => 0,           # QPACK_MAX_TABLE_CAPACITY = 0 (no dynamic table)
           0x07 => 0,           # QPACK_BLOCKED_STREAMS = 0
+          0x08 => 1,           # SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 9220)
         }
         settings_hash[0x06] = max_field_section_size if max_field_section_size  # SETTINGS_MAX_FIELD_SECTION_SIZE
         settings_hash[grease_id] = grease_id  # GREASE setting (RFC 9297)

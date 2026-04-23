@@ -126,6 +126,51 @@ class PseudoHeaderValidationTest < Minitest::Test
     parser.validate_headers!
   end
 
+  # === RFC 9220: Extended CONNECT ===
+
+  def test_validate_extended_connect_valid
+    headers = build_qpack_headers(
+      ":method" => "CONNECT",
+      ":authority" => "example.com",
+      ":scheme" => "https",
+      ":path" => "/cable",
+      ":protocol" => "websocket"
+    )
+    parser = parse_headers_frame(headers)
+    parser.parse
+    parser.validate_headers!
+  end
+
+  def test_validate_extended_connect_requires_scheme
+    headers = build_qpack_headers(
+      ":method" => "CONNECT",
+      ":authority" => "example.com",
+      ":path" => "/cable",
+      ":protocol" => "websocket"
+    )
+    parser = parse_headers_frame(headers)
+    parser.parse
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      parser.validate_headers!
+    end
+  end
+
+  def test_validate_extended_connect_requires_path
+    headers = build_qpack_headers(
+      ":method" => "CONNECT",
+      ":authority" => "example.com",
+      ":scheme" => "https",
+      ":protocol" => "websocket"
+    )
+    parser = parse_headers_frame(headers)
+    parser.parse
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      parser.validate_headers!
+    end
+  end
+
   # === RFC 9114 §4.3.1: Non-CONNECT required pseudo-headers ===
 
   def test_validate_requires_method
