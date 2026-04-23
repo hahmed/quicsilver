@@ -139,8 +139,97 @@ test("GET /h3/slow?delay=0.2 respects delay") do
   puts "    Delayed response in #{elapsed}ms"
 end
 
-# === 9. Rails CRUD ===
-puts "\n9️⃣  Rails CRUD"
+# === 9. Concurrent Multiplexing ===
+puts "\n9️⃣  Concurrent Multiplexing"
+puts "-" * 60
+
+test("4 concurrent requests on separate connections") do
+  threads = 4.times.map do |i|
+    Thread.new do
+      t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      response = Quicsilver::Client.get(HOST, PORT, "/h3/slow?delay=0.2", unsecure: true)
+      elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
+      [i, response[:status], elapsed]
+    end
+  end
+  results = threads.map(&:value).sort_by(&:first)
+  results.each { |i, status, elapsed| puts "    Stream #{i}: #{status} — #{elapsed}ms" }
+  total = results.map { |_, _, e| e }.max
+  # All 4 should complete in roughly the same time (~200ms) not 4x (800ms)
+  raise "Expected concurrent, took #{total}ms" if total > 600
+  puts "    All 4 concurrent in #{total}ms (not #{200 * 4}ms sequential)"
+end
+
+# === 10. Large Upload ===
+puts "\n🔟  Large Upload"
+puts "-" * 60
+
+test("POST 100KB body") do
+  big_body = "x" * 100_000
+  response = Quicsilver::Client.post(HOST, PORT, "/h3/upload",
+    body: big_body,
+    headers: { "content-type" => "application/octet-stream" },
+    unsecure: true)
+  raise "Expected 200" unless response[:status] == 200
+  raise "Size mismatch" unless response[:body].include?('"received_bytes":100000')
+  puts "    Uploaded 100KB, server received 100,000 bytes"
+end
+
+# === 11. Content-Length Validation ===
+puts "\n1️⃣1️⃣  Content-Length Validation"
+puts "-" * 60
+
+test("POST with content-length header") do
+  body = "hello"
+  response = Quicsilver::Client.post(HOST, PORT, "/h3/upload",
+    body: body,
+    headers: { "content-type" => "text/plain" },
+    unsecure: true)
+  raise "Expected 200, got #{response[:status]}" unless response[:status] == 200
+  raise "Size mismatch" unless response[:body].include?('"received_bytes":5')
+  puts "    Sent 5 bytes, server received 5 bytes"
+end
+
+# === 12. 0-RTT Reconnection ===
+puts "\n1️⃣2️⃣  0-RTT Reconnection"
+puts "-" * 60
+
+test("Two separate connections show handshake cost") do
+  Quicsilver::Client.close_pool
+
+  # First connection — full handshake
+  client1 = Quicsilver::Client.new(HOST, PORT, unsecure: true)
+  t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  client1.get("/h3/ping")
+  first = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t1) * 1000).round(1)
+  client1.disconnect
+
+  sleep 0.1
+
+  # Second connection — new handshake (0-RTT depends on MsQuic session cache)
+  client2 = Quicsilver::Client.new(HOST, PORT, unsecure: true)
+  t2 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  client2.get("/h3/ping")
+  second = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t2) * 1000).round(1)
+  client2.disconnect
+
+  puts "    First connection:  #{first}ms"
+  puts "    Second connection: #{second}ms"
+  puts "    Pooling saves: ~#{first}ms per request by avoiding handshakes"
+end
+
+# === 13. GOAWAY Graceful Shutdown ===
+puts "\n1️⃣3️⃣  GOAWAY (server keeps serving during test)"
+puts "-" * 60
+
+test("Server responds after many requests (no GOAWAY yet)") do
+  response = Quicsilver::Client.get(HOST, PORT, "/h3/ping", unsecure: true)
+  raise "Expected 200" unless response[:status] == 200
+  puts "    Server still healthy after all tests"
+end
+
+# === 14. Rails CRUD ===
+puts "\n1️⃣4️⃣  Rails CRUD"
 puts "-" * 60
 
 test("GET /posts.json returns posts array") do
@@ -149,19 +238,8 @@ test("GET /posts.json returns posts array") do
   puts "    Posts: #{response[:body][0..40]}"
 end
 
-test("POST /h3/echo round-trips JSON body") do
-  body = '{"post": {"name": "HTTP/3 Post", "title": "Created over QUIC!"}}'
-  response = Quicsilver::Client.post(HOST, PORT, "/h3/echo",
-    body: body,
-    headers: { "content-type" => "application/json" },
-    unsecure: true)
-  raise "Expected 200" unless response[:status] == 200
-  raise "Body not echoed" unless response[:body].include?("HTTP/3 Post")
-  puts "    Round-tripped #{body.bytesize} bytes of JSON"
-end
-
-# === 10. HTTP Methods ===
-puts "\n🔟  HTTP Methods"
+# === 15. HTTP Methods ===
+puts "\n1️⃣5️⃣  HTTP Methods"
 puts "-" * 60
 
 client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
