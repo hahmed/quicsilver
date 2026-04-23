@@ -69,13 +69,3 @@ config = Quicsilver::Transport::Configuration.new(
 )
 server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
 ```
-
-## 🐛 Troubleshooting
-
-**Port in use error:** The server automatically cleans up port 4433 before starting.
-
-**Connection refused:** Make sure the server is running before testing the client.
-
----
-
-That's it! No certificate generation, no Docker — just pure Ruby QUIC. 🎯
