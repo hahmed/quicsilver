@@ -101,8 +101,22 @@ module Quicsilver
 
         raise "Stream handle not found for stream #{stream.stream_id}" unless stream.writable?
 
+        headers = response.headers
+
+        # Extract trailers before flattening (Protocol::HTTP::Headers tracks
+        # trailer! state that a plain Hash would lose — needed for gRPC).
+        trailers = if headers.respond_to?(:trailer?) && headers.trailer?
+          trailer_hash = {}
+          headers.trailer.each { |name, value| trailer_hash[name] = value }
+          trailer_hash
+        end
+
         response_headers = {}
-        response.headers&.each { |name, value| response_headers[name] = value }
+        if headers.respond_to?(:header)
+          headers.header.each { |name, value| response_headers[name] = value }
+        else
+          headers&.each { |name, value| response_headers[name] = value }
+        end
 
         # Protocol-rack moves content-length from headers to body.length —
         # re-add it so the HTTP/3 response includes the header.
@@ -112,7 +126,7 @@ module Quicsilver
 
         body = response.body || []
         connection.send_response(stream, response.status, response_headers, body,
-          head_request: request.head?)
+          head_request: request.head?, trailers: trailers)
         @request_registry.complete(stream.stream_id)
       end
 

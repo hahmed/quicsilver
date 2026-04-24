@@ -507,8 +507,20 @@ module Quicsilver
 
       return if cancelled_stream?(pending.stream_id)
 
+      headers = response.headers
+
+      trailers = if headers.respond_to?(:trailer?) && headers.trailer?
+        trailer_hash = {}
+        headers.trailer.each { |name, value| trailer_hash[name] = value }
+        trailer_hash
+      end
+
       response_headers = {}
-      response.headers&.each { |name, value| response_headers[name] = value }
+      if headers.respond_to?(:header)
+        headers.header.each { |name, value| response_headers[name] = value }
+      else
+        headers&.each { |name, value| response_headers[name] = value }
+      end
 
       if !response_headers.key?("content-length") && response.body&.length
         response_headers["content-length"] = response.body.length.to_s
@@ -519,7 +531,7 @@ module Quicsilver
 
       pending.connection.apply_stream_priority(stream, pending.priority)
       pending.connection.send_response(stream, response.status, response_headers, response.body,
-        head_request: pending.request.method == "HEAD")
+        head_request: pending.request.method == "HEAD", trailers: trailers)
       @request_registry.complete(pending.stream_id)
     rescue => e
       Quicsilver.logger.error("Streaming request error: #{e.class} - #{e.message}")

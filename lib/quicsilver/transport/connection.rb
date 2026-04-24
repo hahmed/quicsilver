@@ -123,9 +123,9 @@ module Quicsilver
         Quicsilver.logger.debug("Stream send failed (client likely reset): #{e.message}")
       end
 
-      def send_response(stream, status, headers, body, head_request: false)
+      def send_response(stream, status, headers, body, head_request: false, trailers: nil)
         body = [] if body.nil?
-        encoder = Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request)
+        encoder = Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request, trailers: trailers)
 
         if body.respond_to?(:to_ary)
           Quicsilver.send_stream(stream.stream_handle, encoder.encode, true)
