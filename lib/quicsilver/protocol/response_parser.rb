@@ -44,6 +44,7 @@ module Quicsilver
             @headers = cached[1]
             @frames = cached[2]
             @cached_body_str = cached[3]
+            @trailers = cached[4] || {}
             @last_data = data
             return
           end
@@ -58,7 +59,7 @@ module Quicsilver
         cache_result if @use_parse_cache
       end
 
-      # Class-level parse result cache: data → [status, headers, frames, body_str]
+      # Class-level parse result cache: data → [status, headers, frames, body_str, trailers]
       PARSE_CACHE = {}
       PARSE_CACHE_MAX = 128
       PARSE_OID_CACHE = {}
@@ -73,6 +74,7 @@ module Quicsilver
             @headers = cached[1]
             @frames = cached[2]
             @cached_body_str = cached[3]
+            @trailers = cached[4] || {}
             return
           end
         end
@@ -94,7 +96,8 @@ module Quicsilver
             @status,
             @headers.dup.freeze,
             (@frames || []).freeze,
-            body_str&.freeze
+            body_str&.freeze,
+            (@trailers.empty? ? nil : @trailers.dup.freeze)
           ].freeze
         end
       end
