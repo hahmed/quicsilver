@@ -71,7 +71,7 @@ module Quicsilver
             name = name.to_s
             value = value.to_s
             # Downcase only if needed (most HTTP/3 headers are already lowercase)
-            name = name.downcase if name =~ /[A-Z]/
+            name = name.downcase if name.match?(/[A-Z]/)
 
             cache_key = "#{name}\0#{value}"
 

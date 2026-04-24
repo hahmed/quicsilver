@@ -237,7 +237,7 @@ module Quicsilver
 
         @decoder.decode(payload) do |name, value|
           # RFC 9114 §4.2: Header field names MUST be lowercase
-          if name =~ /[A-Z]/
+          if name.match?(/[A-Z]/)
             raise Protocol::MessageError, "Header name '#{name}' contains uppercase characters"
           end
 
