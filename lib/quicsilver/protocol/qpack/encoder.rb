@@ -166,8 +166,46 @@ module Quicsilver
           out << value_b
         end
 
+        # Pre-computed prefix integer tables for hot encode paths.
+        # Key: [prefix_bits, pattern] => Array of frozen encoded strings indexed by value.
+        # Covers all values up to max_prefix (single-byte) and a range beyond.
+        PREFIXED_INT_CACHE = {}
+        [
+          [6, 0xC0],  # Indexed Field Line
+          [4, 0x50],  # Literal with Name Reference (static)
+          [7, 0x80],  # Huffman string length
+          [7, 0x00],  # Raw string length
+          [3, 0x28],  # Huffman literal name length
+          [3, 0x20],  # Raw literal name length
+        ].each do |prefix_bits, pattern|
+          max_prefix = (1 << prefix_bits) - 1
+          # Pre-compute single-byte range + a bit beyond for multi-byte
+          limit = [max_prefix + 64, 256].min
+          table = Array.new(limit) do |value|
+            if value < max_prefix
+              (pattern | value).chr(Encoding::BINARY).freeze
+            else
+              buf = (pattern | max_prefix).chr(Encoding::BINARY)
+              v = value - max_prefix
+              while v >= 128
+                buf << ((v & 0x7F) | 0x80).chr(Encoding::BINARY)
+                v >>= 7
+              end
+              buf << v.chr(Encoding::BINARY)
+              buf.freeze
+            end
+          end
+          PREFIXED_INT_CACHE[[prefix_bits, pattern]] = table.freeze
+        end
+        PREFIXED_INT_CACHE.freeze
+
         # RFC 7541 prefix integer encoding
         def encode_prefixed_int(value, prefix_bits, pattern)
+          table = PREFIXED_INT_CACHE[[prefix_bits, pattern]]
+          if table && value < table.size
+            return table[value]
+          end
+
           max_prefix = (1 << prefix_bits) - 1
 
           if value < max_prefix
