@@ -183,4 +183,67 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
 
     assert_raises(RuntimeError) { @adapter.send_response(response, writer) }
   end
+
+  # Regression: RequestHandler was flattening Protocol::HTTP::Headers to a
+  # plain Hash before calling send_response, which lost the trailer!/trailer?
+  # state. This meant trailers set by protocol-http apps (like gRPC setting
+  # grpc-status/grpc-message) were silently dropped.
+  #
+  # This test simulates the RequestHandler code path: extract trailers from
+  # Protocol::HTTP::Headers, flatten to a Hash, then encode the response.
+  def test_trailers_survive_header_flattening
+    headers = Protocol::HTTP::Headers.new
+    headers.add("content-type", "application/grpc+proto")
+    headers.trailer!
+    headers.add("grpc-status", "0")
+    headers.add("grpc-message", "OK")
+
+    # Extract trailers the way RequestHandler now does it
+    trailers = if headers.respond_to?(:trailer?) && headers.trailer?
+      trailer_hash = {}
+      headers.trailer.each { |name, value| trailer_hash[name] = value }
+      trailer_hash
+    end
+
+    # Flatten to plain Hash (only non-trailer headers)
+    response_headers = {}
+    headers.header.each { |name, value| response_headers[name] = value }
+
+    # Encode and parse round-trip
+    body = Protocol::HTTP::Body::Buffered.wrap("grpc-payload")
+    encoder = Quicsilver::Protocol::ResponseEncoder.new(
+      200, response_headers, body, trailers: trailers
+    )
+    data = encoder.encode
+
+    parser = Quicsilver::Protocol::ResponseParser.new(data)
+    parser.parse
+
+    assert_equal 200, parser.status
+    assert_equal "grpc-payload", parser.body.read
+    assert_equal "0", parser.trailers["grpc-status"], "grpc-status trailer must survive flattening"
+    assert_equal "OK", parser.trailers["grpc-message"], "grpc-message trailer must survive flattening"
+    assert_equal "application/grpc+proto", parser.headers["content-type"]
+    # Trailers must NOT appear in headers
+    refute parser.headers.key?("grpc-status"), "grpc-status must not be in headers"
+    refute parser.headers.key?("grpc-message"), "grpc-message must not be in headers"
+  end
+
+  # Verify the old code path (plain Hash flatten without trailer extraction)
+  # would have lost the trailers — documents why the fix was needed.
+  def test_plain_hash_flatten_loses_trailers
+    headers = Protocol::HTTP::Headers.new
+    headers.add("content-type", "application/grpc+proto")
+    headers.trailer!
+    headers.add("grpc-status", "0")
+
+    # Old code path: flatten everything to a Hash (trailers mixed in)
+    flat = {}
+    headers.each { |name, value| flat[name] = value }
+
+    # The flat hash has grpc-status but as a regular header, not a trailer
+    assert flat.key?("grpc-status"), "Flat hash should contain the value"
+    # But it lost the trailer? semantic — a plain Hash can't distinguish
+    refute flat.respond_to?(:trailer?), "Plain Hash has no trailer? method"
+  end
 end
