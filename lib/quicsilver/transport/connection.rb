@@ -79,14 +79,14 @@ module Quicsilver
 
       def buffer_data(stream_id, data)
         @mutex.synchronize do
-          (@response_buffers[stream_id] ||= StringIO.new("".b)).write(data)
+          (@response_buffers[stream_id] ||= "".b) << data
         end
       end
 
       def complete_stream(stream_id, final_data)
         @mutex.synchronize do
           buffer = @response_buffers.delete(stream_id)
-          (buffer&.string || "".b) + (final_data || "".b)
+          (buffer || "".b) + (final_data || "".b)
         end
       end
 
@@ -156,10 +156,10 @@ module Quicsilver
       # Called on each RECEIVE event — control streams never send FIN.
       def receive_unidirectional_data(stream_id, data)
         @mutex.synchronize do
-          (@response_buffers[stream_id] ||= StringIO.new("".b)).write(data)
+          (@response_buffers[stream_id] ||= "".b) << data
         end
 
-        buf = @mutex.synchronize { @response_buffers[stream_id]&.string || "".b }
+        buf = @mutex.synchronize { @response_buffers[stream_id] || "".b }
         return if buf.empty?
 
         # First time seeing this stream: identify stream type
@@ -174,26 +174,26 @@ module Quicsilver
             @control_stream_id = stream_id
             @uni_stream_types[stream_id] = :control
             # Remove the stream type byte from the buffer
-            @mutex.synchronize { @response_buffers[stream_id] = StringIO.new(buf[type_len..] || "".b) }
+            @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
           when 0x01
             raise Protocol::FrameError, "Client must not send push streams"
           when 0x02 # QPACK encoder stream
             raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
             @qpack_encoder_stream_id = stream_id
             @uni_stream_types[stream_id] = :qpack_encoder
-            @mutex.synchronize { @response_buffers[stream_id] = StringIO.new(buf[type_len..] || "".b) }
+            @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
           when 0x03 # QPACK decoder stream
             raise Protocol::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
             @qpack_decoder_stream_id = stream_id
             @uni_stream_types[stream_id] = :qpack_decoder
-            @mutex.synchronize { @response_buffers[stream_id] = StringIO.new(buf[type_len..] || "".b) }
+            @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
           else
             # Unknown unidirectional stream types MUST be ignored (RFC 9114 §6.2)
             @uni_stream_types[stream_id] = :unknown
             return
           end
 
-          buf = @mutex.synchronize { @response_buffers[stream_id]&.string || "".b }
+          buf = @mutex.synchronize { @response_buffers[stream_id] || "".b }
         end
 
         stream_type = @uni_stream_types[stream_id]
@@ -203,13 +203,13 @@ module Quicsilver
         when :control
           parse_control_frames(buf)
           # Clear parsed data from buffer
-          @mutex.synchronize { @response_buffers[stream_id] = StringIO.new("".b) }
+          @mutex.synchronize { @response_buffers[stream_id] = "".b }
         when :qpack_encoder
           validate_qpack_encoder_data(buf)
-          @mutex.synchronize { @response_buffers[stream_id] = StringIO.new("".b) }
+          @mutex.synchronize { @response_buffers[stream_id] = "".b }
         when :qpack_decoder
           validate_qpack_decoder_data(buf)
-          @mutex.synchronize { @response_buffers[stream_id] = StringIO.new("".b) }
+          @mutex.synchronize { @response_buffers[stream_id] = "".b }
         end
       end
 

@@ -194,13 +194,13 @@ module Quicsilver
       @mutex.synchronize do
         case event
         when "RECEIVE"
-          (@response_buffers[stream_id] ||= StringIO.new("".b)).write(data)
+          (@response_buffers[stream_id] ||= "".b) << data
 
         when "RECEIVE_FIN"
           event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
 
           buffer = @response_buffers.delete(stream_id)
-          full_data = (buffer&.string || "".b) + event.data
+          full_data = (buffer || "".b) + event.data
 
           response_parser = Protocol::ResponseParser.new(full_data, max_body_size: @max_body_size,
             max_header_size: @max_header_size)
