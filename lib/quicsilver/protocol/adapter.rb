@@ -25,6 +25,7 @@ module Quicsilver
 
       def initialize(app)
         @app = app
+        @qpack_encoder = Quicsilver::Protocol::Qpack::Encoder.new
       end
 
       # Build a Protocol::HTTP::Request from parsed HTTP/3 headers.
@@ -152,7 +153,7 @@ module Quicsilver
 
       # Build an HTTP/3 HEADERS frame from key-value pairs
       def build_qpack_frame(pairs)
-        encoded = Quicsilver::Protocol::Qpack::Encoder.new.encode(pairs)
+        encoded = @qpack_encoder.encode(pairs)
         Quicsilver::Protocol.encode_varint(Quicsilver::Protocol::FRAME_HEADERS) +
           Quicsilver::Protocol.encode_varint(encoded.bytesize) +
           encoded
