@@ -17,13 +17,6 @@ module Quicsilver
           encoded
       end
 
-      # Pre-computed GREASE frame — one random choice at load time.
-      # GREASE type changes per process, not per response (RFC 9297 doesn't require per-frame randomness).
-      GREASE_FRAME = begin
-        id = Protocol.grease_id
-        (Protocol.encode_varint(id) + Protocol.encode_varint(0)).freeze
-      end
-
       def initialize(status, headers, body, encoder: Qpack::Encoder.new, head_request: false, trailers: nil)
         @status = status
         @headers = headers
@@ -36,7 +29,6 @@ module Quicsilver
       # Buffered encode - returns all frames at once
       def encode
         frames = "".b
-        frames << build_grease_frame
         frames << build_frame(FRAME_HEADERS, @encoder.encode(all_headers))
         unless @head_request
           @body.each do |chunk|
@@ -50,7 +42,7 @@ module Quicsilver
 
       # Streaming encode - yields frames as they're ready
       def stream_encode
-        yield build_grease_frame + build_frame(FRAME_HEADERS, @encoder.encode(all_headers)), false
+        yield build_frame(FRAME_HEADERS, @encoder.encode(all_headers)), false
 
         unless @head_request
           last_chunk = nil
@@ -99,11 +91,7 @@ module Quicsilver
         Protocol.encode_varint(type) + Protocol.encode_varint(payload.bytesize) + payload
       end
 
-      # RFC 9297: Send a GREASE frame with random type and empty payload.
-      # Pre-computed at load time to avoid rand() + varint encoding per response.
-      def build_grease_frame
-        GREASE_FRAME.dup
-      end
+
     end
   end
 end

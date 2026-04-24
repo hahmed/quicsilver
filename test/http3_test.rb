@@ -180,26 +180,25 @@ class HTTP3Test < Minitest::Test
     assert ids.uniq.size > 1, "GREASE setting ID should be random, got same value every time"
   end
 
-  def test_response_includes_grease_frame
+  # GREASE frames are sent once per connection (in setup_http3_streams and
+  # control stream SETTINGS), not per response — matching quiche's behaviour.
+  # ResponseEncoder no longer includes GREASE frames.
+  def test_response_does_not_include_grease_frame
     encoder = Quicsilver::Protocol::ResponseEncoder.new(200, { "content-type" => "text/plain" }, ["hello"])
     data = encoder.encode
 
     frames = parse_frames(data)
     grease_frames = frames.select { |f| grease_id?(f[:type]) }
-    assert grease_frames.size >= 1, "Response must contain at least one GREASE frame"
+    assert_equal 0, grease_frames.size, "Response should not contain GREASE frames (sent at connection level)"
   end
 
-  def test_grease_frame_appears_before_headers
+  def test_response_starts_with_headers_frame
     encoder = Quicsilver::Protocol::ResponseEncoder.new(200, {}, ["body"])
     data = encoder.encode
 
     frames = parse_frames(data)
-    first_grease = frames.index { |f| grease_id?(f[:type]) }
-    first_headers = frames.index { |f| f[:type] == Quicsilver::Protocol::FRAME_HEADERS }
-
-    assert first_grease, "Expected a GREASE frame"
-    assert first_headers, "Expected a HEADERS frame"
-    assert first_grease < first_headers, "GREASE frame must appear before HEADERS"
+    assert frames.size >= 1, "Expected at least one frame"
+    assert_equal Quicsilver::Protocol::FRAME_HEADERS, frames.first[:type], "First frame must be HEADERS"
   end
 
   private
