@@ -1,71 +1,58 @@
-# Quicsilver Examples
+# Examples
 
-This directory contains examples for testing your Ruby QUIC implementation.
+Self-contained scripts demonstrating quicsilver features. Each boots its own server — no external setup needed.
 
-All examples use `example_helper.rb` which uses the [`localhost`](https://github.com/socketry/localhost) gem to generate self-signed TLS certificates — **no manual certificate setup needed**.
-
-In production, you must provide your own cert/key paths to `Quicsilver::Transport::Configuration.new`.
-
-## 🚀 Quick Start
-
-### 1. Run the Server
+## Getting Started
 
 ```bash
-# Terminal 1 — pick any example:
+# Server
 ruby examples/minimal_http3_server.rb
-ruby examples/rack_http3_server.rb
-ruby examples/protocol_http_server.rb
-```
+curl --http3-only -k https://localhost:4433/
 
-### 2. Test the Connection
-
-```bash
-# Terminal 2
-curl --http3 -k https://localhost:4433/
-
-# Or use the client example (requires a server running)
+# Client
 ruby examples/simple_client_test.rb
 ```
 
-## 📁 Files
+## Examples
 
-| File | Purpose |
-|------|---------|
-| `example_helper.rb` | Shared helper — sets up TLS via `localhost` gem |
-| `minimal_http3_server.rb` | Bare-minimum HTTP/3 server |
+| Script | Feature |
+|--------|---------|
+| `minimal_http3_server.rb` | Simplest HTTP/3 server |
 | `rack_http3_server.rb` | Rack app with multiple routes |
-| `protocol_http_server.rb` | Rack app using protocol-http internally |
-| `simple_client_test.rb` | QUIC client test |
+| `protocol_http_server.rb` | Protocol-http mode |
+| `simple_client_test.rb` | Basic client request |
+| `connection_pool_demo.rb` | Connection reuse — 6ms first, 0.2ms reused |
+| `feature_demo.rb` | All features in one script |
+| `streaming_sse.rb` | Server-Sent Events over HTTP/3 |
+| `priorities.rb` | Extensible Priorities (RFC 9218) — CSS before images |
+| `trailers.rb` | Trailing headers after body |
+| `grpc_style.rb` | gRPC-style request/response with JSON (no protobuf needed) |
+| `falcon_middleware.rb` | Falcon's middleware stack over HTTP/3 (requires falcon gem) |
+| `benchmark.rb` | Throughput benchmark |
+| `rails_feature_test.rb` | 15 feature tests against a Rails app |
 
-## ✅ Expected Output
+## Rails Integration
 
-**Server:**
+```bash
+# 1. Add to Gemfile
+gem "quicsilver"
+
+# 2. Start
+rackup -s quicsilver -p 4433
+
+# 3. Test
+curl --http3-only -k https://localhost:4433/
 ```
-🚀 Minimal HTTP/3 Server Example
-════════════════════════════════════════
-🔧 Starting server...
-✅ Server is running on port 4433
-⏳ Server is running. Press Ctrl+C to stop...
-```
 
-**Client:**
-```
-🔌 Simple HTTP/3 Client Test
-════════════════════════════════════════
-Status: 200
-Headers: {"content-type"=>"text/plain"}
-Body: Hello from Quicsilver!
-👋 Done
-```
+## Falcon Integration
 
-## 🔧 Custom Certificates
-
-If you need to use your own certificates instead of the `localhost` gem:
+No extra gems or config needed — just pass Falcon's middleware:
 
 ```ruby
-config = Quicsilver::Transport::Configuration.new(
-  "/path/to/server.crt",
-  "/path/to/server.key"
-)
-server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
+require "falcon"
+require "quicsilver"
+
+middleware = Falcon::Server.middleware(Rails.application)
+config = Quicsilver::Transport::Configuration.new(cert, key, mode: :falcon)
+Quicsilver::Server.new(4433, app: middleware, server_configuration: config).start
 ```

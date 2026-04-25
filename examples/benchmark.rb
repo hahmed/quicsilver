@@ -1,107 +1,111 @@
 #!/usr/bin/env ruby
 
-# Benchmark quicsilver against a running server.
+# Quicsilver benchmark — self-contained, boots its own server.
 #
-#   bundle exec rackup -s quicsilver -p 4433  (in another terminal)
-#   bundle exec ruby examples/benchmark.rb
+#   ruby examples/benchmark.rb
 
-require "bundler/setup"
-require "quicsilver"
+require_relative "example_helper"
 
 HOST = "localhost"
 PORT = 4433
 WARMUP = 10
-ITERATIONS = 100
+ITERATIONS = 200
+
+app = ->(env) {
+  case env["PATH_INFO"]
+  when "/large"
+    [200, { "content-type" => "application/octet-stream" }, ["x" * 50_000]]
+  else
+    [200, { "content-type" => "application/json" }, ['{"ok":true}']]
+  end
+}
+
+server = Quicsilver::Server.new(PORT, app: app, server_configuration: EXAMPLE_TLS_CONFIG)
+server_thread = Thread.new { server.start }
+sleep 0.3
+
+def run_benchmark(name, iterations)
+  times = iterations.times.map { yield }
+  total = times.sum
+  avg = (total / times.size).round(2)
+  p50 = times.sort[times.size / 2].round(2)
+  p99 = times.sort[(times.size * 0.99).to_i].round(2)
+  rps = (times.size / (total / 1000.0)).round(0)
+  puts "  Total:   #{total.round(1)}ms"
+  puts "  Avg:     #{avg}ms"
+  puts "  p50:     #{p50}ms"
+  puts "  p99:     #{p99}ms"
+  puts "  RPS:     #{rps} req/s"
+end
 
 puts "🔨 Quicsilver Benchmark"
-puts "   Target: https://#{HOST}:#{PORT}"
 puts "=" * 60
 
-# === Single connection, sequential requests ===
-puts "\n📊 Sequential (single connection, #{ITERATIONS} requests)"
+# === 1. Sequential (single connection) ===
+puts "\n📊 Sequential — single connection, #{ITERATIONS} requests"
 puts "-" * 60
 
 client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
+WARMUP.times { client.get("/ping") }
 
-# Warmup
-WARMUP.times { client.get("/h3/ping") }
-
-times = ITERATIONS.times.map do
+run_benchmark("Sequential", ITERATIONS) do
   t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  client.get("/h3/ping")
+  client.get("/ping")
   (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000
 end
-
-total = times.sum
-avg = total / times.size
-p50 = times.sort[times.size / 2]
-p99 = times.sort[(times.size * 0.99).to_i]
-rps = (times.size / (total / 1000.0)).round(0)
-
-puts "  Total:   #{total.round(1)}ms"
-puts "  Avg:     #{avg.round(2)}ms"
-puts "  p50:     #{p50.round(2)}ms"
-puts "  p99:     #{p99.round(2)}ms"
-puts "  RPS:     #{rps} req/s"
-
 client.disconnect
 
-# === Connection pool, sequential requests ===
-puts "\n📊 Pooled (connection pool, #{ITERATIONS} requests)"
+# === 2. Pooled ===
+puts "\n📊 Pooled — connection pool, #{ITERATIONS} requests"
 puts "-" * 60
 
-# Warmup
-WARMUP.times { Quicsilver::Client.get(HOST, PORT, "/h3/ping", unsecure: true) }
+WARMUP.times { Quicsilver::Client.get(HOST, PORT, "/ping", unsecure: true) }
 
-times = ITERATIONS.times.map do
+run_benchmark("Pooled", ITERATIONS) do
   t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  Quicsilver::Client.get(HOST, PORT, "/h3/ping", unsecure: true)
+  Quicsilver::Client.get(HOST, PORT, "/ping", unsecure: true)
   (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000
 end
-
-total = times.sum
-avg = total / times.size
-p50 = times.sort[times.size / 2]
-p99 = times.sort[(times.size * 0.99).to_i]
-rps = (times.size / (total / 1000.0)).round(0)
-
-puts "  Total:   #{total.round(1)}ms"
-puts "  Avg:     #{avg.round(2)}ms"
-puts "  p50:     #{p50.round(2)}ms"
-puts "  p99:     #{p99.round(2)}ms"
-puts "  RPS:     #{rps} req/s"
-
 Quicsilver::Client.close_pool
 
-# === Larger payload ===
-puts "\n📊 Large payload (50KB response, #{ITERATIONS} requests)"
+# === 3. Large payload ===
+puts "\n📊 Large payload — 50KB response, #{ITERATIONS} requests"
 puts "-" * 60
 
 client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
+WARMUP.times { client.get("/large") }
 
-WARMUP.times { client.get("/h3/image") }
-
-times = ITERATIONS.times.map do
+run_benchmark("Large", ITERATIONS) do
   t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  client.get("/h3/image")
+  client.get("/large")
   (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000
 end
 
-total = times.sum
-avg = total / times.size
-p50 = times.sort[times.size / 2]
-p99 = times.sort[(times.size * 0.99).to_i]
-rps = (times.size / (total / 1000.0)).round(0)
-throughput = ((50_000 * times.size) / (total / 1000.0) / 1024 / 1024).round(1)
+client.disconnect
 
-puts "  Total:   #{total.round(1)}ms"
-puts "  Avg:     #{avg.round(2)}ms"
-puts "  p50:     #{p50.round(2)}ms"
-puts "  p99:     #{p99.round(2)}ms"
-puts "  RPS:     #{rps} req/s"
-puts "  Through: #{throughput} MB/s"
+# === 4. True multiplexing ===
+puts "\n📊 True multiplexing — concurrent streams, single connection"
+puts "-" * 60
+
+client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
+WARMUP.times { client.get("/ping") }
+
+[1, 5, 10, 20, 50].each do |concurrent|
+  t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  requests = concurrent.times.map { client.get("/ping") { |req| req } }
+  responses = requests.map(&:response)
+  elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
+  ok = responses.count { |r| r[:status] == 200 }
+  rps = (concurrent / (elapsed / 1000.0)).round(0)
+  puts "  #{concurrent.to_s.rjust(3)} streams: #{elapsed.to_s.rjust(7)}ms  #{ok}/#{concurrent} ok  #{rps} req/s"
+end
 
 client.disconnect
+
+# Cleanup
+Quicsilver::Client.close_pool
+server.stop
+server_thread.join(2)
 
 puts "\n" + "=" * 60
 puts "✅ Benchmark complete"
