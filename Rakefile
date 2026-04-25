@@ -7,6 +7,24 @@ Rake::ExtensionTask.new('quicsilver') do |ext|
   ext.lib_dir = 'lib/quicsilver'
 end
 
+# Copy MsQuic dylib next to the compiled extension for gem packaging
+task :bundle_msquic do
+  lib_dir = 'lib/quicsilver'
+  if RUBY_PLATFORM =~ /darwin/
+    dylib = 'vendor/msquic/build/bin/Release/libmsquic.2.dylib'
+    if File.exist?(dylib)
+      cp dylib, "#{lib_dir}/libmsquic.2.dylib"
+      # Update rpath so the bundle finds the dylib in the same directory
+      sh "install_name_tool -add_rpath @loader_path #{lib_dir}/quicsilver.bundle 2>/dev/null || true"
+    end
+  elsif RUBY_PLATFORM =~ /linux/
+    so = 'vendor/msquic/build/bin/Release/libmsquic.so.2'
+    cp so, "#{lib_dir}/libmsquic.so.2" if File.exist?(so)
+  end
+end
+
+task :build => :bundle_msquic
+
 task :setup do
   # Initialize git submodule if it doesn't exist
   unless File.exist?('vendor/msquic')
