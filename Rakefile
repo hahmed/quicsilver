@@ -7,6 +7,9 @@ Rake::ExtensionTask.new('quicsilver') do |ext|
   ext.lib_dir = 'lib/quicsilver'
 end
 
+# Ensure MsQuic is built before compiling the C extension
+task :compile => :build_msquic
+
 # Copy MsQuic dylib next to the compiled extension for gem packaging
 task :bundle_msquic do
   lib_dir = 'lib/quicsilver'
