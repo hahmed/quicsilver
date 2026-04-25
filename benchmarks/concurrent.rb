@@ -26,7 +26,7 @@ def test_multiplexing(host, port)
   mutex = Mutex.new
 
   client = Quicsilver::Client.new(host, port, unsecure: true)
-  client.connect
+  client.open_connection
 
   elapsed = Benchmark.realtime do
     threads = MULTIPLEX_REQUESTS.times.map do |i|
@@ -65,7 +65,7 @@ def test_concurrent_clients(host, port)
     threads = NUM_CLIENTS.times.map do |i|
       Thread.new do
         client = Quicsilver::Client.new(host, port, unsecure: true)
-        client.connect
+        client.open_connection
 
         REQUESTS_PER_CLIENT.times do |req|
           start = Time.now

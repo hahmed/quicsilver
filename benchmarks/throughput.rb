@@ -29,7 +29,7 @@ def run_benchmark(host, port)
     threads = CONNECTIONS.times.map do
       Thread.new do
         client = Quicsilver::Client.new(host, port, connection_timeout: 5000, request_timeout: 10)
-        client.connect
+        client.open_connection
 
         local = []
         per_conn.times do
@@ -61,7 +61,7 @@ def run_benchmark(host, port)
     threads = CONNECTIONS.times.map do
       Thread.new do
         client = Quicsilver::Client.new(host, port, connection_timeout: 5000, request_timeout: 10)
-        client.connect
+        client.open_connection
 
         local = []
         queue = Queue.new
