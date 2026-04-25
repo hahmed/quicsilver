@@ -1,5 +1,12 @@
 require 'mkmf'
 
+# Skip compilation if precompiled binary is already present
+ext_dir = File.expand_path('../../lib/quicsilver', __dir__)
+if File.exist?(File.join(ext_dir, 'quicsilver.bundle')) || File.exist?(File.join(ext_dir, 'quicsilver.so'))
+  File.write('Makefile', "install:\n\t@echo 'Using precompiled binary'\n\nall:\n\t@echo 'Using precompiled binary'\n")
+  exit
+end
+
 # On macOS, use Apple clang if available. Homebrew clang can't find
 # system headers and produces broken binaries with MsQuic.
 if RUBY_PLATFORM =~ /darwin/ && File.exist?("/usr/bin/clang")
