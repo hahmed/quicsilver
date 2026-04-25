@@ -20,9 +20,14 @@ task :build_msquic => :setup do
   if RUBY_PLATFORM =~ /darwin/
     cmake_args << '-DCMAKE_EXE_LINKER_FLAGS="-framework CoreServices"'
     cmake_args << '-DCMAKE_SHARED_LINKER_FLAGS="-framework CoreServices"'
+    # Ensure QuicTLS uses Xcode SDK, not Homebrew OpenSSL
+    sdk_path = `xcrun --show-sdk-path 2>/dev/null`.strip
+    cmake_args << "-DCMAKE_OSX_SYSROOT=#{sdk_path}" unless sdk_path.empty?
   end
-  sh "cd vendor/msquic && cmake #{cmake_args.join(' ')}"
-  sh 'cd vendor/msquic && cmake --build build --config Release'
+  # Override PATH so QuicTLS openssldir detection finds system openssl, not Homebrew
+  env = { 'PATH' => "/usr/bin:#{ENV['PATH']}" }
+  sh env, "cd vendor/msquic && cmake #{cmake_args.join(' ')}"
+  sh env, 'cd vendor/msquic && cmake --build build --config Release'
 end
 
 task :build => [:build_msquic, :compile]
