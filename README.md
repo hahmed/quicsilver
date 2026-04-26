@@ -70,7 +70,28 @@ rackup -s quicsilver -p 4433
 ### curl
 
 ```bash
-curl --http3-only https://localhost:4433/
+curl --http3-only -k https://localhost:4433/
+```
+
+### Browser Access
+
+Any HTTP/3 client connects directly — no extra setup needed.
+
+Browsers are different — they discover HTTP/3 via the `Alt-Svc` header from an existing HTTP/1.1 or HTTP/2 server. Run quicsilver alongside your regular server:
+
+```bash
+# HTTP/1.1 on port 3000 (Puma)
+rails server
+
+# HTTP/3 on port 4433 (Quicsilver)
+rackup -s quicsilver -p 4433
+```
+
+Add the `Alt-Svc` header so browsers upgrade to HTTP/3:
+
+```ruby
+# config/application.rb
+config.action_dispatch.default_headers["Alt-Svc"] = 'h3=":4433"; ma=86400'
 ```
 
 ## Configuration
@@ -131,10 +152,10 @@ server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
 server.start
 ```
 
-| Mode | Body Handling | Use Case |
+| Mode | App Interface | Use Case |
 |------|---------------|----------|
-| `:rack` (default) | Buffered | Standard Rack apps |
-| `:protocol_http` | Streaming | Falcon, protocol-http apps |
+| `:rack` (default) | Rack env hash | Rails, Sinatra, any Rack app |
+| `:falcon` | Protocol::HTTP::Request | Falcon middleware stack |
 
 ## Development
 
