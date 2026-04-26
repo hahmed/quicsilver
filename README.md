@@ -2,6 +2,13 @@
 
 HTTP/3 server and client for Ruby with Rack support.
 
+## Why HTTP/3?
+
+- **No head-of-line blocking** — one slow response doesn't stall others. HTTP/2 multiplexes over TCP, but a single lost packet freezes all streams. QUIC streams are independent.
+- **Faster connections** — QUIC handshake is 1 round trip (TCP+TLS is 3). Returning users get 0-RTT — zero round trips.
+- **Connection migration** — users switch from wifi to cellular without dropping the connection.
+- **True multiplexing** — many concurrent requests on one connection, each on its own stream.
+
 ## Features
 
 - **HTTP/3 server** — serve any Rack app over QUIC/HTTP/3
@@ -115,7 +122,7 @@ server.start
 
 ## Priorities
 
-Browsers send priority hints on requests. Quicsilver parses them and tells MsQuic to schedule high-priority streams first.
+Browsers send priority hints on requests. Quicsilver parses them and schedules high-priority streams first.
 
 ```
 GET /style.css  → priority: u=0    → sent first (highest urgency)
