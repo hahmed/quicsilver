@@ -21,7 +21,7 @@ HTTP/3 server and client for Ruby with Rack support.
 - **GOAWAY** (RFC 9114 §7.2.6) — graceful connection draining with validation
 - **0-RTT** — fast reconnection with replay protection
 - **Connection pooling** — client reuses connections automatically
-- **protocol-http integration** — works with Falcon and protocol-http ecosystem
+- **Falcon middleware compatible** — use Falcon's caching and content encoding over HTTP/3
 
 ## Installation
 
@@ -144,15 +144,15 @@ headers.trailer!
 headers.add("x-checksum", "abc123")
 ```
 
-## Protocol-HTTP Mode
+## Falcon Middleware Mode
 
-For integration with [Falcon](https://github.com/socketry/falcon) and the protocol-http ecosystem:
+Use Falcon's middleware stack (caching, content encoding) over HTTP/3. Quicsilver handles the transport, Falcon's middleware handles the request pipeline:
 
 ```ruby
 config = Quicsilver::Transport::Configuration.new(
   "certificates/server.crt",
   "certificates/server.key",
-  mode: :protocol_http
+  mode: :falcon
 )
 
 server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
