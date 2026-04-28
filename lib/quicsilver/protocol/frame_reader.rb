@@ -3,7 +3,8 @@
 module Quicsilver
   module Protocol
     # Extracts HTTP/3 frames from a byte buffer.
-    # Yields [type, payload] pairs. No protocol semantics — just byte-level extraction.
+    # Yields (type, payload, offset) per frame. Returns total bytes consumed.
+    # Existing callers using |type, payload| are unaffected — offset is ignored.
     #
     # Usage:
     #   FrameReader.each(buffer) do |type, payload|
@@ -12,6 +13,10 @@ module Quicsilver
     #     when FRAME_DATA then ...
     #     end
     #   end
+    #
+    # With offset (for early exit via throw/catch):
+    #   strip = FrameReader.skip_while(data) { |type, payload| ... }
+    #   data = data.byteslice(strip..) if strip > 0
     module FrameReader
       def self.each(buffer)
         offset = 0
@@ -45,10 +50,33 @@ module Quicsilver
           payload = buffer.byteslice(offset + header_len, length)
           offset += header_len + length
 
-          yield type, payload
+          yield type, payload, offset
         end
 
         offset
+      end
+
+      # Skip leading frames while the block returns true.
+      # Returns the byte offset of the first frame that returned false (or 0).
+      #
+      #   skip = FrameReader.skip_while(data) do |type, payload|
+      #     type == FRAME_HEADERS && informational?(payload)
+      #   end
+      #   data = data.byteslice(skip..) if skip > 0
+      def self.skip_while(buffer)
+        skip_to = 0
+
+        catch(:stop) do
+          each(buffer) do |type, payload, offset|
+            if yield(type, payload)
+              skip_to = offset
+            else
+              throw :stop
+            end
+          end
+        end
+
+        skip_to
       end
     end
   end

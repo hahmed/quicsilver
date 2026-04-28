@@ -12,6 +12,12 @@ module Quicsilver
         @handle = handle
       end
 
+      # Returns the QUIC stream ID. Only available after data has been sent
+      # (MsQuic defers ID assignment until data flows on the wire).
+      def stream_id
+        Quicsilver.get_stream_id(@handle)
+      end
+
       def send(data, fin: false)
         Quicsilver.send_stream(@handle, data, fin)
       end

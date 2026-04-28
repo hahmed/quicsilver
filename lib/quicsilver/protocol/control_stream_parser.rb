@@ -88,12 +88,17 @@ module Quicsilver
         end
 
         @peer_goaway_id = stream_id
+        on_goaway_received(stream_id)
       end
 
       private
 
       # Override in includer to store settings. Default: no-op.
       def on_settings_received(settings)
+      end
+
+      # Override in includer to react to GOAWAY. Default: no-op.
+      def on_goaway_received(stream_id)
       end
 
       # Override in includer to handle additional frame types on the control stream.

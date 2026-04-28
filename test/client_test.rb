@@ -62,4 +62,7 @@ class ClientTest < Minitest::Test
 
     assert_nil client.disconnect
   end
+
+  # 1xx informational and trailer tests are in test/integration/server_client_test.rb
+  # (real server→client, no mocked internals)
 end

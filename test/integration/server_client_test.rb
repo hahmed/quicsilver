@@ -241,12 +241,114 @@ class ServerClientIntegrationTest < Minitest::Test
     refute client.connected?
   end
 
+  # === 1xx informational response handling (RFC 9114 §4.1) ===
+
+  def test_client_skips_103_early_hints_and_receives_final_response
+    app = ->(env) {
+      env["rack.early_hints"]&.call("link" => "</style.css>; rel=preload")
+      [200, {"content-type" => "text/html"}, ["Hello"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert_equal "Hello", response[:body]
+  ensure
+    client&.disconnect
+  end
+
+  def test_client_receives_200_without_prior_informational
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert_equal "OK", response[:body]
+  ensure
+    client&.disconnect
+  end
+
+  # === Trailer reception ===
+
+  def test_client_receives_trailers_in_response
+    app = ->(request) {
+      headers = Protocol::HTTP::Headers.new
+      headers.add("content-type", "text/plain")
+      headers.trailer!
+      headers.add("grpc-status", "0")
+      Protocol::HTTP::Response[200, headers, ["Hello"]]
+    }
+    start_server(app, mode: :falcon)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert_equal "Hello", response[:body]
+    assert_equal "0", response[:trailers]["grpc-status"]
+  ensure
+    client&.disconnect
+  end
+
+  def test_client_response_without_trailers_has_empty_trailers
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal({}, response[:trailers])
+  ensure
+    client&.disconnect
+  end
+
+  # === Stream ID tracking (RFC 9114 §5.2 GOAWAY needs correct stream IDs) ===
+
+  # MsQuic defers stream ID assignment until data flows on the wire.
+  # Verify callbacks receive the correct sequential IDs.
+  def test_callbacks_receive_sequential_stream_ids
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["ok"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    seen_ids = []
+    original = client.method(:handle_stream_event)
+    client.define_singleton_method(:handle_stream_event) do |stream_id, event, data, early_data|
+      seen_ids << stream_id if event == "RECEIVE_FIN" && (stream_id & 0x02) == 0
+      original.call(stream_id, event, data, early_data)
+    end
+
+    3.times { |i| client.get("/test-#{i}") }
+
+    assert_equal [0, 4, 8], seen_ids,
+      "Client bidi stream IDs should be sequential: 0, 4, 8"
+  ensure
+    client&.disconnect
+  end
+
+  def test_multiple_sequential_requests_all_succeed
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["ok"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    10.times do |i|
+      resp = client.get("/count/#{i}")
+      assert_equal 200, resp[:status], "Request #{i} should succeed"
+    end
+  ensure
+    client&.disconnect
+  end
+
   private
 
-  def start_server(app)
+  def start_server(app, **options)
     3.times do |attempt|
       @port = find_available_port
-      config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
+      config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, **options)
       @server = Quicsilver::Server.new(@port, app: app, server_configuration: config)
 
       @server_thread = Thread.new { @server.start }

@@ -78,6 +78,94 @@ class ClientControlStreamTest < Minitest::Test
     end
   end
 
+  # === GOAWAY fails in-flight requests (RFC 9114 §5.2) ===
+
+  # RFC 9114 §5.2: "requests with a stream ID greater than or equal to
+  # the identifier contained in the GOAWAY frame... will not be processed"
+  def test_goaway_fails_requests_at_and_above_goaway_id
+    setup_connected_client
+    req_4 = add_pending_request(stream_id: 4)
+    req_8 = add_pending_request(stream_id: 8)
+    req_12 = add_pending_request(stream_id: 12)
+
+    send_server_control_stream(goaway_id: 8)
+
+    assert_raises(Quicsilver::Client::Request::ResetError) { req_8.response(timeout: 0.1) }
+    assert_raises(Quicsilver::Client::Request::ResetError) { req_12.response(timeout: 0.1) }
+    assert req_4.pending?, "Request on stream 4 should still be pending"
+  end
+
+  def test_goaway_with_zero_fails_all
+    setup_connected_client
+    req_0 = add_pending_request(stream_id: 0)
+    req_4 = add_pending_request(stream_id: 4)
+
+    send_server_control_stream(goaway_id: 0)
+
+    assert_raises(Quicsilver::Client::Request::ResetError) { req_0.response(timeout: 0.1) }
+    assert_raises(Quicsilver::Client::Request::ResetError) { req_4.response(timeout: 0.1) }
+  end
+
+  def test_goaway_decrease_fails_newly_affected_requests
+    setup_connected_client
+    req_0 = add_pending_request(stream_id: 0)
+    req_4 = add_pending_request(stream_id: 4)
+    req_8 = add_pending_request(stream_id: 8)
+    req_12 = add_pending_request(stream_id: 12)
+
+    # First GOAWAY at 12: fails stream 12, leaves 0/4/8 pending
+    send_server_control_stream(goaway_id: 12)
+    assert_raises(Quicsilver::Client::Request::ResetError) { req_12.response(timeout: 0.1) }
+    assert req_8.pending?
+    assert req_4.pending?
+
+    # Second GOAWAY at 4 (decrease): fails streams 4 and 8, leaves 0 pending
+    send_goaway_on_control_stream(4)
+    assert_raises(Quicsilver::Client::Request::ResetError) { req_4.response(timeout: 0.1) }
+    assert_raises(Quicsilver::Client::Request::ResetError) { req_8.response(timeout: 0.1) }
+    assert req_0.pending?, "Request below new GOAWAY should still be pending"
+  end
+
+  # === SETTINGS_MAX_FIELD_SECTION_SIZE enforcement (RFC 9114 §4.2.2) ===
+
+  def test_enforces_max_field_section_size_on_request
+    setup_connected_client
+    send_server_control_stream(settings: { 0x06 => 64 })
+
+    mock_stream = Quicsilver::Transport::Stream.new(99999)
+    @client.stub(:open_stream, mock_stream) do
+      assert_raises(Quicsilver::Error) do
+        @client.build_request("GET", "/test", headers: { "x-big" => "a" * 100 })
+      end
+    end
+  end
+
+  def test_allows_request_within_max_field_section_size
+    setup_connected_client
+    send_server_control_stream(settings: { 0x06 => 4096 })
+
+    mock_stream = Quicsilver::Transport::Stream.new(99999)
+    sent = false
+    mock_stream.define_singleton_method(:send) { |data, fin: false| sent = true; true }
+
+    @client.stub(:open_stream, mock_stream) do
+      @client.build_request("GET", "/short")
+    end
+    assert sent
+  end
+
+  def test_no_enforcement_when_setting_not_received
+    setup_connected_client
+    mock_stream = Quicsilver::Transport::Stream.new(99999)
+    sent = false
+    mock_stream.define_singleton_method(:send) { |data, fin: false| sent = true; true }
+
+    @client.stub(:open_stream, mock_stream) do
+      @client.build_request("GET", "/test", headers: { "x-big" => "a" * 10_000 })
+    end
+    assert sent
+  end
+
   # === SETTINGS validation ===
 
   def test_client_rejects_http2_setting_ids
@@ -138,5 +226,18 @@ class ClientControlStreamTest < Minitest::Test
 
   def build_goaway_frame(stream_id)
     Quicsilver::Protocol.build_goaway_frame(stream_id)
+  end
+
+  def setup_connected_client
+    @client.instance_variable_set(:@connected, true)
+    @client.instance_variable_set(:@connection_data, [1, 2])
+  end
+
+  def add_pending_request(stream_id:)
+    handle = stream_id + 1000
+    mock_stream = Quicsilver::Transport::Stream.new(handle)
+    request = Quicsilver::Client::Request.new(@client, mock_stream)
+    @client.instance_variable_get(:@inflight)[handle] = { request: request, stream_id: stream_id }
+    request
   end
 end

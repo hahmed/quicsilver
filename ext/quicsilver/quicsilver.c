@@ -73,6 +73,7 @@ typedef struct {
     HQUIC connection;
     void* connection_ctx;  // ConnectionContext pointer (for building connection_data)
     VALUE client_obj;      // Ruby client object (copied from connection context)
+    uint64_t stream_id;    // QUIC stream ID, cached once after StreamStart
     int started;
     int shutdown;
     int early_data;        // Set when stream received 0-RTT data
@@ -279,6 +280,14 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
         return QUIC_STATUS_SUCCESS;
     }
 
+    // Lazily cache the QUIC stream ID on first callback.
+    // Can't do this at StreamStart — MsQuic defers ID assignment with FLAG_NONE
+    // until data is sent. By the first callback the ID is always assigned.
+    if (ctx->stream_id == UINT64_MAX) {
+        uint32_t id_len = sizeof(ctx->stream_id);
+        MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &id_len, &ctx->stream_id);
+    }
+
     // Apply pending priority on the event loop thread (safe context for SetParam)
     for (int i = 0; i < PendingPriorityCount; i++) {
         if (PendingPriorities[i].stream == Stream) {
@@ -301,29 +310,25 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
 
             if (Event->RECEIVE.BufferCount == 0 && has_fin) {
                 // Empty FIN — headers-only request/response with no body
-                uint64_t stream_id = 0;
-                uint32_t stream_id_len = sizeof(stream_id);
-                MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
-
                 dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
-                    "RECEIVE_FIN", stream_id, (const char*)&Stream, sizeof(HQUIC), ctx->early_data);
+                    "RECEIVE_FIN", ctx->stream_id, (const char*)&Stream, sizeof(HQUIC), ctx->early_data);
                 break;
             }
 
             if (Event->RECEIVE.BufferCount > 0) {
                 const char* event_type = has_fin ? "RECEIVE_FIN" : "RECEIVE";
 
-                uint64_t stream_id = 0;
-                uint32_t stream_id_len = sizeof(stream_id);
-                MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
-
                 size_t total_data_len = 0;
                 for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
                     total_data_len += Event->RECEIVE.Buffers[b].Length;
                 }
 
-                if (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) {
-                    // Create combined buffer: [stream_handle(8)][all data]
+                int is_client = !NIL_P(ctx->client_obj);
+
+                if (is_client || has_fin) {
+                    // Client: always prepend [stream_handle(8)] so Ruby can map
+                    // handle→stream_id from any event (needed for GOAWAY).
+                    // Server FIN: also prepends handle (existing behavior).
                     size_t total_len = sizeof(HQUIC) + total_data_len;
                     char* combined = (char*)malloc(total_len);
                     if (combined != NULL) {
@@ -333,13 +338,15 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
                         }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_len, ctx->early_data);
+                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_len, has_fin ? ctx->early_data : 0);
                         free(combined);
                     }
                 } else if (Event->RECEIVE.BufferCount == 1) {
-                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id,
+                    // Server non-FIN: raw data without handle prefix
+                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id,
                         (const char*)Event->RECEIVE.Buffers[0].Buffer, Event->RECEIVE.Buffers[0].Length, 0);
                 } else {
+                    // Server non-FIN with multiple buffers: combine without handle prefix
                     char* combined = (char*)malloc(total_data_len);
                     if (combined != NULL) {
                         size_t offset = 0;
@@ -347,7 +354,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
                         }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, stream_id, combined, total_data_len, 0);
+                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_data_len, 0);
                         free(combined);
                     }
                 }
@@ -372,26 +379,20 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED: {
             // Peer sent RESET_STREAM — pack [stream_handle(8)][error_code(8)]
-            uint64_t stream_id = 0;
-            uint32_t stream_id_len = sizeof(stream_id);
-            MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
             uint64_t error_code = Event->PEER_SEND_ABORTED.ErrorCode;
             char combined[sizeof(HQUIC) + sizeof(uint64_t)];
             memcpy(combined, &Stream, sizeof(HQUIC));
             memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", stream_id, combined, sizeof(combined), 0);
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", ctx->stream_id, combined, sizeof(combined), 0);
             break;
         }
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
             // Peer sent STOP_SENDING — pack [stream_handle(8)][error_code(8)]
-            uint64_t stream_id = 0;
-            uint32_t stream_id_len = sizeof(stream_id);
-            MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
             uint64_t error_code = Event->PEER_RECEIVE_ABORTED.ErrorCode;
             char combined[sizeof(HQUIC) + sizeof(uint64_t)];
             memcpy(combined, &Stream, sizeof(HQUIC));
             memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", stream_id, combined, sizeof(combined), 0);
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", ctx->stream_id, combined, sizeof(combined), 0);
             break;
         }
     }
@@ -450,6 +451,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
                 stream_ctx->client_obj = ctx->client_obj;  // Copy from connection context
                 stream_ctx->started = 1;
                 stream_ctx->shutdown = 0;
+                stream_ctx->stream_id = UINT64_MAX;  // Lazily resolved on first callback
                 stream_ctx->early_data = 0;
                 stream_ctx->error_status = QUIC_STATUS_SUCCESS;
 
@@ -1139,6 +1141,7 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
     ctx->connection = Connection;
     ctx->connection_ctx = conn_ctx;  // Store connection context pointer
     ctx->client_obj = conn_ctx ? conn_ctx->client_obj : Qnil;
+    ctx->stream_id = UINT64_MAX;  // Sentinel: lazily resolved on first callback
     ctx->started = 1;
     ctx->shutdown = 0;
     ctx->early_data = 0;
@@ -1210,6 +1213,26 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data, VALUE send_f
 
     wake_event_loop();
     return Qtrue;
+}
+
+// Get the QUIC stream ID for an open stream.
+// Must be called after data has been sent (MsQuic defers ID assignment
+// with QUIC_STREAM_START_FLAG_NONE until data flows).
+static VALUE
+quicsilver_get_stream_id(VALUE self, VALUE stream_handle)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+    HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
+    uint64_t stream_id = 0;
+    uint32_t stream_id_len = sizeof(stream_id);
+    QUIC_STATUS Status = MsQuic->GetParam(Stream, QUIC_PARAM_STREAM_ID, &stream_id_len, &stream_id);
+    if (QUIC_FAILED(Status)) {
+        return Qnil;
+    }
+    return ULL2NUM(stream_id);
 }
 
 // Reset a QUIC stream (RESET_STREAM frame - abruptly terminates sending)
@@ -1316,6 +1339,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "stream_reset", quicsilver_stream_reset, 2);
     rb_define_singleton_method(mQuicsilver, "stream_stop_sending", quicsilver_stream_stop_sending, 2);
     rb_define_singleton_method(mQuicsilver, "set_stream_priority", quicsilver_set_stream_priority, 2);
+    rb_define_singleton_method(mQuicsilver, "get_stream_id", quicsilver_get_stream_id, 1);
 
     // Event processing (custom execution — app drives MsQuic)
     rb_define_singleton_method(mQuicsilver, "poll", quicsilver_poll, 0);

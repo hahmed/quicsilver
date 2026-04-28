@@ -28,8 +28,8 @@ module Quicsilver
       @connected = false
       @connection_start_time = nil
 
-      @response_buffers = {}
-      @pending_requests = {}  # handle => Request
+      @response_buffers = {}  # stream_id => binary data
+      @inflight = {}  # handle => { request:, stream_id: }
       @mutex = Mutex.new
 
       # Server control stream state
@@ -80,8 +80,8 @@ module Quicsilver
       @connected = false
 
       @mutex.synchronize do
-        @pending_requests.each_value { |req| req.fail(0, "Connection closed") }
-        @pending_requests.clear
+        @inflight.each_value { |entry| entry[:request].fail(0, "Connection closed") }
+        @inflight.clear
         @response_buffers.clear
       end
 
@@ -123,7 +123,9 @@ module Quicsilver
       raise StreamFailedToOpenError unless stream
 
       request = Request.new(self, stream)
-      @mutex.synchronize { @pending_requests[stream.handle] = request }
+      @mutex.synchronize do
+        @inflight[stream.handle] = { request: request, stream_id: nil }
+      end
 
       send_to_stream(stream, method, path, headers, body)
 
@@ -194,13 +196,23 @@ module Quicsilver
       @mutex.synchronize do
         case event
         when "RECEIVE"
-          (@response_buffers[stream_id] ||= "".b) << data
+          # Data is prepended with [stream_handle(8)] — extract handle and payload
+          event_obj = Transport::StreamEvent.new(data, "RECEIVE")
+          if (entry = @inflight[event_obj.handle])
+            entry[:stream_id] ||= stream_id
+          end
+          (@response_buffers[stream_id] ||= "".b) << event_obj.data
+          # Strip 1xx informational HEADERS frames (e.g. 103 Early Hints).
+          # The final response will follow — keep buffering.
+          strip_informational_frames!(stream_id)
 
         when "RECEIVE_FIN"
           event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
-
           buffer = @response_buffers.delete(stream_id)
           full_data = (buffer || "".b) + event.data
+
+          # Strip any remaining informational frames before parsing final response
+          full_data = strip_informational_data(full_data)
 
           response_parser = Protocol::ResponseParser.new(full_data, max_body_size: @max_body_size,
             max_header_size: @max_header_size)
@@ -209,21 +221,22 @@ module Quicsilver
           response = {
             status: response_parser.status,
             headers: response_parser.headers,
-            body: response_parser.body.read
+            body: response_parser.body&.read || "",
+            trailers: response_parser.trailers || {}
           }
 
-          request = @pending_requests.delete(event.handle)
-          request&.complete(response)
+          entry = @inflight.delete(event.handle)
+          entry[:request]&.complete(response) if entry
 
         when "STREAM_RESET"
           event = Transport::StreamEvent.new(data, "STREAM_RESET")
-          request = @pending_requests.delete(event.handle)
-          request&.fail(event.error_code, "Stream reset by peer")
+          entry = @inflight.delete(event.handle)
+          entry[:request]&.fail(event.error_code, "Stream reset by peer") if entry
 
         when "STOP_SENDING"
           event = Transport::StreamEvent.new(data, "STOP_SENDING")
-          request = @pending_requests.delete(event.handle)
-          request&.fail(event.error_code, "Peer sent STOP_SENDING")
+          entry = @inflight.delete(event.handle)
+          entry[:request]&.fail(event.error_code, "Peer sent STOP_SENDING") if entry
         end
       end
     rescue => e
@@ -309,12 +322,64 @@ module Quicsilver
         body: body
       ).encode
 
+      # RFC 9114 §4.2.2: Enforce server's SETTINGS_MAX_FIELD_SECTION_SIZE
+      if @peer_max_field_section_size
+        header_size = estimate_header_size(method, path, headers)
+        if header_size > @peer_max_field_section_size
+          @mutex.synchronize { @inflight.delete(stream.handle) }
+          raise Error, "Request headers (#{header_size} bytes) exceed server's max field section size (#{@peer_max_field_section_size})"
+        end
+      end
+
       result = stream.send(encoded_response, fin: true)
 
       unless result
-        @mutex.synchronize { @pending_requests.delete(stream.handle) }
+        @mutex.synchronize { @inflight.delete(stream.handle) }
         raise Error, "Failed to send request"
       end
+    end
+
+    # RFC 9114 §4.2.2: Estimate header field section size.
+    # Each field: name length + value length + 32 bytes overhead.
+    def estimate_header_size(method, path, headers)
+      size = 0
+      # Pseudo-headers
+      size += ":method".bytesize + method.to_s.bytesize + 32
+      size += ":path".bytesize + path.to_s.bytesize + 32
+      size += ":scheme".bytesize + 5 + 32  # "https"
+      size += ":authority".bytesize + authority.bytesize + 32
+      # Regular headers
+      headers.each { |name, value| size += name.to_s.bytesize + value.to_s.bytesize + 32 }
+      size
+    end
+
+    # Strip leading 1xx informational HEADERS frames from data.
+    # RFC 9114 §4.1: Interim responses (1xx) precede the final response.
+    def strip_informational_data(data)
+      skip = Protocol::FrameReader.skip_while(data) do |type, payload|
+        type == Protocol::FRAME_HEADERS &&
+          (status = peek_status(payload)) && status >= 100 && status < 200
+      end
+      skip > 0 ? data.byteslice(skip..-1) || "".b : data
+    end
+
+    def strip_informational_frames!(stream_id)
+      buf = @response_buffers[stream_id]
+      return unless buf && buf.bytesize >= 2
+
+      @response_buffers[stream_id] = strip_informational_data(buf)
+    end
+
+    # Decode just the :status pseudo-header from a QPACK header block.
+    PEEK_DECODER = Protocol::Qpack::HeaderBlockDecoder.new
+
+    def peek_status(qpack_payload)
+      PEEK_DECODER.decode(qpack_payload) do |name, value|
+        return value.to_i if name == ":status"
+      end
+      nil
+    rescue
+      nil
     end
 
     # Identify stream type from first byte(s), strip it, return remaining data.
@@ -344,6 +409,23 @@ module Quicsilver
     def on_settings_received(settings)
       @peer_settings.merge!(settings)
       @peer_max_field_section_size = settings[0x06] if settings.key?(0x06)
+    end
+
+    # RFC 9114 §5.2: After receiving GOAWAY, fail any in-flight requests
+    # on streams at or above the GOAWAY stream ID — the server won't process them.
+    def on_goaway_received(goaway_stream_id)
+      fail_requests_above_goaway(goaway_stream_id)
+    end
+
+    def fail_requests_above_goaway(goaway_stream_id)
+      @mutex.synchronize do
+        @inflight.each do |handle, entry|
+          sid = entry[:stream_id]
+          next unless sid && sid >= goaway_stream_id
+          @inflight.delete(handle)
+          entry[:request]&.fail(0, "GOAWAY: server will not process stream #{sid}")
+        end
+      end
     end
   end
 end
