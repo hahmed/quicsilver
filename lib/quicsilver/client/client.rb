@@ -136,6 +136,15 @@ module Quicsilver
       @connected && @connection_data && connection_alive?
     end
 
+    # Returns QUIC transport statistics (RTT, packet counts, congestion, etc.)
+    # from MsQuic's QUIC_STATISTICS_V2. Returns nil when not connected.
+    def stats
+      return nil unless @connected && @connection_data
+      Transport::ConnectionStats.from_hash(Quicsilver.connection_statistics(@connection_data[0]))
+    rescue
+      nil
+    end
+
     def connection_info
       info = @connection_data ? Quicsilver.connection_status(@connection_data[1]) : {}
       info.merge(hostname: @hostname, port: @port, uptime: connection_uptime)

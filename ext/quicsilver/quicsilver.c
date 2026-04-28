@@ -885,6 +885,71 @@ quicsilver_connection_status(VALUE self, VALUE context_handle)
     return status;
 }
 
+// Get QUIC connection statistics (QUIC_STATISTICS_V2)
+static VALUE
+quicsilver_connection_statistics(VALUE self, VALUE connection_handle_val)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle_val);
+    if (Connection == NULL) return Qnil;
+
+    QUIC_STATISTICS_V2 stats;
+    uint32_t stats_size = sizeof(stats);
+    memset(&stats, 0, stats_size);
+
+    QUIC_STATUS status = MsQuic->GetParam(
+        Connection,
+        QUIC_PARAM_CONN_STATISTICS_V2,
+        &stats_size,
+        &stats);
+
+    if (QUIC_FAILED(status)) {
+        return Qnil;
+    }
+
+    VALUE result = rb_hash_new();
+
+    // RTT (microseconds)
+    rb_hash_aset(result, rb_str_new_cstr("rtt"), UINT2NUM(stats.Rtt));
+    rb_hash_aset(result, rb_str_new_cstr("min_rtt"), UINT2NUM(stats.MinRtt));
+    rb_hash_aset(result, rb_str_new_cstr("max_rtt"), UINT2NUM(stats.MaxRtt));
+
+    // Handshake
+    rb_hash_aset(result, rb_str_new_cstr("resumption_attempted"), stats.ResumptionAttempted ? Qtrue : Qfalse);
+    rb_hash_aset(result, rb_str_new_cstr("resumption_succeeded"), stats.ResumptionSucceeded ? Qtrue : Qfalse);
+
+    // Send
+    rb_hash_aset(result, rb_str_new_cstr("send_path_mtu"), UINT2NUM(stats.SendPathMtu));
+    rb_hash_aset(result, rb_str_new_cstr("send_total_packets"), ULL2NUM(stats.SendTotalPackets));
+    rb_hash_aset(result, rb_str_new_cstr("send_retransmittable_packets"), ULL2NUM(stats.SendRetransmittablePackets));
+    rb_hash_aset(result, rb_str_new_cstr("send_suspected_lost_packets"), ULL2NUM(stats.SendSuspectedLostPackets));
+    rb_hash_aset(result, rb_str_new_cstr("send_spurious_lost_packets"), ULL2NUM(stats.SendSpuriousLostPackets));
+    rb_hash_aset(result, rb_str_new_cstr("send_total_bytes"), ULL2NUM(stats.SendTotalBytes));
+    rb_hash_aset(result, rb_str_new_cstr("send_total_stream_bytes"), ULL2NUM(stats.SendTotalStreamBytes));
+    rb_hash_aset(result, rb_str_new_cstr("send_congestion_count"), UINT2NUM(stats.SendCongestionCount));
+    rb_hash_aset(result, rb_str_new_cstr("send_persistent_congestion_count"), UINT2NUM(stats.SendPersistentCongestionCount));
+    rb_hash_aset(result, rb_str_new_cstr("send_congestion_window"), UINT2NUM(stats.SendCongestionWindow));
+
+    // Recv
+    rb_hash_aset(result, rb_str_new_cstr("recv_total_packets"), ULL2NUM(stats.RecvTotalPackets));
+    rb_hash_aset(result, rb_str_new_cstr("recv_reordered_packets"), ULL2NUM(stats.RecvReorderedPackets));
+    rb_hash_aset(result, rb_str_new_cstr("recv_dropped_packets"), ULL2NUM(stats.RecvDroppedPackets));
+    rb_hash_aset(result, rb_str_new_cstr("recv_duplicate_packets"), ULL2NUM(stats.RecvDuplicatePackets));
+    rb_hash_aset(result, rb_str_new_cstr("recv_total_bytes"), ULL2NUM(stats.RecvTotalBytes));
+    rb_hash_aset(result, rb_str_new_cstr("recv_total_stream_bytes"), ULL2NUM(stats.RecvTotalStreamBytes));
+    rb_hash_aset(result, rb_str_new_cstr("recv_decryption_failures"), ULL2NUM(stats.RecvDecryptionFailures));
+    rb_hash_aset(result, rb_str_new_cstr("recv_valid_ack_frames"), ULL2NUM(stats.RecvValidAckFrames));
+
+    // Misc
+    rb_hash_aset(result, rb_str_new_cstr("key_update_count"), UINT2NUM(stats.KeyUpdateCount));
+
+    return result;
+}
+
 // Close a QUIC connection and free context
 static VALUE
 quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
@@ -1323,6 +1388,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "start_connection", quicsilver_start_connection, 4);
     rb_define_singleton_method(mQuicsilver, "wait_for_connection", quicsilver_wait_for_connection, 2);
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
+    rb_define_singleton_method(mQuicsilver, "connection_statistics", quicsilver_connection_statistics, 1);
     rb_define_singleton_method(mQuicsilver, "connection_shutdown", quicsilver_connection_shutdown, 3);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
     rb_define_singleton_method(mQuicsilver, "close_server_connection", quicsilver_close_server_connection, 1);

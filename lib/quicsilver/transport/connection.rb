@@ -293,6 +293,13 @@ module Quicsilver
         Quicsilver.connection_shutdown(@handle, error_code, false)
       end
 
+      # Returns QUIC transport statistics for this connection.
+      def stats
+        ConnectionStats.from_hash(Quicsilver.connection_statistics(@handle))
+      rescue
+        nil
+      end
+
       private
 
       def open_stream(unidirectional: false)

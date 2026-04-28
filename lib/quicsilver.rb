@@ -24,6 +24,7 @@ require_relative "quicsilver/transport/inbound_stream"
 require_relative "quicsilver/transport/event_loop"
 require_relative "quicsilver/transport/configuration"
 require_relative "quicsilver/transport/connection"
+require_relative "quicsilver/transport/connection_stats"
 
 # Server
 require_relative "quicsilver/server/listener_data"
