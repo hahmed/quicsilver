@@ -79,6 +79,25 @@ module Quicsilver
         @response
       end
 
+      # Stream request body in chunks. Only valid when build_request was
+      # called with body: :stream.
+      #
+      #   req = client.build_request('POST', '/upload', body: :stream)
+      #   req.stream_body do |writer|
+      #     File.open('big.mp4') do |f|
+      #       while (chunk = f.read(16_384))
+      #         writer.write(chunk)
+      #       end
+      #     end
+      #   end
+      #   req.response  # wait for server response
+      #
+      def stream_body
+        writer = BodyWriter.new(@stream)
+        yield writer
+        writer.finish
+      end
+
       # Cancel the request (sends RESET_STREAM + STOP_SENDING to server)
       # error_code defaults to H3_REQUEST_CANCELLED (0x10c)
       def cancel(error_code: Protocol::H3_REQUEST_CANCELLED)
@@ -105,6 +124,32 @@ module Quicsilver
 
       def cancelled?
         @status == :cancelled
+      end
+
+      # Writes request body DATA frames to a QUIC stream.
+      class BodyWriter
+        def initialize(stream)
+          @stream = stream
+          @finished = false
+        end
+
+        # Write a chunk as an HTTP/3 DATA frame.
+        def write(chunk)
+          raise "Body already finished" if @finished
+          payload = chunk.b
+          data = Protocol.encode_varint(Protocol::FRAME_DATA) +
+                 Protocol.encode_varint(payload.bytesize) +
+                 payload
+          @stream.send(data, fin: false)
+        end
+
+        # Send FIN to close the request body. Called automatically
+        # at the end of stream_body.
+        def finish
+          return if @finished
+          @finished = true
+          @stream.send("".b, fin: true)
+        end
       end
 
       # Called by Client when buffered response arrives

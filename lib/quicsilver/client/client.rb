@@ -302,15 +302,6 @@ module Quicsilver
     end
 
     def send_to_stream(stream, method, path, headers, body)
-      encoded_response = Protocol::RequestEncoder.new(
-        method: method,
-        path: path,
-        scheme: "https",
-        authority: authority,
-        headers: headers,
-        body: body
-      ).encode
-
       # RFC 9114 §4.2.2: Enforce server's SETTINGS_MAX_FIELD_SECTION_SIZE
       if @peer_max_field_section_size
         header_size = estimate_header_size(method, path, headers)
@@ -320,7 +311,21 @@ module Quicsilver
         end
       end
 
-      result = stream.send(encoded_response, fin: true)
+      if body == :stream
+        # Streaming mode: send HEADERS only, body sent later via Request#stream_body
+        encoded = Protocol::RequestEncoder.new(
+          method: method, path: path, scheme: "https",
+          authority: authority, headers: headers, body: nil
+        ).encode
+        result = stream.send(encoded, fin: false)
+      else
+        # Buffered mode: send HEADERS + body + FIN
+        encoded = Protocol::RequestEncoder.new(
+          method: method, path: path, scheme: "https",
+          authority: authority, headers: headers, body: body
+        ).encode
+        result = stream.send(encoded, fin: true)
+      end
 
       unless result
         @mutex.synchronize { @inflight.delete(stream.handle) }

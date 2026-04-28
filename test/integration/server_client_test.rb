@@ -306,6 +306,51 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # === Request body streaming ===
+
+  def test_streaming_request_body_received_by_server
+    received_body = nil
+    app = ->(env) {
+      received_body = env["rack.input"]&.read
+      [200, {"content-type" => "text/plain"}, ["got #{received_body.bytesize} bytes"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    req = client.build_request("POST", "/upload", body: :stream)
+    req.stream_body do |writer|
+      writer.write("chunk1")
+      writer.write("chunk2")
+      writer.write("chunk3")
+    end
+    resp = req.response(timeout: 5)
+
+    assert_equal 200, resp[:status]
+    assert_equal "chunk1chunk2chunk3", received_body
+  ensure
+    client&.disconnect
+  end
+
+  def test_streaming_empty_body
+    app = ->(env) {
+      body = env["rack.input"]&.read || ""
+      [200, {"content-type" => "text/plain"}, ["got #{body.bytesize} bytes"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    req = client.build_request("POST", "/empty", body: :stream)
+    req.stream_body do |writer|
+      # No writes
+    end
+    resp = req.response(timeout: 5)
+
+    assert_equal 200, resp[:status]
+    assert_includes resp[:body], "0 bytes"
+  ensure
+    client&.disconnect
+  end
+
   # === Response body streaming ===
 
   def test_streaming_response_reads_body_incrementally
