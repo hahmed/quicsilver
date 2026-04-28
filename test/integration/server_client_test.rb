@@ -306,6 +306,53 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # === Response body streaming ===
+
+  def test_streaming_response_reads_body_incrementally
+    app = ->(env) {
+      body = ["chunk1", "chunk2", "chunk3"]
+      [200, {"content-type" => "application/octet-stream"}, body]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    req = client.build_request("GET", "/stream")
+    streaming = req.streaming_response(timeout: 5)
+
+    assert_equal 200, streaming.status
+    body = "".b
+    while (chunk = streaming.body.read)
+      body << chunk
+    end
+    assert_equal "chunk1chunk2chunk3", body
+  ensure
+    client&.disconnect
+  end
+
+  def test_streaming_and_buffered_both_work_for_same_request
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["Hello"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+
+    # Buffered
+    resp = client.get("/")
+    assert_equal 200, resp[:status]
+    assert_equal "Hello", resp[:body]
+
+    # Streaming
+    req = client.build_request("GET", "/")
+    streaming = req.streaming_response(timeout: 5)
+    assert_equal 200, streaming.status
+    body = "".b
+    while (chunk = streaming.body.read)
+      body << chunk
+    end
+    assert_equal "Hello", body
+  ensure
+    client&.disconnect
+  end
+
   # === Stream ID tracking (RFC 9114 §5.2 GOAWAY needs correct stream IDs) ===
 
   # MsQuic defers stream ID assignment until data flows on the wire.

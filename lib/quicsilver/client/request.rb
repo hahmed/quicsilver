@@ -21,8 +21,35 @@ module Quicsilver
         @stream = stream
         @status = :pending
         @queue = Queue.new
+        @streaming_queue = Queue.new
         @mutex = Mutex.new
         @response = nil
+        @streaming_response = nil
+      end
+
+      # Block until streaming response headers arrive.
+      # Returns a StreamingResponse with status, headers, and a readable body.
+      # Body data arrives incrementally — call body.read in a loop.
+      #
+      #   streaming = request.streaming_response(timeout: 10)
+      #   streaming.status   # => 200
+      #   streaming.headers  # => {"content-type" => "video/mp4"}
+      #   while (chunk = streaming.body.read)
+      #     file.write(chunk)
+      #   end
+      #
+      def streaming_response(timeout: nil)
+        timeout ||= @client.request_timeout
+        return @streaming_response if @streaming_response
+
+        result = @streaming_queue.pop(timeout: timeout)
+        raise Quicsilver::TimeoutError, "Streaming response timeout after #{timeout}s" if result.nil?
+
+        if result.is_a?(Hash) && result[:error]
+          raise ResetError.new(result[:message] || "Stream reset", result[:error_code])
+        end
+
+        @streaming_response = result
       end
 
       # Block until response arrives or timeout
@@ -80,9 +107,14 @@ module Quicsilver
         @status == :cancelled
       end
 
-      # Called by Client when response arrives
+      # Called by Client when buffered response arrives
       def complete(response) # :nodoc:
         @queue.push(response)
+      end
+
+      # Called by Client when streaming headers are parsed
+      def deliver_streaming(streaming_response) # :nodoc:
+        @streaming_queue.push(streaming_response)
       end
 
       # Called by Client on stream reset from peer or connection close
@@ -91,7 +123,9 @@ module Quicsilver
           return if @status == :cancelled
           @status = :error
         end
-        @queue.push({ error: true, error_code: error_code, message: message })
+        error = { error: true, error_code: error_code, message: message }
+        @queue.push(error)
+        @streaming_queue.push(error)
       end
     end
   end

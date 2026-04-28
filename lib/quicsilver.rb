@@ -34,6 +34,7 @@ require_relative "quicsilver/server/server"
 
 # Client
 require_relative "quicsilver/client/request"
+require_relative "quicsilver/client/streaming_response"
 require_relative "quicsilver/client/connection_pool"
 require_relative "quicsilver/client/client"
 

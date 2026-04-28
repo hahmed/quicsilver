@@ -29,6 +29,7 @@ module Quicsilver
       @connection_start_time = nil
 
       @response_buffers = {}  # stream_id => binary data
+      @streaming = {}  # stream_id => { body:, frame_buffer: }
       @inflight = {}  # handle => { request:, stream_id: }
       @mutex = Mutex.new
 
@@ -81,8 +82,10 @@ module Quicsilver
 
       @mutex.synchronize do
         @inflight.each_value { |entry| entry[:request].fail(0, "Connection closed") }
+        @streaming.each_value { |state| state[:body]&.close(RuntimeError.new("Connection closed")) }
         @inflight.clear
         @response_buffers.clear
+        @streaming.clear
       end
 
       close_connection
@@ -205,45 +208,22 @@ module Quicsilver
       @mutex.synchronize do
         case event
         when "RECEIVE"
-          # Data is prepended with [stream_handle(8)] — extract handle and payload
-          event_obj = Transport::StreamEvent.new(data, "RECEIVE")
-          if (entry = @inflight[event_obj.handle])
-            entry[:stream_id] ||= stream_id
-          end
-          (@response_buffers[stream_id] ||= "".b) << event_obj.data
-          # Strip 1xx informational HEADERS frames (e.g. 103 Early Hints).
-          # The final response will follow — keep buffering.
-          strip_informational_frames!(stream_id)
+          handle_receive(stream_id, data)
 
         when "RECEIVE_FIN"
-          event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
-          buffer = @response_buffers.delete(stream_id)
-          full_data = (buffer || "".b) + event.data
-
-          # Strip any remaining informational frames before parsing final response
-          full_data = strip_informational_data(full_data)
-
-          response_parser = Protocol::ResponseParser.new(full_data, max_body_size: @max_body_size,
-            max_header_size: @max_header_size)
-          response_parser.parse
-
-          response = {
-            status: response_parser.status,
-            headers: response_parser.headers,
-            body: response_parser.body&.read || "",
-            trailers: response_parser.trailers || {}
-          }
-
-          entry = @inflight.delete(event.handle)
-          entry[:request]&.complete(response) if entry
+          handle_receive_fin(stream_id, data)
 
         when "STREAM_RESET"
           event = Transport::StreamEvent.new(data, "STREAM_RESET")
+          state = @streaming.delete(stream_id)
+          state&.dig(:body)&.close(RuntimeError.new("Stream reset by peer"))
           entry = @inflight.delete(event.handle)
           entry[:request]&.fail(event.error_code, "Stream reset by peer") if entry
 
         when "STOP_SENDING"
           event = Transport::StreamEvent.new(data, "STOP_SENDING")
+          state = @streaming.delete(stream_id)
+          state&.dig(:body)&.close(RuntimeError.new("Peer sent STOP_SENDING"))
           entry = @inflight.delete(event.handle)
           entry[:request]&.fail(event.error_code, "Peer sent STOP_SENDING") if entry
         end
@@ -350,6 +330,138 @@ module Quicsilver
 
     # RFC 9114 §4.2.2: Estimate header field section size.
     # Each field: name length + value length + 32 bytes overhead.
+    def handle_receive(stream_id, data)
+      # Data is prepended with [stream_handle(8)] — extract handle and payload
+      event_obj = Transport::StreamEvent.new(data, "RECEIVE")
+      if (entry = @inflight[event_obj.handle])
+        entry[:stream_id] ||= stream_id
+      end
+
+      state = @streaming[stream_id]
+      if state
+        # Already streaming — feed DATA frames to the body
+        state[:frame_buffer] << event_obj.data
+        drain_streaming_data(state)
+      else
+        # Buffer data, strip 1xx, and try to start streaming
+        (@response_buffers[stream_id] ||= "".b) << event_obj.data
+        strip_informational_frames!(stream_id)
+        try_start_streaming(stream_id, event_obj.handle)
+      end
+    end
+
+    def handle_receive_fin(stream_id, data)
+      event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
+      state = @streaming.delete(stream_id)
+
+      if state
+        # Streaming mode: feed final data, close body
+        if event.data && !event.data.empty?
+          state[:frame_buffer] << event.data
+          drain_streaming_data(state)
+        end
+        state[:body].close_write
+
+        # Complete for .response() callers — they get the full body retroactively
+        entry = @inflight.delete(event.handle)
+        return unless entry
+        body_str = state[:body].rewind ? state[:body].read : ""
+        entry[:request].complete({
+          status: state[:status], headers: state[:headers],
+          body: body_str, trailers: {}
+        })
+      else
+        # Buffered mode: parse everything at once
+        buffer = @response_buffers.delete(stream_id)
+        full_data = (buffer || "".b) + event.data
+        full_data = strip_informational_data(full_data)
+
+        response_parser = Protocol::ResponseParser.new(full_data, max_body_size: @max_body_size,
+          max_header_size: @max_header_size)
+        response_parser.parse
+
+        body_str = response_parser.body&.read || ""
+        response = {
+          status: response_parser.status, headers: response_parser.headers,
+          body: body_str, trailers: response_parser.trailers || {}
+        }
+
+        entry = @inflight.delete(event.handle)
+        if entry
+          # Also deliver as streaming response for streaming_response() callers
+          streaming_body = Protocol::StreamInput.new
+          streaming_body.write(body_str) unless body_str.empty?
+          streaming_body.close_write
+          entry[:request].deliver_streaming(StreamingResponse.new(
+            status: response_parser.status, headers: response_parser.headers,
+            body: streaming_body, trailers: response_parser.trailers || {}
+          ))
+          entry[:request].complete(response)
+        end
+      end
+    end
+
+    # Try to parse HEADERS from buffered data and start streaming.
+    def try_start_streaming(stream_id, handle)
+      buf = @response_buffers[stream_id]
+      return unless buf && buf.bytesize >= 2
+
+      # Use FrameReader to find the first HEADERS frame
+      status = nil
+      headers = {}
+      headers_end = 0
+
+      Protocol::FrameReader.each(buf) do |type, payload, offset|
+        if type == Protocol::FRAME_HEADERS
+          s = peek_status(payload)
+          if s && s >= 200
+            status = s
+            PEEK_DECODER.decode(payload) do |name, value|
+              headers[name] = value unless name == ":status"
+            end
+            headers_end = offset
+          end
+        end
+        break # only look at the first frame
+      end
+
+      return unless status  # No final HEADERS yet
+
+      # Transition from buffered to streaming
+      remaining = buf.byteslice(headers_end..-1) || "".b
+      @response_buffers.delete(stream_id)
+
+      body = Protocol::StreamInput.new
+      state = { body: body, frame_buffer: remaining, status: status, headers: headers }
+      @streaming[stream_id] = state
+
+      # Drain any DATA frames that arrived with the HEADERS
+      drain_streaming_data(state)
+
+      # Deliver StreamingResponse to streaming_response() callers
+      entry = @inflight[handle]
+      entry[:request].deliver_streaming(StreamingResponse.new(
+        status: status, headers: headers, body: body
+      )) if entry
+    end
+
+    # Extract complete DATA frame payloads from frame_buffer and write to body.
+    def drain_streaming_data(state)
+      buf = state[:frame_buffer]
+      consumed = 0
+
+      Protocol::FrameReader.each(buf) do |type, payload, offset|
+        if type == Protocol::FRAME_DATA
+          state[:body].write(payload)
+        end
+        consumed = offset
+      end
+
+      if consumed > 0
+        state[:frame_buffer] = buf.byteslice(consumed..-1) || "".b
+      end
+    end
+
     def estimate_header_size(method, path, headers)
       size = 0
       # Pseudo-headers
