@@ -15,7 +15,7 @@ module Quicsilver
         remaining = raw_data[8..] || "".b
 
         case event_type
-        when "RECEIVE_FIN"
+        when "RECEIVE", "RECEIVE_FIN"
           @data = remaining
         when "STREAM_RESET", "STOP_SENDING"
           @error_code = remaining.unpack1("Q")
