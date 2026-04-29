@@ -15,6 +15,9 @@ app = ->(env) {
   case env["PATH_INFO"]
   when "/large"
     [200, { "content-type" => "application/octet-stream" }, ["x" * 50_000]]
+  when "/work"
+    sleep 0.001
+    [200, { "content-type" => "application/json" }, ['{"ok":true}']]
   else
     [200, { "content-type" => "application/json" }, ['{"ok":true}']]
   end
@@ -101,6 +104,83 @@ WARMUP.times { client.get("/ping") }
 end
 
 client.disconnect
+
+# Cleanup
+Quicsilver::Client.close_pool
+# === 5. Multi-threaded concurrency ===
+puts "\n📊 Multi-threaded — concurrent clients, #{ITERATIONS} total requests"
+puts "-" * 60
+
+[1, 2, 4, 8].each do |thread_count|
+  requests_per_thread = ITERATIONS / thread_count
+  err_count = 0
+  mu = Mutex.new
+
+  # Connect all clients sequentially (connection setup is serialized)
+  clients = thread_count.times.map do
+    c = Quicsilver::Client.new(HOST, PORT, unsecure: true, request_timeout: 10)
+    c.open_connection
+    c
+  end
+
+  # Run requests in parallel
+  start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  threads = clients.map do |client|
+    Thread.new do
+      requests_per_thread.times do
+        client.get("/ping")
+      rescue => e
+        mu.synchronize { err_count += 1 }
+      end
+    end
+  end
+  threads.each(&:join)
+  elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).round(1)
+
+  clients.each(&:disconnect)
+
+  rps = (ITERATIONS / (elapsed / 1000.0)).round(0)
+  err = err_count > 0 ? "  (#{err_count} errors)" : ""
+  puts "  #{thread_count.to_s.rjust(3)} threads: #{elapsed.to_s.rjust(7)}ms  #{rps} req/s#{err}"
+  sleep 0.1
+end
+
+# === 6. Multi-threaded with simulated work ===
+puts "\n📊 Multi-threaded with 1ms app work, 50 total requests"
+puts "-" * 60
+
+[1, 2, 4, 8].each do |thread_count|
+  reqs = 50
+  requests_per_thread = reqs / thread_count
+  err_count = 0
+  mu = Mutex.new
+
+  clients = thread_count.times.map do
+    c = Quicsilver::Client.new(HOST, PORT, unsecure: true, request_timeout: 10)
+    c.open_connection
+    c
+  end
+
+  start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  threads = clients.map do |client|
+    Thread.new do
+      requests_per_thread.times do
+        client.get("/work")
+      rescue => e
+        mu.synchronize { err_count += 1 }
+      end
+    end
+  end
+  threads.each(&:join)
+  elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).round(1)
+
+  clients.each(&:disconnect)
+
+  rps = (reqs / (elapsed / 1000.0)).round(0)
+  err = err_count > 0 ? "  (#{err_count} errors)" : ""
+  puts "  #{thread_count.to_s.rjust(3)} threads: #{elapsed.to_s.rjust(7)}ms  #{rps} req/s#{err}"
+  sleep 0.1
+end
 
 # Cleanup
 Quicsilver::Client.close_pool
