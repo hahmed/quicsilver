@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #if __linux__
@@ -24,6 +26,73 @@ static QUIC_EXECUTION* ExecContext = NULL;
 static int WakeFd = -1;  // eventfd for waking epoll
 #endif
 #define WAKE_IDENT 0xCAFE  // kqueue EVFILT_USER identifier (macOS only)
+
+// --- GVL-free event buffer ---
+// MsQuic callbacks write events here (no GVL needed).
+// Ruby drains via Quicsilver.drain_queue (has GVL).
+
+typedef struct {
+    HQUIC connection;
+    void* connection_ctx;
+    VALUE client_obj;
+    uint8_t event_type;  // EVT_RECEIVE..EVT_CONN_CLOSED
+    uint64_t stream_id;
+    char* data;          // heap copy, freed after drain
+    size_t data_len;
+    int early_data;
+} BufferedEvent;
+
+#define EVT_RECEIVE          0
+#define EVT_RECEIVE_FIN      1
+#define EVT_STREAM_RESET     2
+#define EVT_STOP_SENDING     3
+#define EVT_CONN_ESTABLISHED 4
+#define EVT_CONN_CLOSED      5
+
+static const char* EVENT_TYPE_NAMES[] = {
+    "RECEIVE", "RECEIVE_FIN", "STREAM_RESET", "STOP_SENDING",
+    "CONNECTION_ESTABLISHED", "CONNECTION_CLOSED"
+};
+
+#define EVENT_BUFFER_INITIAL 64
+static BufferedEvent* EventBuffer = NULL;
+static int EventBufferCount = 0;
+static int EventBufferCap = 0;
+static pthread_mutex_t EventBufferMutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Notification pipe: C signals [1], Ruby watches [0]
+static int notify_pipe[2] = {-1, -1};
+
+static void event_buffer_push(HQUIC conn, void* conn_ctx, VALUE client,
+                              uint8_t type, uint64_t sid,
+                              const char* data, size_t len, int early) {
+    pthread_mutex_lock(&EventBufferMutex);
+    if (EventBufferCount >= EventBufferCap) {
+        EventBufferCap = EventBufferCap ? EventBufferCap * 2 : EVENT_BUFFER_INITIAL;
+        EventBuffer = (BufferedEvent*)realloc(EventBuffer, EventBufferCap * sizeof(BufferedEvent));
+    }
+    BufferedEvent* ev = &EventBuffer[EventBufferCount++];
+    ev->connection = conn;
+    ev->connection_ctx = conn_ctx;
+    ev->client_obj = client;
+    ev->event_type = type;
+    ev->stream_id = sid;
+    ev->early_data = early;
+    if (len > 0 && data) {
+        ev->data = (char*)malloc(len);
+        memcpy(ev->data, data, len);
+        ev->data_len = len;
+    } else {
+        ev->data = NULL;
+        ev->data_len = 0;
+    }
+    pthread_mutex_unlock(&EventBufferMutex);
+
+    // Signal Ruby that events are ready
+    if (notify_pipe[1] != -1) {
+        write(notify_pipe[1], ".", 1);
+    }
+}
 
 // Wake the event loop from another thread (e.g. after StreamSend)
 static void
@@ -105,6 +174,7 @@ static VALUE
 dispatch_ruby_body(VALUE arg)
 {
     struct dispatch_ruby_args* a = (struct dispatch_ruby_args*)arg;
+    VALUE data_str = (a->data && a->data_len > 0) ? rb_str_new(a->data, a->data_len) : rb_str_new("", 0);
 
     if (NIL_P(a->client_obj)) {
         VALUE server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
@@ -116,7 +186,7 @@ dispatch_ruby_body(VALUE arg)
                 connection_data,
                 ULL2NUM(a->stream_id),
                 rb_str_new_cstr(a->event_type),
-                rb_str_new(a->data, a->data_len),
+                data_str,
                 a->early_data ? Qtrue : Qfalse
             };
             rb_funcallv(server_class, rb_intern("handle_stream"), 5, argv);
@@ -126,7 +196,7 @@ dispatch_ruby_body(VALUE arg)
             VALUE argv[4] = {
                 ULL2NUM(a->stream_id),
                 rb_str_new_cstr(a->event_type),
-                rb_str_new(a->data, a->data_len),
+                data_str,
                 a->early_data ? Qtrue : Qfalse
             };
             rb_funcallv(a->client_obj, rb_intern("handle_stream_event"), 4, argv);
@@ -234,7 +304,33 @@ quicsilver_poll(VALUE self)
         }
     }
 
-    return INT2NUM(args.count);
+    // 4. Drain buffered events — dispatch to Ruby in batch
+    pthread_mutex_lock(&EventBufferMutex);
+    int event_count = EventBufferCount;
+    BufferedEvent* events_copy = NULL;
+    if (event_count > 0) {
+        events_copy = (BufferedEvent*)malloc(event_count * sizeof(BufferedEvent));
+        memcpy(events_copy, EventBuffer, event_count * sizeof(BufferedEvent));
+        EventBufferCount = 0;
+    }
+    pthread_mutex_unlock(&EventBufferMutex);
+
+    // Drain notify pipe
+    if (notify_pipe[0] != -1) {
+        char buf[64];
+        while (read(notify_pipe[0], buf, sizeof(buf)) > 0) {}
+    }
+
+    for (int i = 0; i < event_count; i++) {
+        BufferedEvent* ev = &events_copy[i];
+        dispatch_to_ruby(ev->connection, ev->connection_ctx, ev->client_obj,
+            EVENT_TYPE_NAMES[ev->event_type], ev->stream_id,
+            ev->data, ev->data_len, ev->early_data);
+        free(ev->data);
+    }
+    free(events_copy);
+
+    return INT2NUM(args.count + event_count);
 }
 
 // Inline poll for use during synchronous waits (e.g. wait_for_connection).
@@ -270,6 +366,31 @@ poll_inline(int timeout_ms)
             sqe->Completion(&events[i]);
         }
     }
+
+    // Drain buffered events from inline poll
+    pthread_mutex_lock(&EventBufferMutex);
+    int ev_count = EventBufferCount;
+    BufferedEvent* ev_copy = NULL;
+    if (ev_count > 0) {
+        ev_copy = (BufferedEvent*)malloc(ev_count * sizeof(BufferedEvent));
+        memcpy(ev_copy, EventBuffer, ev_count * sizeof(BufferedEvent));
+        EventBufferCount = 0;
+    }
+    pthread_mutex_unlock(&EventBufferMutex);
+
+    if (notify_pipe[0] != -1) {
+        char buf[64];
+        while (read(notify_pipe[0], buf, sizeof(buf)) > 0) {}
+    }
+
+    for (int i = 0; i < ev_count; i++) {
+        BufferedEvent* ev = &ev_copy[i];
+        dispatch_to_ruby(ev->connection, ev->connection_ctx, ev->client_obj,
+            EVENT_TYPE_NAMES[ev->event_type], ev->stream_id,
+            ev->data, ev->data_len, ev->early_data);
+        free(ev->data);
+    }
+    free(ev_copy);
 }
 
 QUIC_STATUS
@@ -311,13 +432,13 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
 
             if (Event->RECEIVE.BufferCount == 0 && has_fin) {
                 // Empty FIN — headers-only request/response with no body
-                dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
-                    "RECEIVE_FIN", ctx->stream_id, (const char*)&Stream, sizeof(HQUIC), ctx->early_data);
+                event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                    EVT_RECEIVE_FIN, ctx->stream_id, (const char*)&Stream, sizeof(HQUIC), ctx->early_data);
                 break;
             }
 
             if (Event->RECEIVE.BufferCount > 0) {
-                const char* event_type = has_fin ? "RECEIVE_FIN" : "RECEIVE";
+                uint8_t evt = has_fin ? EVT_RECEIVE_FIN : EVT_RECEIVE;
 
                 size_t total_data_len = 0;
                 for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
@@ -339,12 +460,12 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
                         }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_len, has_fin ? ctx->early_data : 0);
+                        event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, evt, ctx->stream_id, combined, total_len, has_fin ? ctx->early_data : 0);
                         free(combined);
                     }
                 } else if (Event->RECEIVE.BufferCount == 1) {
                     // Server non-FIN: raw data without handle prefix
-                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id,
+                    event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, evt, ctx->stream_id,
                         (const char*)Event->RECEIVE.Buffers[0].Buffer, Event->RECEIVE.Buffers[0].Length, 0);
                 } else {
                     // Server non-FIN with multiple buffers: combine without handle prefix
@@ -355,7 +476,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
                         }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_data_len, 0);
+                        event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, evt, ctx->stream_id, combined, total_data_len, 0);
                         free(combined);
                     }
                 }
@@ -384,7 +505,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             char combined[sizeof(HQUIC) + sizeof(uint64_t)];
             memcpy(combined, &Stream, sizeof(HQUIC));
             memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", ctx->stream_id, combined, sizeof(combined), 0);
+            event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, EVT_STREAM_RESET, ctx->stream_id, combined, sizeof(combined), 0);
             break;
         }
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
@@ -393,7 +514,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             char combined[sizeof(HQUIC) + sizeof(uint64_t)];
             memcpy(combined, &Stream, sizeof(HQUIC));
             memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", ctx->stream_id, combined, sizeof(combined), 0);
+            event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, EVT_STOP_SENDING, ctx->stream_id, combined, sizeof(combined), 0);
             break;
         }
     }
@@ -418,7 +539,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             ctx->connected = 1;
             ctx->failed = 0;
             // Notify Ruby about new connection - pass ctx pointer for building connection_data
-            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
+            event_buffer_push(Connection, ctx, ctx->client_obj, EVT_CONN_ESTABLISHED, 0, (const char*)&Connection, sizeof(HQUIC), 0);
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
@@ -1386,11 +1507,59 @@ quicsilver_wake(VALUE self)
     return Qnil;
 }
 
+// Return the notification pipe read fd for Ruby to watch
+static VALUE
+quicsilver_notify_fd(VALUE self)
+{
+    if (notify_pipe[0] == -1) return Qnil;
+    return INT2NUM(notify_pipe[0]);
+}
+
+// Drain buffered events, dispatch to Ruby. Returns event count.
+static VALUE
+quicsilver_drain_queue(VALUE self)
+{
+    pthread_mutex_lock(&EventBufferMutex);
+    int count = EventBufferCount;
+    BufferedEvent* copy = NULL;
+    if (count > 0) {
+        copy = (BufferedEvent*)malloc(count * sizeof(BufferedEvent));
+        memcpy(copy, EventBuffer, count * sizeof(BufferedEvent));
+        EventBufferCount = 0;
+    }
+    pthread_mutex_unlock(&EventBufferMutex);
+
+    // Drain notify pipe
+    if (notify_pipe[0] != -1) {
+        char buf[64];
+        while (read(notify_pipe[0], buf, sizeof(buf)) > 0) {}
+    }
+
+    for (int i = 0; i < count; i++) {
+        BufferedEvent* ev = &copy[i];
+        dispatch_to_ruby(ev->connection, ev->connection_ctx, ev->client_obj,
+            EVENT_TYPE_NAMES[ev->event_type], ev->stream_id,
+            ev->data, ev->data_len, ev->early_data);
+        free(ev->data);
+    }
+    free(copy);
+
+    return INT2NUM(count);
+}
+
 // Initialize the extension
 void
 Init_quicsilver(void)
 {
     mQuicsilver = rb_define_module("Quicsilver");
+
+    // Initialize notification pipe
+    if (pipe(notify_pipe) == 0) {
+        int flags = fcntl(notify_pipe[0], F_GETFL, 0);
+        fcntl(notify_pipe[0], F_SETFL, flags | O_NONBLOCK);
+        flags = fcntl(notify_pipe[1], F_GETFL, 0);
+        fcntl(notify_pipe[1], F_SETFL, flags | O_NONBLOCK);
+    }
 
     // Core initialization
     rb_define_singleton_method(mQuicsilver, "open_connection", quicsilver_open, 0);
@@ -1428,4 +1597,6 @@ Init_quicsilver(void)
     // Event processing (custom execution — app drives MsQuic)
     rb_define_singleton_method(mQuicsilver, "poll", quicsilver_poll, 0);
     rb_define_singleton_method(mQuicsilver, "wake", quicsilver_wake, 0);
+    rb_define_singleton_method(mQuicsilver, "notify_fd", quicsilver_notify_fd, 0);
+    rb_define_singleton_method(mQuicsilver, "drain_queue", quicsilver_drain_queue, 0);
 }
