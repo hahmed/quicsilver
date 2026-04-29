@@ -4,6 +4,7 @@
 #include "msquic.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #if __linux__
@@ -837,17 +838,34 @@ quicsilver_start_connection(VALUE self, VALUE connection_handle, VALUE config_ha
     return Qtrue;
 }
 
-// Wait for connection to complete (connected or failed)
+// Sleep without GVL so other Ruby threads can run.
+struct sleep_args { int ms; };
+static void* sleep_nogvl(void* arg) {
+    struct sleep_args* a = (struct sleep_args*)arg;
+    struct timespec ts = { .tv_sec = a->ms / 1000, .tv_nsec = (a->ms % 1000) * 1000000 };
+    nanosleep(&ts, NULL);
+    return NULL;
+}
+
+// Wait for connection to complete (connected or failed).
+// Uses non-blocking poll + GVL-releasing sleep so other threads aren't blocked.
 static VALUE
 quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_ms)
 {
     ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
     int timeout = NUM2INT(timeout_ms);
     int elapsed = 0;
-    const int sleep_interval = 10; // 10ms
+    const int sleep_interval = 5; // 5ms
     
     while (elapsed < timeout && !ctx->connected && !ctx->failed) {
-        poll_inline(sleep_interval);  // Drive MsQuic execution while waiting
+        // Non-blocking: process any ready MsQuic events (has GVL)
+        poll_inline(0);
+        
+        if (ctx->connected || ctx->failed) break;
+        
+        // Release GVL while sleeping — other threads can run
+        struct sleep_args sa = { .ms = sleep_interval };
+        rb_thread_call_without_gvl(sleep_nogvl, &sa, RUBY_UBF_IO, NULL);
         elapsed += sleep_interval;
     }
     
