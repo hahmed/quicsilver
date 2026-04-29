@@ -1507,6 +1507,43 @@ quicsilver_wake(VALUE self)
     return Qnil;
 }
 
+// Non-blocking poll: process MsQuic timers + any ready completions.
+// Does NOT wait for I/O. Use after bridge wakes on notify pipe.
+static VALUE
+quicsilver_poll_nonblock(VALUE self)
+{
+    if (ExecContext == NULL) return INT2NUM(0);
+
+    MsQuic->ExecutionPoll(ExecContext);
+
+    QUIC_CQE events[64];
+    int count;
+#if __linux__
+    count = epoll_wait(EventQ, events, 64, 0);
+#elif __APPLE__ || __FreeBSD__
+    struct timespec zero = {0, 0};
+    count = kevent(EventQ, NULL, 0, events, 64, &zero);
+#endif
+
+    for (int i = 0; i < count; i++) {
+#if __linux__
+        if (events[i].data.ptr == NULL) {
+            uint64_t val;
+            read(WakeFd, &val, sizeof(val));
+            continue;
+        }
+#elif __APPLE__ || __FreeBSD__
+        if (events[i].filter == EVFILT_USER && events[i].ident == WAKE_IDENT) continue;
+#endif
+        QUIC_SQE* sqe = cqe_get_sqe(&events[i]);
+        if (sqe && sqe->Completion) {
+            sqe->Completion(&events[i]);
+        }
+    }
+
+    return INT2NUM(count);
+}
+
 // Return the notification pipe read fd for Ruby to watch
 static VALUE
 quicsilver_notify_fd(VALUE self)
@@ -1596,6 +1633,7 @@ Init_quicsilver(void)
 
     // Event processing (custom execution — app drives MsQuic)
     rb_define_singleton_method(mQuicsilver, "poll", quicsilver_poll, 0);
+    rb_define_singleton_method(mQuicsilver, "poll_nonblock", quicsilver_poll_nonblock, 0);
     rb_define_singleton_method(mQuicsilver, "wake", quicsilver_wake, 0);
     rb_define_singleton_method(mQuicsilver, "notify_fd", quicsilver_notify_fd, 0);
     rb_define_singleton_method(mQuicsilver, "drain_queue", quicsilver_drain_queue, 0);
