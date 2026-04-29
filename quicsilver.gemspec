@@ -56,4 +56,5 @@ Gem::Specification.new do |spec|
   spec.add_dependency "localhost", "~> 1.6"
   spec.add_dependency "rack", "~> 3.0"
   spec.add_dependency "rackup", "~> 2.0"
+  spec.add_dependency "io-event", "~> 1.7"
 end

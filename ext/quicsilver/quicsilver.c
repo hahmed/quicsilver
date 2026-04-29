@@ -86,9 +86,72 @@ typedef struct {
 static struct { HQUIC stream; uint16_t priority_plus_one; } PendingPriorities[MAX_PENDING_PRIORITIES];
 static int PendingPriorityCount = 0;
 
+// --- Event buffer: deferred dispatch ---
+// MsQuic callbacks append events here (no Ruby calls).
+// After ExecutionPoll + completions, Ruby drains the buffer in batch.
+
+#define EVENT_BUFFER_INITIAL_CAPACITY 64
+
+typedef struct {
+    HQUIC connection;
+    void* connection_ctx;
+    VALUE client_obj;
+    uint8_t event_type;  // 0=RECEIVE, 1=RECEIVE_FIN, 2=STREAM_RESET, 3=STOP_SENDING, 4=CONN_ESTABLISHED, 5=CONN_CLOSED
+    uint64_t stream_id;
+    char* data;          // heap-allocated copy, freed after dispatch
+    size_t data_len;
+    int early_data;
+} BufferedEvent;
+
+static BufferedEvent* EventBuffer = NULL;
+static int EventBufferCount = 0;
+static int EventBufferCapacity = 0;
+
+static void event_buffer_init(void) {
+    EventBufferCapacity = EVENT_BUFFER_INITIAL_CAPACITY;
+    EventBuffer = (BufferedEvent*)calloc(EventBufferCapacity, sizeof(BufferedEvent));
+    EventBufferCount = 0;
+}
+
+static void event_buffer_push(HQUIC connection, void* connection_ctx, VALUE client_obj,
+                              uint8_t event_type, uint64_t stream_id,
+                              const char* data, size_t data_len, int early_data) {
+    if (EventBufferCount >= EventBufferCapacity) {
+        EventBufferCapacity *= 2;
+        EventBuffer = (BufferedEvent*)realloc(EventBuffer, EventBufferCapacity * sizeof(BufferedEvent));
+    }
+    BufferedEvent* ev = &EventBuffer[EventBufferCount++];
+    ev->connection = connection;
+    ev->connection_ctx = connection_ctx;
+    ev->client_obj = client_obj;
+    ev->event_type = event_type;
+    ev->stream_id = stream_id;
+    ev->early_data = early_data;
+    if (data_len > 0) {
+        ev->data = (char*)malloc(data_len);
+        memcpy(ev->data, data, data_len);
+        ev->data_len = data_len;
+    } else {
+        ev->data = NULL;
+        ev->data_len = 0;
+    }
+}
+
+// Event type constants matching the enum above
+#define EVT_RECEIVE          0
+#define EVT_RECEIVE_FIN      1
+#define EVT_STREAM_RESET     2
+#define EVT_STOP_SENDING     3
+#define EVT_CONN_ESTABLISHED 4
+#define EVT_CONN_CLOSED      5
+
+static const char* EVENT_TYPE_NAMES[] = {
+    "RECEIVE", "RECEIVE_FIN", "STREAM_RESET", "STOP_SENDING",
+    "CONNECTION_ESTABLISHED", "CONNECTION_CLOSED"
+};
+
 // rb_protect wrapper — catches Ruby exceptions so they don't longjmp
 // through MsQuic callback frames (which would corrupt MsQuic state).
-// All Ruby object construction AND the funcall happen inside rb_protect.
 struct dispatch_ruby_args {
     HQUIC connection;
     void* connection_ctx;
@@ -104,6 +167,7 @@ static VALUE
 dispatch_ruby_body(VALUE arg)
 {
     struct dispatch_ruby_args* a = (struct dispatch_ruby_args*)arg;
+    VALUE data_str = (a->data && a->data_len > 0) ? rb_str_new(a->data, a->data_len) : rb_str_new("", 0);
 
     if (NIL_P(a->client_obj)) {
         VALUE server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
@@ -115,7 +179,7 @@ dispatch_ruby_body(VALUE arg)
                 connection_data,
                 ULL2NUM(a->stream_id),
                 rb_str_new_cstr(a->event_type),
-                rb_str_new(a->data, a->data_len),
+                data_str,
                 a->early_data ? Qtrue : Qfalse
             };
             rb_funcallv(server_class, rb_intern("handle_stream"), 5, argv);
@@ -125,7 +189,7 @@ dispatch_ruby_body(VALUE arg)
             VALUE argv[4] = {
                 ULL2NUM(a->stream_id),
                 rb_str_new_cstr(a->event_type),
-                rb_str_new(a->data, a->data_len),
+                data_str,
                 a->early_data ? Qtrue : Qfalse
             };
             rb_funcallv(a->client_obj, rb_intern("handle_stream_event"), 4, argv);
@@ -233,6 +297,19 @@ quicsilver_poll(VALUE self)
         }
     }
 
+    // 4. Drain buffered events — dispatch to Ruby in batch (has GVL)
+    // Callbacks in steps 1+3 only did memcpy into EventBuffer.
+    // Now we do all Ruby object creation + method calls at once.
+    int event_count = EventBufferCount;
+    for (int i = 0; i < event_count; i++) {
+        BufferedEvent* ev = &EventBuffer[i];
+        dispatch_to_ruby(ev->connection, ev->connection_ctx, ev->client_obj,
+            EVENT_TYPE_NAMES[ev->event_type], ev->stream_id,
+            ev->data, ev->data_len, ev->early_data);
+        free(ev->data);
+    }
+    EventBufferCount = 0;
+
     return INT2NUM(args.count);
 }
 
@@ -269,6 +346,16 @@ poll_inline(int timeout_ms)
             sqe->Completion(&events[i]);
         }
     }
+
+    // Drain buffered events from inline poll
+    for (int i = 0; i < EventBufferCount; i++) {
+        BufferedEvent* ev = &EventBuffer[i];
+        dispatch_to_ruby(ev->connection, ev->connection_ctx, ev->client_obj,
+            EVENT_TYPE_NAMES[ev->event_type], ev->stream_id,
+            ev->data, ev->data_len, ev->early_data);
+        free(ev->data);
+    }
+    EventBufferCount = 0;
 }
 
 QUIC_STATUS
@@ -310,13 +397,13 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
 
             if (Event->RECEIVE.BufferCount == 0 && has_fin) {
                 // Empty FIN — headers-only request/response with no body
-                dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
-                    "RECEIVE_FIN", ctx->stream_id, (const char*)&Stream, sizeof(HQUIC), ctx->early_data);
+                event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                    EVT_RECEIVE_FIN, ctx->stream_id, (const char*)&Stream, sizeof(HQUIC), ctx->early_data);
                 break;
             }
 
             if (Event->RECEIVE.BufferCount > 0) {
-                const char* event_type = has_fin ? "RECEIVE_FIN" : "RECEIVE";
+                uint8_t evt = has_fin ? EVT_RECEIVE_FIN : EVT_RECEIVE;
 
                 size_t total_data_len = 0;
                 for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
@@ -338,12 +425,12 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
                         }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_len, has_fin ? ctx->early_data : 0);
+                        event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, evt, ctx->stream_id, combined, total_len, has_fin ? ctx->early_data : 0);
                         free(combined);
                     }
                 } else if (Event->RECEIVE.BufferCount == 1) {
                     // Server non-FIN: raw data without handle prefix
-                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id,
+                    event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, evt, ctx->stream_id,
                         (const char*)Event->RECEIVE.Buffers[0].Buffer, Event->RECEIVE.Buffers[0].Length, 0);
                 } else {
                     // Server non-FIN with multiple buffers: combine without handle prefix
@@ -354,7 +441,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                             memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
                             offset += Event->RECEIVE.Buffers[b].Length;
                         }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_data_len, 0);
+                        event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, evt, ctx->stream_id, combined, total_data_len, 0);
                         free(combined);
                     }
                 }
@@ -383,7 +470,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             char combined[sizeof(HQUIC) + sizeof(uint64_t)];
             memcpy(combined, &Stream, sizeof(HQUIC));
             memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", ctx->stream_id, combined, sizeof(combined), 0);
+            event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, EVT_STREAM_RESET, ctx->stream_id, combined, sizeof(combined), 0);
             break;
         }
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
@@ -392,7 +479,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             char combined[sizeof(HQUIC) + sizeof(uint64_t)];
             memcpy(combined, &Stream, sizeof(HQUIC));
             memcpy(combined + sizeof(HQUIC), &error_code, sizeof(uint64_t));
-            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STOP_SENDING", ctx->stream_id, combined, sizeof(combined), 0);
+            event_buffer_push(ctx->connection, ctx->connection_ctx, ctx->client_obj, EVT_STOP_SENDING, ctx->stream_id, combined, sizeof(combined), 0);
             break;
         }
     }
@@ -417,7 +504,7 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             ctx->connected = 1;
             ctx->failed = 0;
             // Notify Ruby about new connection - pass ctx pointer for building connection_data
-            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
+            event_buffer_push(Connection, ctx, ctx->client_obj, EVT_CONN_ESTABLISHED, 0, (const char*)&Connection, sizeof(HQUIC), 0);
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
@@ -433,9 +520,8 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
+            // Dispatch immediately — can't defer because we free ctx right after.
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
-            // Free context for all connections (both client and server).
-            // Client GC registration must be removed before freeing.
             if (!NIL_P(ctx->client_obj)) {
                 rb_gc_unregister_address(&ctx->client_obj);
             }
@@ -1373,6 +1459,9 @@ void
 Init_quicsilver(void)
 {
     mQuicsilver = rb_define_module("Quicsilver");
+
+    // Initialize event buffer for deferred dispatch
+    event_buffer_init();
 
     // Core initialization
     rb_define_singleton_method(mQuicsilver, "open_connection", quicsilver_open, 0);
