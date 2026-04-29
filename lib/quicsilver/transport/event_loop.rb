@@ -43,8 +43,10 @@ module Quicsilver
 
       def run_loop
         while @running
-          # Wait for MsQuic to signal events (releases GVL)
-          @bridge.wait(timeout: 1.0)
+          # Wait for MsQuic to signal events (releases GVL).
+          # Short timeout — MsQuic fires events on its own threads,
+          # we need to drain fast to keep up.
+          @bridge.wait(timeout: 0.001)  # 1ms
 
           # Drain buffered events to Ruby (has GVL)
           Quicsilver.drain_queue

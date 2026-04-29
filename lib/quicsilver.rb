@@ -79,10 +79,6 @@ module Quicsilver
   # Release pooled client connections on process exit.
   # Closes connection handles so the OS doesn't leak UDP sockets.
   # MsQuic itself is cleaned up by the OS when the process exits.
-  at_exit do
-    begin
-      Client.close_pool
-    rescue StandardError # rubocop:disable Lint/SuppressedException
-    end
-  end
+  # MsQuic thread pool mode: OS handles cleanup on process exit.
+  # Explicit shutdown via Server#stop / Client#disconnect.
 end

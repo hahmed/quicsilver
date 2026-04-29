@@ -156,7 +156,7 @@ class ServerTest < Minitest::Test
 
   def test_default_max_queue_size
     server = create_server_direct(threads: 5)
-    assert_equal 20, server.max_queue_size
+    assert_equal 50, server.max_queue_size
   end
 
   def test_custom_max_queue_size

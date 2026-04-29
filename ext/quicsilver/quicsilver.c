@@ -961,15 +961,20 @@ quicsilver_close(VALUE self)
 {
     if (MsQuic != NULL) {
         if (Registration != NULL) {
+            // RegistrationClose waits for MsQuic threads to finish.
+            // After this returns, no more callbacks will fire.
             MsQuic->RegistrationClose(Registration);
             Registration = NULL;
         }
+
+        // Drain any remaining buffered events before closing
+        quicsilver_drain_queue(self);
 
         MsQuicClose(MsQuic);
         MsQuic = NULL;
     }
 
-    // Close notification pipe
+    // Close notification pipe after everything is drained
     if (notify_pipe[0] != -1) { close(notify_pipe[0]); notify_pipe[0] = -1; }
     if (notify_pipe[1] != -1) { close(notify_pipe[1]); notify_pipe[1] = -1; }
 

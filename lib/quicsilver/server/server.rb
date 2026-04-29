@@ -50,7 +50,7 @@ module Quicsilver
     end
 
     DEFAULT_THREAD_POOL_SIZE = 5
-    DEFAULT_QUEUE_MULTIPLIER = 4
+    DEFAULT_QUEUE_MULTIPLIER = 10
     DEFAULT_MAX_CONNECTIONS = 100
 
     def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil, max_connections: DEFAULT_MAX_CONNECTIONS, scheduler: nil)
