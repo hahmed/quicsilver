@@ -173,7 +173,7 @@ class ServerTest < Minitest::Test
     server.connections[connection_handle] = connection
 
     # Fill the queue so next dispatch overflows
-    server.send(:work_queue).push([:dummy, :work])
+    server.scheduler.enqueue([:dummy, :work])
 
     stream = Quicsilver::Transport::InboundStream.new(4)
     stream.stream_handle = 0xBEEF
@@ -243,7 +243,7 @@ class ServerTest < Minitest::Test
 
     server.send(:dispatch_request, connection, stream)
 
-    assert_equal 1, server.send(:work_queue).size
+    assert_equal 1, server.scheduler.pending
   end
 
   private

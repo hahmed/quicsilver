@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
+require_relative "scheduler"
+require_relative "schedulers/thread_scheduler"
+
 module Quicsilver
   class Server
-    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size, :max_connections
+    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size, :max_connections, :scheduler
 
     STREAM_EVENT_RECEIVE = "RECEIVE"
     STREAM_EVENT_RECEIVE_FIN = "RECEIVE_FIN"
@@ -50,7 +53,7 @@ module Quicsilver
     DEFAULT_QUEUE_MULTIPLIER = 4
     DEFAULT_MAX_CONNECTIONS = 100
 
-    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil, max_connections: DEFAULT_MAX_CONNECTIONS)
+    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil, max_connections: DEFAULT_MAX_CONNECTIONS, scheduler: nil)
       @port = port
       @address = address
       @app = app || default_rack_app
@@ -61,11 +64,9 @@ module Quicsilver
       @config_handle = nil
       @connections = {}
       @request_registry = RequestRegistry.new
-      @handler_threads = []
-      @handler_mutex = Mutex.new
       @thread_pool_size = threads
       @max_queue_size = max_queue_size || threads * DEFAULT_QUEUE_MULTIPLIER
-      @work_queue = Queue.new
+      @scheduler = build_scheduler(scheduler)
       @max_connections = max_connections
       @cancelled_streams = Set.new
       @cancelled_mutex = Mutex.new
@@ -106,7 +107,7 @@ module Quicsilver
       @running = true
 
       setup_signal_handlers
-      start_worker_pool
+      @scheduler.start
       Quicsilver.event_loop.start
       Quicsilver.event_loop.join  # Block until shutdown
     rescue ServerConfigurationError, ServerListenerError => e
@@ -161,19 +162,11 @@ module Quicsilver
       @cancelled_mutex.synchronize { @cancelled_streams.include?(stream_id) }
     end
 
-    # Wait for work queue to drain, then shut down the pool
+    # Wait for work queue to drain, then shut down the scheduler
     def drain(timeout: 5)
-      Quicsilver.logger.debug("Draining work queue (#{@work_queue.size} pending)")
-
-      deadline = Time.now + timeout
-
-      # Wait for work queue to empty
-      while @work_queue.size > 0 && Time.now < deadline
-        sleep 0.05
-      end
-
-      # Signal workers to exit
-      stop_worker_pool
+      Quicsilver.logger.debug("Draining work queue (#{@scheduler.pending} pending)")
+      @scheduler.drain(timeout: timeout)
+      @scheduler.stop
     end
 
     # Graceful shutdown: send GOAWAY, drain requests, then stop
@@ -396,29 +389,27 @@ module Quicsilver
     end
 
     def dispatch_request(connection, stream, early_data: false)
-      if @work_queue.size >= @max_queue_size
+      if @scheduler.full?
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
         connection.send_error(stream, 503, "Service Unavailable") if stream.writable?
       else
-        @work_queue.push([connection, stream, early_data])
+        @scheduler.enqueue([connection, stream, early_data])
       end
     end
 
-    def start_worker_pool
-      @thread_pool_size.times do
-        thread = Thread.new do
-          while (work = @work_queue.pop)
-            break if work == :shutdown
+    def build_scheduler(scheduler_class)
+      klass = scheduler_class || Schedulers::ThreadScheduler
 
-            if work.is_a?(Array) && work[0] == :streaming
-              handle_streaming_request(work[1])
-            else
-              connection, stream, early_data = work
-              @request_handler.call(connection, stream, early_data: early_data)
-            end
-          end
+      klass.new(
+        concurrency: @thread_pool_size,
+        max_queue_size: @max_queue_size
+      ) do |work|
+        if work.is_a?(Array) && work[0] == :streaming
+          handle_streaming_request(work[1])
+        else
+          connection, stream, early_data = work
+          @request_handler.call(connection, stream, early_data: early_data)
         end
-        @handler_mutex.synchronize { @handler_threads << thread }
       end
     end
 
@@ -479,12 +470,12 @@ module Quicsilver
       @request_registry.track(stream_id, connection_handle,
         path: headers[":path"] || "/", method: method || "GET")
 
-      if @work_queue.size >= @max_queue_size
+      if @scheduler.full?
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
         body&.close
         @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
       else
-        @work_queue.push([:streaming, pending])
+        @scheduler.enqueue([:streaming, pending])
       end
     rescue Protocol::FrameError => e
       Quicsilver.logger.error("Frame error: #{e.message}")
@@ -597,14 +588,6 @@ module Quicsilver
       data.getbyte(0) == Protocol::FRAME_HEADERS
     end
 
-    def stop_worker_pool
-      @thread_pool_size.times { @work_queue.push(:shutdown) }
-      @handler_mutex.synchronize do
-        @handler_threads.each { |t| t.join(2) }
-        # Raise into any stuck workers
-        @handler_threads.each { |t| t.raise(DrainTimeoutError, "drain timeout") if t.alive? }
-        @handler_threads.clear
-      end
-    end
+
   end
 end
