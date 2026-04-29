@@ -237,7 +237,10 @@ module Quicsilver
 
     def ensure_connected!
       return if @connected
-      open_connection
+      @mutex.synchronize do
+        return if @connected
+        open_connection
+      end
     end
 
     def start_connection(config)

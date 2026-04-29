@@ -3,6 +3,11 @@
 #define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 #include "msquic.h"
 #include <stdlib.h>
+#include <time.h>
+#include <fcntl.h>
+
+// Forward declarations
+static VALUE quicsilver_poll_nonblock(VALUE self);
 #include <string.h>
 #include <unistd.h>
 
@@ -21,10 +26,23 @@ static QUIC_EXECUTION* ExecContext = NULL;
 #if __linux__
 #include <sys/eventfd.h>
 static int WakeFd = -1;  // eventfd for waking epoll
+
+// Notification pipe: C writes to notify_pipe[1] when callbacks fire,
+// Ruby watches notify_pipe[0] via IO.select or io-event selector.
+static int notify_pipe[2] = {-1, -1};
 #endif
 #define WAKE_IDENT 0xCAFE  // kqueue EVFILT_USER identifier (macOS only)
 
 // Wake the event loop from another thread (e.g. after StreamSend)
+// Signal the notification pipe so Ruby's IO.select / io-event wakes up.
+static void
+notify_ruby(void)
+{
+    if (notify_pipe[1] != -1) {
+        write(notify_pipe[1], ".", 1);
+    }
+}
+
 static void
 wake_event_loop(void)
 {
@@ -837,17 +855,35 @@ quicsilver_start_connection(VALUE self, VALUE connection_handle, VALUE config_ha
     return Qtrue;
 }
 
-// Wait for connection to complete (connected or failed)
+// Sleep without GVL for the given duration (milliseconds).
+// Allows other Ruby threads to run while we wait.
+struct sleep_args { int ms; };
+static void* sleep_nogvl(void* arg) {
+    struct sleep_args* a = (struct sleep_args*)arg;
+    struct timespec ts = { .tv_sec = a->ms / 1000, .tv_nsec = (a->ms % 1000) * 1000000 };
+    nanosleep(&ts, NULL);
+    return NULL;
+}
+
+// Wait for connection to complete (connected or failed).
+// Uses poll_nonblock + GVL-releasing sleep so other threads aren't blocked.
 static VALUE
 quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_ms)
 {
     ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
     int timeout = NUM2INT(timeout_ms);
     int elapsed = 0;
-    const int sleep_interval = 10; // 10ms
+    const int sleep_interval = 5; // 5ms
     
     while (elapsed < timeout && !ctx->connected && !ctx->failed) {
-        poll_inline(sleep_interval);  // Drive MsQuic execution while waiting
+        // Non-blocking: process any ready MsQuic events (has GVL)
+        quicsilver_poll_nonblock(self);
+        
+        if (ctx->connected || ctx->failed) break;
+        
+        // Release GVL while sleeping — other threads can run
+        struct sleep_args sa = { .ms = sleep_interval };
+        rb_thread_call_without_gvl(sleep_nogvl, &sa, RUBY_UBF_IO, NULL);
         elapsed += sleep_interval;
     }
     
@@ -1368,11 +1404,88 @@ quicsilver_wake(VALUE self)
     return Qnil;
 }
 
+// Return the MsQuic event queue fd (kqueue on macOS, epoll on Linux).
+static VALUE
+quicsilver_event_queue_fd(VALUE self)
+{
+    if (EventQ == -1) return Qnil;
+    return INT2NUM(EventQ);
+}
+
+// Return the notification pipe read fd.
+// Ruby wraps this in IO.for_fd and watches via IO.select or io-event.
+static VALUE
+quicsilver_notify_fd(VALUE self)
+{
+    if (notify_pipe[0] == -1) return Qnil;
+    return INT2NUM(notify_pipe[0]);
+}
+
+// Drain the notification pipe (call after poll_nonblock to reset readability).
+static VALUE
+quicsilver_drain_notify(VALUE self)
+{
+    if (notify_pipe[0] == -1) return Qnil;
+    char buf[64];
+    while (read(notify_pipe[0], buf, sizeof(buf)) > 0) {}
+    return Qnil;
+}
+
+// Non-blocking poll: process MsQuic timers and fire any ready completions.
+// Does NOT wait for I/O — returns immediately. Use after selector wakes on EventQ fd.
+static VALUE
+quicsilver_poll_nonblock(VALUE self)
+{
+    if (ExecContext == NULL) return INT2NUM(0);
+
+    // Process MsQuic timers/state — may fire callbacks (has GVL)
+    MsQuic->ExecutionPoll(ExecContext);
+
+    // Non-blocking check for ready completions
+    QUIC_CQE events[64];
+    int count;
+#if __linux__
+    count = epoll_wait(EventQ, events, 64, 0);  // timeout=0, non-blocking
+#elif __APPLE__ || __FreeBSD__
+    struct timespec zero = {0, 0};
+    count = kevent(EventQ, NULL, 0, events, 64, &zero);  // non-blocking
+#endif
+
+    for (int i = 0; i < count; i++) {
+#if __linux__
+        if (events[i].data.ptr == NULL) {
+            uint64_t val;
+            read(WakeFd, &val, sizeof(val));
+            continue;
+        }
+#elif __APPLE__ || __FreeBSD__
+        if (events[i].filter == EVFILT_USER && events[i].ident == WAKE_IDENT) continue;
+#endif
+        QUIC_SQE* sqe = cqe_get_sqe(&events[i]);
+        if (sqe && sqe->Completion) {
+            sqe->Completion(&events[i]);
+        }
+    }
+
+    return INT2NUM(count);
+}
+
 // Initialize the extension
 void
 Init_quicsilver(void)
 {
     mQuicsilver = rb_define_module("Quicsilver");
+
+    // Create notification pipe for Ruby-side event loop integration.
+    // C signals notify_pipe[1] after processing completions.
+    // Ruby watches notify_pipe[0] via IO.select or io-event.
+    if (pipe(notify_pipe) == 0) {
+        // Non-blocking so writes never block MsQuic
+        int flags = fcntl(notify_pipe[0], F_GETFL, 0);
+        fcntl(notify_pipe[0], F_SETFL, flags | O_NONBLOCK);
+        flags = fcntl(notify_pipe[1], F_GETFL, 0);
+        fcntl(notify_pipe[1], F_SETFL, flags | O_NONBLOCK);
+    }
 
     // Core initialization
     rb_define_singleton_method(mQuicsilver, "open_connection", quicsilver_open, 0);
@@ -1409,5 +1522,7 @@ Init_quicsilver(void)
 
     // Event processing (custom execution — app drives MsQuic)
     rb_define_singleton_method(mQuicsilver, "poll", quicsilver_poll, 0);
+    rb_define_singleton_method(mQuicsilver, "poll_nonblock", quicsilver_poll_nonblock, 0);
     rb_define_singleton_method(mQuicsilver, "wake", quicsilver_wake, 0);
+    rb_define_singleton_method(mQuicsilver, "event_queue_fd", quicsilver_event_queue_fd, 0);
 }

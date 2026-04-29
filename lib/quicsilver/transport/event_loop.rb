@@ -2,6 +2,16 @@
 
 module Quicsilver
   module Transport
+    # Drives MsQuic's event loop on a background thread.
+    #
+    # Uses MsQuic's custom execution context — all callbacks fire on
+    # this thread during Quicsilver.poll. The poll call releases the
+    # GVL during kevent/epoll_wait so other Ruby threads run freely.
+    #
+    # For fiber mode (Async/Falcon), the plan is to switch MsQuic to
+    # its default thread pool and use a notification pipe + io-event
+    # selector. See autoresearch.ideas.md for the design.
+    #
     class EventLoop
       def initialize
         @running = false
