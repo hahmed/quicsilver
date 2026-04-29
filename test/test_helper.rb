@@ -47,3 +47,5 @@ def wait_for_server(server, timeout: 5)
     sleep 0.01
   end
 end
+
+Minitest.after_run { puts "-----------------------"; Quicsilver.close_connection rescue nil }

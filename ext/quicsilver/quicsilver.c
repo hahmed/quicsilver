@@ -961,8 +961,14 @@ quicsilver_close(VALUE self)
 {
     if (MsQuic != NULL) {
         if (Registration != NULL) {
-            // RegistrationClose waits for MsQuic threads to finish.
-            // After this returns, no more callbacks will fire.
+            // Force-close all connections (abortive shutdown).
+            // Without this, RegistrationClose blocks waiting for
+            // graceful close of connections that tests didn't clean up.
+            MsQuic->RegistrationShutdown(
+                Registration,
+                QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT,
+                0
+            );
             MsQuic->RegistrationClose(Registration);
             Registration = NULL;
         }
