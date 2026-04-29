@@ -9,6 +9,9 @@
 #include <pthread.h>
 #include <unistd.h>
 
+// Forward declarations
+static VALUE quicsilver_drain_queue(VALUE self);
+
 #if __linux__
 #include <sys/epoll.h>
 #elif __APPLE__ || __FreeBSD__
@@ -94,21 +97,13 @@ static void event_buffer_push(HQUIC conn, void* conn_ctx, VALUE client,
     }
 }
 
-// Wake the event loop from another thread (e.g. after StreamSend)
+// Wake the event loop — signal the notification pipe so bridge.wait returns.
 static void
 wake_event_loop(void)
 {
-    if (EventQ == -1) return;
-#if __linux__
-    if (WakeFd != -1) {
-        uint64_t val = 1;
-        write(WakeFd, &val, sizeof(val));
+    if (notify_pipe[1] != -1) {
+        write(notify_pipe[1], ".", 1);
     }
-#elif __APPLE__ || __FreeBSD__
-    struct kevent kev;
-    EV_SET(&kev, WAKE_IDENT, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
-    kevent(EventQ, &kev, 1, NULL, 0, NULL);
-#endif
 }
 
 // Global MSQUIC API table
@@ -231,167 +226,15 @@ dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
     }
 }
 
-// Platform I/O wait — called without GVL so other Ruby threads can run
-struct poll_args {
-    QUIC_EVENTQ eq;
-    QUIC_CQE events[64];
-    int max_events;
-    int timeout_ms;
-    int count;
-};
-
-static void*
-eventq_wait_nogvl(void* arg)
-{
-    struct poll_args* a = (struct poll_args*)arg;
-#if __linux__
-    a->count = epoll_wait(a->eq, a->events, a->max_events, a->timeout_ms);
-#elif __APPLE__ || __FreeBSD__
-    struct timespec ts;
-    ts.tv_sec = a->timeout_ms / 1000;
-    ts.tv_nsec = (a->timeout_ms % 1000) * 1000000;
-    a->count = kevent(a->eq, NULL, 0, a->events, a->max_events, &ts);
-#endif
-    return NULL;
-}
-
-static inline QUIC_SQE*
-cqe_get_sqe(QUIC_CQE* cqe)
-{
-#if __linux__
-    return (QUIC_SQE*)cqe->data.ptr;
-#elif __APPLE__ || __FreeBSD__
-    return (QUIC_SQE*)cqe->udata;
-#endif
-}
-
-// Drive MsQuic execution: poll internal timers, wait for I/O, fire completions.
-// Callbacks (StreamCallback, ConnectionCallback) fire HERE on the Ruby thread.
+// Legacy poll — now just drains the event buffer.
+// MsQuic drives itself on its own thread pool.
 static VALUE
 quicsilver_poll(VALUE self)
 {
-    if (ExecContext == NULL) return INT2NUM(0);
-
-    // 1. ExecutionPoll — process MsQuic timers/state, may fire callbacks (has GVL)
-    uint32_t wait_ms = MsQuic->ExecutionPoll(ExecContext);
-
-    // 2. Wait for I/O completions (releases GVL)
-    struct poll_args args;
-    args.eq = EventQ;
-    args.max_events = 64;
-    // With wake_event_loop(), Ruby threads instantly unblock us when work is
-    // queued. Cap at 1s as a safety net for shutdown responsiveness.
-    uint32_t actual_wait = (wait_ms == UINT32_MAX) ? 1000 : wait_ms;
-    args.timeout_ms = (int)actual_wait;
-    args.count = 0;
-
-    rb_thread_call_without_gvl(eventq_wait_nogvl, &args, RUBY_UBF_IO, NULL);
-
-    // 3. Fire completions — MsQuic callbacks run here (has GVL)
-    for (int i = 0; i < args.count; i++) {
-#if __linux__
-        if (args.events[i].data.ptr == NULL) {
-            uint64_t val;
-            read(WakeFd, &val, sizeof(val));  // drain eventfd
-            continue;
-        }
-#elif __APPLE__ || __FreeBSD__
-        if (args.events[i].filter == EVFILT_USER && args.events[i].ident == WAKE_IDENT) continue;
-#endif
-        QUIC_SQE* sqe = cqe_get_sqe(&args.events[i]);
-        if (sqe && sqe->Completion) {
-            sqe->Completion(&args.events[i]);
-        }
-    }
-
-    // 4. Drain buffered events — dispatch to Ruby in batch
-    pthread_mutex_lock(&EventBufferMutex);
-    int event_count = EventBufferCount;
-    BufferedEvent* events_copy = NULL;
-    if (event_count > 0) {
-        events_copy = (BufferedEvent*)malloc(event_count * sizeof(BufferedEvent));
-        memcpy(events_copy, EventBuffer, event_count * sizeof(BufferedEvent));
-        EventBufferCount = 0;
-    }
-    pthread_mutex_unlock(&EventBufferMutex);
-
-    // Drain notify pipe
-    if (notify_pipe[0] != -1) {
-        char buf[64];
-        while (read(notify_pipe[0], buf, sizeof(buf)) > 0) {}
-    }
-
-    for (int i = 0; i < event_count; i++) {
-        BufferedEvent* ev = &events_copy[i];
-        dispatch_to_ruby(ev->connection, ev->connection_ctx, ev->client_obj,
-            EVENT_TYPE_NAMES[ev->event_type], ev->stream_id,
-            ev->data, ev->data_len, ev->early_data);
-        free(ev->data);
-    }
-    free(events_copy);
-
-    return INT2NUM(args.count + event_count);
+    return quicsilver_drain_queue(self);
 }
 
-// Inline poll for use during synchronous waits (e.g. wait_for_connection).
-// Short non-blocking poll — keeps MsQuic alive while we spin.
-static void
-poll_inline(int timeout_ms)
-{
-    if (ExecContext == NULL) return;
 
-    MsQuic->ExecutionPoll(ExecContext);
-
-    QUIC_CQE events[8];
-#if __linux__
-    int count = epoll_wait(EventQ, events, 8, timeout_ms);
-#elif __APPLE__ || __FreeBSD__
-    struct timespec ts;
-    ts.tv_sec = timeout_ms / 1000;
-    ts.tv_nsec = (timeout_ms % 1000) * 1000000;
-    int count = kevent(EventQ, NULL, 0, events, 8, &ts);
-#endif
-    for (int i = 0; i < count; i++) {
-#if __linux__
-        if (events[i].data.ptr == NULL) {
-            uint64_t val;
-            read(WakeFd, &val, sizeof(val));  // drain eventfd
-            continue;
-        }
-#elif __APPLE__ || __FreeBSD__
-        if (events[i].filter == EVFILT_USER && events[i].ident == WAKE_IDENT) continue;
-#endif
-        QUIC_SQE* sqe = cqe_get_sqe(&events[i]);
-        if (sqe && sqe->Completion) {
-            sqe->Completion(&events[i]);
-        }
-    }
-
-    // Drain buffered events from inline poll
-    pthread_mutex_lock(&EventBufferMutex);
-    int ev_count = EventBufferCount;
-    BufferedEvent* ev_copy = NULL;
-    if (ev_count > 0) {
-        ev_copy = (BufferedEvent*)malloc(ev_count * sizeof(BufferedEvent));
-        memcpy(ev_copy, EventBuffer, ev_count * sizeof(BufferedEvent));
-        EventBufferCount = 0;
-    }
-    pthread_mutex_unlock(&EventBufferMutex);
-
-    if (notify_pipe[0] != -1) {
-        char buf[64];
-        while (read(notify_pipe[0], buf, sizeof(buf)) > 0) {}
-    }
-
-    for (int i = 0; i < ev_count; i++) {
-        BufferedEvent* ev = &ev_copy[i];
-        dispatch_to_ruby(ev->connection, ev->connection_ctx, ev->client_obj,
-            EVENT_TYPE_NAMES[ev->event_type], ev->stream_id,
-            ev->data, ev->data_len, ev->early_data);
-        free(ev->data);
-    }
-    free(ev_copy);
-}
 
 QUIC_STATUS
 StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
@@ -555,13 +398,11 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
-            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
-            // Free context for all connections (both client and server).
-            // Client GC registration must be removed before freeing.
-            if (!NIL_P(ctx->client_obj)) {
-                rb_gc_unregister_address(&ctx->client_obj);
-            }
-            free(ctx);
+            // Buffer the event — ctx cleanup deferred to drain_queue.
+            // Can't call dispatch_to_ruby here (no GVL on MsQuic thread).
+            event_buffer_push(Connection, ctx, ctx->client_obj, EVT_CONN_CLOSED, 0, (const char*)&Connection, sizeof(HQUIC), 0);
+            // NOTE: ctx is NOT freed here. drain_queue handles cleanup
+            // after dispatching CONNECTION_CLOSED to Ruby.
             break;
          case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
             // Client opened a stream
@@ -656,65 +497,16 @@ quicsilver_open(VALUE self)
         return Qfalse;
     }
 
-    // Custom execution MUST be set up BEFORE RegistrationOpen.
-    // RegistrationOpen triggers MsQuic lazy init (LazyInitComplete=TRUE),
-    // after which ExecutionCreate returns QUIC_STATUS_INVALID_STATE.
-#if __linux__
-    EventQ = epoll_create1(0);
-#elif __APPLE__ || __FreeBSD__
-    EventQ = kqueue();
-#endif
-    if (EventQ == -1) {
-        MsQuicClose(MsQuic);
-        MsQuic = NULL;
-        rb_raise(rb_eRuntimeError, "Failed to create event queue for custom execution");
-        return Qfalse;
-    }
-
-    QUIC_EXECUTION_CONFIG exec_config = { 0, &EventQ };
-    Status = MsQuic->ExecutionCreate(
-        QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE,
-        0,      // PollingIdleTimeoutUs
-        1,      // 1 execution context
-        &exec_config,
-        &ExecContext
-    );
-    if (QUIC_FAILED(Status)) {
-        close(EventQ);
-        EventQ = -1;
-        MsQuicClose(MsQuic);
-        MsQuic = NULL;
-        rb_raise(rb_eRuntimeError, "ExecutionCreate failed, 0x%x!", Status);
-        return Qfalse;
-    }
-
-    // Now open registration — MsQuic lazy init will see the custom execution
-    // context and skip spawning its own worker threads.
+    // MsQuic thread pool mode: no custom execution context.
+    // MsQuic creates its own threads and fires callbacks there.
+    // Callbacks write to the ring buffer (no GVL needed).
+    // Ruby drains via drain_queue (has GVL).
     if (QUIC_FAILED(Status = MsQuic->RegistrationOpen(&RegConfig, &Registration))) {
-        MsQuic->ExecutionDelete(1, &ExecContext);
-        ExecContext = NULL;
-        close(EventQ);
-        EventQ = -1;
         MsQuicClose(MsQuic);
         MsQuic = NULL;
         rb_raise(rb_eRuntimeError, "RegistrationOpen failed, 0x%x!", Status);
         return Qfalse;
     }
-
-    // Register wake source — Ruby threads can unblock the event loop
-#if __linux__
-    WakeFd = eventfd(0, EFD_NONBLOCK);
-    if (WakeFd != -1) {
-        struct epoll_event ev = { .events = EPOLLIN, .data.ptr = NULL };
-        epoll_ctl(EventQ, EPOLL_CTL_ADD, WakeFd, &ev);
-    }
-#elif __APPLE__ || __FreeBSD__
-    {
-        struct kevent kev;
-        EV_SET(&kev, WAKE_IDENT, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
-        kevent(EventQ, &kev, 1, NULL, 0, NULL);
-    }
-#endif
 
     return Qtrue;
 }
@@ -979,12 +771,9 @@ quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_m
     const int sleep_interval = 5; // 5ms
     
     while (elapsed < timeout && !ctx->connected && !ctx->failed) {
-        // Non-blocking: process any ready MsQuic events (has GVL)
-        poll_inline(0);
-        
-        if (ctx->connected || ctx->failed) break;
-        
-        // Release GVL while sleeping — other threads can run
+        // Release GVL while sleeping — other threads can run.
+        // MsQuic fires CONNECTION_CONNECTED on its own thread,
+        // setting ctx->connected directly.
         struct sleep_args sa = { .ms = sleep_interval };
         rb_thread_call_without_gvl(sleep_nogvl, &sa, RUBY_UBF_IO, NULL);
         elapsed += sleep_interval;
@@ -1176,25 +965,13 @@ quicsilver_close(VALUE self)
             Registration = NULL;
         }
 
-        if (ExecContext != NULL) {
-            MsQuic->ExecutionDelete(1, &ExecContext);
-            ExecContext = NULL;
-        }
-
         MsQuicClose(MsQuic);
         MsQuic = NULL;
     }
 
-#if __linux__
-    if (WakeFd != -1) {
-        close(WakeFd);
-        WakeFd = -1;
-    }
-#endif
-    if (EventQ != -1) {
-        close(EventQ);
-        EventQ = -1;
-    }
+    // Close notification pipe
+    if (notify_pipe[0] != -1) { close(notify_pipe[0]); notify_pipe[0] = -1; }
+    if (notify_pipe[1] != -1) { close(notify_pipe[1]); notify_pipe[1] = -1; }
 
     return Qnil;
 }
@@ -1507,41 +1284,11 @@ quicsilver_wake(VALUE self)
     return Qnil;
 }
 
-// Non-blocking poll: process MsQuic timers + any ready completions.
-// Does NOT wait for I/O. Use after bridge wakes on notify pipe.
+// Non-blocking poll: drains the event buffer. Alias for drain_queue.
 static VALUE
 quicsilver_poll_nonblock(VALUE self)
 {
-    if (ExecContext == NULL) return INT2NUM(0);
-
-    MsQuic->ExecutionPoll(ExecContext);
-
-    QUIC_CQE events[64];
-    int count;
-#if __linux__
-    count = epoll_wait(EventQ, events, 64, 0);
-#elif __APPLE__ || __FreeBSD__
-    struct timespec zero = {0, 0};
-    count = kevent(EventQ, NULL, 0, events, 64, &zero);
-#endif
-
-    for (int i = 0; i < count; i++) {
-#if __linux__
-        if (events[i].data.ptr == NULL) {
-            uint64_t val;
-            read(WakeFd, &val, sizeof(val));
-            continue;
-        }
-#elif __APPLE__ || __FreeBSD__
-        if (events[i].filter == EVFILT_USER && events[i].ident == WAKE_IDENT) continue;
-#endif
-        QUIC_SQE* sqe = cqe_get_sqe(&events[i]);
-        if (sqe && sqe->Completion) {
-            sqe->Completion(&events[i]);
-        }
-    }
-
-    return INT2NUM(count);
+    return quicsilver_drain_queue(self);
 }
 
 // Return the notification pipe read fd for Ruby to watch
@@ -1578,6 +1325,16 @@ quicsilver_drain_queue(VALUE self)
             EVENT_TYPE_NAMES[ev->event_type], ev->stream_id,
             ev->data, ev->data_len, ev->early_data);
         free(ev->data);
+
+        // Deferred cleanup for CONNECTION_CLOSED — ctx was kept alive
+        // so the event buffer could reference client_obj.
+        if (ev->event_type == EVT_CONN_CLOSED && ev->connection_ctx) {
+            ConnectionContext* ctx = (ConnectionContext*)ev->connection_ctx;
+            if (!NIL_P(ctx->client_obj)) {
+                rb_gc_unregister_address(&ctx->client_obj);
+            }
+            free(ctx);
+        }
     }
     free(copy);
 
