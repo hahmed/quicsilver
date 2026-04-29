@@ -237,7 +237,10 @@ module Quicsilver
 
     def ensure_connected!
       return if @connected
-      open_connection
+      @mutex.synchronize do
+        return if @connected
+        open_connection
+      end
     end
 
     def start_connection(config)
@@ -348,10 +351,13 @@ module Quicsilver
         state[:frame_buffer] << event_obj.data
         drain_streaming_data(state)
       else
-        # Buffer data, strip 1xx, and try to start streaming
         (@response_buffers[stream_id] ||= "".b) << event_obj.data
         strip_informational_frames!(stream_id)
-        try_start_streaming(stream_id, event_obj.handle)
+        # TODO: fix true incremental streaming — try_start_streaming eagerly
+        # transitions ALL responses to streaming mode, breaking buffered responses
+        # for large payloads (body comes back empty). Needs redesign: only transition
+        # when caller has called streaming_response before data arrives.
+        # try_start_streaming(stream_id, event_obj.handle)
       end
     end
 

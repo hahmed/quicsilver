@@ -241,6 +241,23 @@ class ServerClientIntegrationTest < Minitest::Test
     refute client.connected?
   end
 
+  # === Large response (multiple RECEIVE events) ===
+
+  def test_large_response_body_received_correctly
+    body = "x" * 50_000  # 50KB — splits across multiple QUIC packets/RECEIVE events
+    app = ->(env) { [200, {"content-type" => "application/octet-stream"}, [body]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/large")
+
+    assert_equal 200, response[:status]
+    assert_equal 50_000, response[:body].bytesize
+    assert_equal body, response[:body]
+  ensure
+    client&.disconnect
+  end
+
   # === 1xx informational response handling (RFC 9114 §4.1) ===
 
   def test_client_skips_103_early_hints_and_receives_final_response
