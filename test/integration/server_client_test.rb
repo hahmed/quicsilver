@@ -241,6 +241,30 @@ class ServerClientIntegrationTest < Minitest::Test
     refute client.connected?
   end
 
+  # === Multi-threaded concurrent clients ===
+
+  def test_multiple_clients_connect_and_request_concurrently
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["ok"]] }
+    start_server(app)
+
+    errors = []
+    mu = Mutex.new
+
+    # 4 threads, each creating their own client and making requests
+    threads = 4.times.map do |i|
+      Thread.new do
+        client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true, connection_timeout: 5000)
+        5.times { client.get("/thread-#{i}") }
+        client.disconnect
+      rescue => e
+        mu.synchronize { errors << "Thread #{i}: #{e.class} #{e.message}" }
+      end
+    end
+    threads.each(&:join)
+
+    assert_empty errors, "Concurrent clients should not error: #{errors.join(', ')}"
+  end
+
   # === Large response (multiple RECEIVE events) ===
 
   def test_large_response_body_received_correctly
