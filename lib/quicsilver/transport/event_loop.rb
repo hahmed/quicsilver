@@ -2,17 +2,10 @@
 
 module Quicsilver
   module Transport
-    # Drives MsQuic's event loop on a background thread.
+    # Drives event processing via the EventBridge.
     #
-    # With custom execution context (current):
-    #   poll() drives MsQuic via kevent/epoll (releases GVL during wait).
-    #   Callbacks fire during poll → write to ring buffer.
-    #   poll() drains the buffer after completions.
-    #
-    # With MsQuic thread pool (future Option A):
-    #   No poll() — MsQuic drives itself on its own threads.
-    #   bridge.wait on notification pipe (releases GVL).
-    #   drain_queue processes buffered events.
+    # MsQuic fires callbacks on its own thread pool → ring buffer.
+    # EventLoop watches the notification pipe → drains buffer to Ruby.
     #
     class EventLoop
       attr_reader :bridge
@@ -30,16 +23,13 @@ module Quicsilver
 
           @bridge = PipeEventBridge.new
           @running = true
-          @thread = Thread.new do
-            # poll() handles everything: kevent wait + completions + drain
-            Quicsilver.poll while @running
-          end
+          @thread = Thread.new { run_loop }
         end
       end
 
       def stop
         @running = false
-        Quicsilver.wake
+        Quicsilver.wake  # signal pipe to unblock IO.select
         @thread&.join(2)
         @bridge&.close
         @bridge = nil
@@ -47,6 +37,18 @@ module Quicsilver
 
       def join
         @thread&.join
+      end
+
+      private
+
+      def run_loop
+        while @running
+          # Wait for MsQuic to signal events via pipe (releases GVL)
+          @bridge.wait(timeout: 0.001)
+
+          # Drain buffered events to Ruby (has GVL)
+          Quicsilver.poll
+        end
       end
     end
   end
