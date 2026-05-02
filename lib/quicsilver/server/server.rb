@@ -135,11 +135,33 @@ module Quicsilver
 
       drain
 
+      # Stop accepting new connections
       if @listener_data && @listener_data.listener_handle
         Quicsilver.stop_listener(@listener_data.listener_handle)
+      end
+
+      # Close all connections — sends CONNECTION_CLOSE to peers.
+      # MsQuic's RegistrationClose blocks until all children are closed,
+      # so we must close connections explicitly before stopping.
+      @connections.each_value do |conn|
+        Quicsilver.connection_shutdown(conn.handle, 0, true) rescue nil
+      end
+
+      # Brief grace period for CONNECTION_CLOSE frames to go out
+      sleep 0.05
+
+      # Close connection handles
+      @connections.each_value do |conn|
+        Quicsilver.close_server_connection(conn.handle) rescue nil
+      end
+      @connections.clear
+
+      # Close listener handle
+      if @listener_data && @listener_data.listener_handle
         Quicsilver.close_listener([@listener_data.listener_handle, @listener_data.context_handle])
       end
 
+      # Close configuration
       if @config_handle
         Quicsilver.close_configuration(@config_handle)
         @config_handle = nil
