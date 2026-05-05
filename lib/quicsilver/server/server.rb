@@ -273,22 +273,8 @@ module Quicsilver
     def wrap_app(app, mode)
       case mode
       when :falcon then app
-      else ::Protocol::Rack::Adapter.new(with_early_hints(app))
+      else Server::RackAdapter.new(app)
       end
-    end
-
-    # Bridges protocol-http's interim_response to Rack's rack.early_hints.
-    # In a Rails controller: send_early_hints("link" => '</style.css>; rel=preload')
-    def with_early_hints(app)
-      ->(env) {
-        request = env["protocol.http.request"]
-        if request&.respond_to?(:interim_response) && request.interim_response
-          env["rack.early_hints"] = ->(headers) {
-            request.send_interim_response(103, ::Protocol::HTTP::Headers[headers.map { |k, v| [k, v] }])
-          }
-        end
-        app.call(env)
-      }
     end
 
     def setup_signal_handlers

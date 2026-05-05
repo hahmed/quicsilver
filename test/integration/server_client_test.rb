@@ -335,6 +335,97 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  def test_rack_app_sends_trailers_via_rack_trailers
+    app = ->(env) {
+      env["rack.trailers"] = { "grpc-status" => "0", "grpc-message" => "OK" }
+      [200, {"content-type" => "text/plain"}, ["Hello"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert_equal "Hello", response[:body]
+    assert_equal "0", response[:trailers]["grpc-status"]
+    assert_equal "OK", response[:trailers]["grpc-message"]
+  ensure
+    client&.disconnect
+  end
+
+  def test_rack_app_sends_trailers_on_error_response
+    app = ->(env) {
+      env["rack.trailers"] = { "grpc-status" => "13", "grpc-message" => "INTERNAL" }
+      [500, {"content-type" => "application/grpc"}, [""]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 500, response[:status]
+    assert_equal "13", response[:trailers]["grpc-status"]
+    assert_equal "INTERNAL", response[:trailers]["grpc-message"]
+  ensure
+    client&.disconnect
+  end
+
+  def test_rack_app_empty_trailers_not_sent
+    app = ->(env) {
+      env["rack.trailers"] = {}
+      [200, {"content-type" => "text/plain"}, ["OK"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert_equal({}, response[:trailers])
+  ensure
+    client&.disconnect
+  end
+
+  def test_rack_app_non_hash_trailers_ignored
+    app = ->(env) {
+      env["rack.trailers"] = "not a hash"
+      [200, {"content-type" => "text/plain"}, ["OK"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert_equal({}, response[:trailers])
+  ensure
+    client&.disconnect
+  end
+
+  def test_rack_app_trailers_with_multiple_fields
+    app = ->(env) {
+      env["rack.trailers"] = {
+        "grpc-status" => "0",
+        "grpc-message" => "OK",
+        "x-request-id" => "abc-123",
+        "x-timing" => "42ms"
+      }
+      [200, {"content-type" => "text/plain"}, ["Hello"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert_equal "0", response[:trailers]["grpc-status"]
+    assert_equal "OK", response[:trailers]["grpc-message"]
+    assert_equal "abc-123", response[:trailers]["x-request-id"]
+    assert_equal "42ms", response[:trailers]["x-timing"]
+  ensure
+    client&.disconnect
+  end
+
   def test_client_response_without_trailers_has_empty_trailers
     app = ->(env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
     start_server(app)
@@ -388,6 +479,31 @@ class ServerClientIntegrationTest < Minitest::Test
 
     assert_equal 200, resp[:status]
     assert_includes resp[:body], "0 bytes"
+  ensure
+    client&.disconnect
+  end
+
+  def test_streaming_request_with_rack_trailers
+    received_body = nil
+    app = ->(env) {
+      received_body = env["rack.input"]&.read
+      env["rack.trailers"] = { "grpc-status" => "0", "grpc-message" => "OK" }
+      [200, {"content-type" => "application/grpc"}, ["done"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    req = client.build_request("POST", "/grpc", body: :stream)
+    req.stream_body do |writer|
+      writer.write("request-data")
+    end
+    resp = req.response(timeout: 5)
+
+    assert_equal 200, resp[:status]
+    assert_equal "done", resp[:body]
+    assert_equal "request-data", received_body
+    assert_equal "0", resp[:trailers]["grpc-status"]
+    assert_equal "OK", resp[:trailers]["grpc-message"]
   ensure
     client&.disconnect
   end
