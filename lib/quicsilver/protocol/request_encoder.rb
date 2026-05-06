@@ -3,7 +3,8 @@
 module Quicsilver
   module Protocol
     class RequestEncoder
-      def initialize(method:, path:, scheme: "https", authority: "localhost:4433", headers: {}, body: nil, encoder: Qpack::Encoder.new)
+      def initialize(method:, path:, scheme: "https", authority: "localhost:4433", headers: {}, body: nil, priority: nil, encoder: Qpack::Encoder.new)
+        @priority = priority
         @method = method.upcase
         @path = path
         @scheme = scheme
@@ -36,7 +37,9 @@ module Quicsilver
           headers << [":authority", @authority]
           headers << [":path", @path]
         end
-        headers + @headers.map { |k, v| [k.to_s, v.to_s] }
+        pairs = headers + @headers.map { |k, v| [k.to_s, v.to_s] }
+        pairs << ["priority", @priority.to_s] if @priority
+        pairs
       end
 
       def build_frame(type, payload)

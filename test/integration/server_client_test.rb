@@ -615,6 +615,43 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # === Extensible Priorities (RFC 9218) ===
+
+  def test_client_sends_priority_header
+    received_priority = nil
+    app = ->(env) {
+      received_priority = env["HTTP_PRIORITY"]
+      [200, {"content-type" => "text/plain"}, ["OK"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    priority = Quicsilver::Protocol::Priority.new(urgency: 0, incremental: true)
+    response = client.get("/", priority: priority)
+
+    assert_equal 200, response[:status]
+    assert_equal "u=0, i", received_priority
+  ensure
+    client&.disconnect
+  end
+
+  def test_client_default_priority_omits_header
+    received_priority = nil
+    app = ->(env) {
+      received_priority = env["HTTP_PRIORITY"]
+      [200, {"content-type" => "text/plain"}, ["OK"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/")
+
+    assert_equal 200, response[:status]
+    assert_nil received_priority
+  ensure
+    client&.disconnect
+  end
+
   # === Stream ID tracking (RFC 9114 §5.2 GOAWAY needs correct stream IDs) ===
 
   # MsQuic defers stream ID assignment until data flows on the wire.

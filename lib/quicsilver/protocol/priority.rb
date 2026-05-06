@@ -30,6 +30,15 @@ module Quicsilver
 
       # Parse a priority header value (RFC 9218 §4, Structured Field Values).
       # Returns a Priority with defaults for missing or invalid values.
+      # RFC 9218 §4: Encode as Structured Field Value.
+      # e.g. "u=0, i" or "u=5" or "u=3" (default)
+      def to_s
+        parts = []
+        parts << "u=#{@urgency}" if @urgency != DEFAULT_URGENCY
+        parts << "i" if @incremental
+        parts.empty? ? "u=#{DEFAULT_URGENCY}" : parts.join(", ")
+      end
+
       def self.parse(value)
         return new unless value && !value.empty?
 

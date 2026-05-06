@@ -66,9 +66,9 @@ module Quicsilver
         end
       end
 
-      def request(hostname, port, method, path, headers: {}, body: nil, **options, &block)
+      def request(hostname, port, method, path, headers: {}, body: nil, priority: nil, **options, &block)
         client = pool.checkout(hostname, port, **options)
-        client.public_send(method, path, headers: headers, body: body, &block)
+        client.public_send(method, path, headers: headers, body: body, priority: priority, &block)
       ensure
         pool.checkin(client) if client
       end
@@ -98,8 +98,8 @@ module Quicsilver
     #   client.post("/data", body: json)
     #
     %i[get post patch delete head put].each do |method|
-      define_method(method) do |path, headers: {}, body: nil, &block|
-        req = build_request(method.to_s.upcase, path, headers: headers, body: body)
+      define_method(method) do |path, headers: {}, body: nil, priority: nil, &block|
+        req = build_request(method.to_s.upcase, path, headers: headers, body: body, priority: priority)
         block ? block.call(req) : req.response
       end
     end
@@ -118,7 +118,7 @@ module Quicsilver
       end
     end
 
-    def build_request(method, path, headers: {}, body: nil)
+    def build_request(method, path, headers: {}, body: nil, priority: nil)
       ensure_connected!
       raise GoAwayError, "Connection is draining (GOAWAY received)" if draining?
 
@@ -130,7 +130,7 @@ module Quicsilver
         @inflight[stream.handle] = { request: request, stream_id: nil }
       end
 
-      send_to_stream(stream, method, path, headers, body)
+      send_to_stream(stream, method, path, headers, body, priority: priority)
 
       request
     end
@@ -287,6 +287,20 @@ module Quicsilver
       end
     end
 
+    # RFC 9218 §7: Send PRIORITY_UPDATE frame on the control stream.
+    # Reprioritises an in-flight stream after it was opened.
+    def send_priority_update(stream_id, priority)
+      return unless @control_stream && priority
+
+      field_value = priority.to_s
+      payload = Protocol.encode_varint(stream_id) + field_value.b
+      frame = Protocol.encode_varint(Protocol::FRAME_PRIORITY_UPDATE) +
+        Protocol.encode_varint(payload.bytesize) + payload
+      @control_stream.send(frame, fin: false)
+    rescue => e
+      Quicsilver.logger.debug("Failed to send PRIORITY_UPDATE: #{e.message}")
+    end
+
     def handle_connection_result(result)
       if result.key?("error")
         cleanup_failed_connection
@@ -304,7 +318,7 @@ module Quicsilver
       false
     end
 
-    def send_to_stream(stream, method, path, headers, body)
+    def send_to_stream(stream, method, path, headers, body, priority: nil)
       # RFC 9114 §4.2.2: Enforce server's SETTINGS_MAX_FIELD_SECTION_SIZE
       if @peer_max_field_section_size
         header_size = estimate_header_size(method, path, headers)
@@ -318,14 +332,14 @@ module Quicsilver
         # Streaming mode: send HEADERS only, body sent later via Request#stream_body
         encoded = Protocol::RequestEncoder.new(
           method: method, path: path, scheme: "https",
-          authority: authority, headers: headers, body: nil
+          authority: authority, headers: headers, body: nil, priority: priority
         ).encode
         result = stream.send(encoded, fin: false)
       else
         # Buffered mode: send HEADERS + body + FIN
         encoded = Protocol::RequestEncoder.new(
           method: method, path: path, scheme: "https",
-          authority: authority, headers: headers, body: body
+          authority: authority, headers: headers, body: body, priority: priority
         ).encode
         result = stream.send(encoded, fin: true)
       end

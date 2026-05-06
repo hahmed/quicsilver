@@ -105,6 +105,16 @@ module Quicsilver
         writer.finish
       end
 
+      # Reprioritise this stream (RFC 9218). Sends PRIORITY_UPDATE on the
+      # control stream. Can be called while the response is in flight.
+      #
+      #   req = client.build_request("GET", "/video", priority: Priority.new(urgency: 2))
+      #   req.update_priority(Priority.new(urgency: 6))  # deprioritise
+      #
+      def update_priority(priority)
+        @client.send_priority_update(@stream.stream_id, priority)
+      end
+
       # Cancel the request (sends RESET_STREAM + STOP_SENDING to server)
       # error_code defaults to H3_REQUEST_CANCELLED (0x10c)
       def cancel(error_code: Protocol::H3_REQUEST_CANCELLED)

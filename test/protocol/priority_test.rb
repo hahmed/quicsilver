@@ -96,6 +96,37 @@ class PriorityTest < Minitest::Test
     refute parser.priority.incremental
   end
 
+  # === Encoding priority (RFC 9218 §4) ===
+
+  def test_to_s_default_priority
+    priority = Quicsilver::Protocol::Priority.new
+    assert_equal "u=3", priority.to_s
+  end
+
+  def test_to_s_high_urgency
+    priority = Quicsilver::Protocol::Priority.new(urgency: 0)
+    assert_equal "u=0", priority.to_s
+  end
+
+  def test_to_s_incremental
+    priority = Quicsilver::Protocol::Priority.new(urgency: 3, incremental: true)
+    assert_equal "i", priority.to_s
+  end
+
+  def test_to_s_urgency_and_incremental
+    priority = Quicsilver::Protocol::Priority.new(urgency: 1, incremental: true)
+    assert_equal "u=1, i", priority.to_s
+  end
+
+  def test_roundtrip_parse_to_s
+    ["u=0", "u=7", "u=1, i", "i", "u=3"].each do |value|
+      parsed = Quicsilver::Protocol::Priority.parse(value)
+      reparsed = Quicsilver::Protocol::Priority.parse(parsed.to_s)
+      assert_equal parsed.urgency, reparsed.urgency, "Roundtrip failed for #{value}"
+      assert_equal parsed.incremental, reparsed.incremental, "Roundtrip failed for #{value}"
+    end
+  end
+
   private
 
   def build_qpack_headers(headers)
