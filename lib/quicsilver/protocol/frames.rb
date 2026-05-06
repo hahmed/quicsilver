@@ -12,6 +12,13 @@ module Quicsilver
     FRAME_MAX_PUSH_ID = 0x0d
     FRAME_PRIORITY_UPDATE = 0xF0700  # RFC 9218 — request stream priority update
 
+    # Settings identifiers
+    SETTINGS_QPACK_MAX_TABLE_CAPACITY = 0x01
+    SETTINGS_QPACK_BLOCKED_STREAMS = 0x07
+    SETTINGS_ENABLE_CONNECT_PROTOCOL = 0x08  # RFC 9220
+    SETTINGS_H3_DATAGRAM = 0x33              # RFC 9297
+    SETTINGS_MAX_FIELD_SECTION_SIZE = 0x06   # RFC 9114 §7.2.4.1
+
     # Frame types forbidden on request streams (RFC 9114 Section 7.2.4, 7.2.6, 7.2.7)
     CONTROL_ONLY_FRAMES = [FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID].freeze
 
@@ -242,11 +249,12 @@ module Quicsilver
       def build_control_stream(max_field_section_size: nil)
         stream_type = [0x00].pack('C')  # Control stream type
         settings_hash = {
-          0x01 => 0,           # QPACK_MAX_TABLE_CAPACITY = 0 (no dynamic table)
-          0x07 => 0,           # QPACK_BLOCKED_STREAMS = 0
-          0x08 => 1,           # SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 9220)
+          SETTINGS_QPACK_MAX_TABLE_CAPACITY => 0,
+          SETTINGS_QPACK_BLOCKED_STREAMS => 0,
+          SETTINGS_ENABLE_CONNECT_PROTOCOL => 1,
+          SETTINGS_H3_DATAGRAM => 1,
         }
-        settings_hash[0x06] = max_field_section_size if max_field_section_size  # SETTINGS_MAX_FIELD_SECTION_SIZE
+        settings_hash[SETTINGS_MAX_FIELD_SECTION_SIZE] = max_field_section_size if max_field_section_size
         settings_hash[grease_id] = grease_id  # GREASE setting (RFC 9297)
 
         stream_type + build_settings_frame(settings_hash)

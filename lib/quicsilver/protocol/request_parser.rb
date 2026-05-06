@@ -162,7 +162,11 @@ module Quicsilver
 
         method = @headers[":method"]
 
-        if method == METHOD_CONNECT
+        if method == METHOD_CONNECT && @headers[":protocol"]
+          # Extended CONNECT (RFC 9220) — has :scheme, :path, :authority, :protocol
+          return nil unless @headers[":scheme"] && @headers[":path"] && @headers[":authority"]
+        elsif method == METHOD_CONNECT
+          # Regular CONNECT (RFC 9114 §4.4)
           return nil unless @headers[":authority"]
         else
           return nil unless method && @headers[":scheme"] && @headers[":path"]
@@ -196,6 +200,11 @@ module Quicsilver
 
         if @headers[":authority"]
           env["HTTP_HOST"] = @headers[":authority"]
+        end
+
+        # Extended CONNECT (RFC 9220) — expose :protocol as rack.protocol
+        if @headers[":protocol"]
+          env["rack.protocol"] = @headers[":protocol"]
         end
 
         @headers.each do |name, value|

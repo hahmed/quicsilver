@@ -72,6 +72,7 @@ module Quicsilver
       @cancelled_mutex = Mutex.new
       @pending_streams = {}  # stream_id => PendingStream (for streaming dispatch)
       @pending_mutex = Mutex.new
+      @datagram_callback = nil
 
       protocol_app = wrap_app(@app, @server_configuration.mode)
 
@@ -84,6 +85,23 @@ module Quicsilver
       )
 
       self.class.instance = self
+    end
+
+    # Send an unreliable datagram to a connection (RFC 9297 / QUIC RFC 9221).
+    # Must fit in a single QUIC packet (~1200 bytes).
+    #
+    #   server.datagram_send(connection, "real-time-update")
+    #
+    def datagram_send(connection, data)
+      Quicsilver.datagram_send(connection.data, data.to_s.b)
+    end
+
+    # Register a callback for received datagrams.
+    #
+    #   server.on_datagram { |connection, data| puts "Got: #{data}" }
+    #
+    def on_datagram(&block)
+      @datagram_callback = block
     end
 
     def start
@@ -262,6 +280,10 @@ module Quicsilver
         @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
         Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
         @request_registry.complete(stream_id)
+
+      when "DATAGRAM_RECEIVED"
+        return unless (connection = @connections[connection_handle])
+        @datagram_callback&.call(connection, data)
       end
     end
 

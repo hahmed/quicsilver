@@ -264,6 +264,36 @@ class RequestParserTest < Minitest::Test
     assert_nil parser.to_rack_env
   end
 
+  # === Extended CONNECT (RFC 9220) ===
+
+  def test_to_rack_env_extended_connect
+    headers_payload = build_qpack_headers(
+      ":method" => "CONNECT", ":scheme" => "https",
+      ":authority" => "localhost:4433", ":path" => "/websocket",
+      ":protocol" => "websocket"
+    )
+    parser = Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload))
+    parser.parse
+    env = parser.to_rack_env
+
+    assert_equal "CONNECT", env["REQUEST_METHOD"]
+    assert_equal "/websocket", env["PATH_INFO"]
+    assert_equal "websocket", env["rack.protocol"]
+  end
+
+  def test_to_rack_env_regular_connect
+    headers_payload = build_qpack_headers(
+      ":method" => "CONNECT", ":authority" => "proxy.example.com:443"
+    )
+    parser = Quicsilver::Protocol::RequestParser.new(build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload))
+    parser.parse
+    env = parser.to_rack_env
+
+    assert_equal "CONNECT", env["REQUEST_METHOD"]
+    assert_equal "proxy.example.com", env["SERVER_NAME"]
+    assert_nil env["rack.protocol"]
+  end
+
   # RFC 9114 §4.2: Connection-specific headers are forbidden in HTTP/3
   def test_rejects_connection_header
     headers_payload = build_qpack_headers(

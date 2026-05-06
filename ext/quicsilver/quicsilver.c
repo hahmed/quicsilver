@@ -462,6 +462,21 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
                 MsQuic->StreamClose(Stream);
             }
          break; 
+        case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
+            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "DATAGRAM_RECEIVED", 0,
+                (const char*)Event->DATAGRAM_RECEIVED.Buffer->Buffer,
+                Event->DATAGRAM_RECEIVED.Buffer->Length, 0);
+            break;
+        case QUIC_CONNECTION_EVENT_DATAGRAM_STATE_CHANGED:
+            break;
+        case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED:
+            // Free the send buffer when the datagram reaches a final state
+            if (QUIC_DATAGRAM_SEND_STATE_IS_FINAL(Event->DATAGRAM_SEND_STATE_CHANGED.State)) {
+                if (Event->DATAGRAM_SEND_STATE_CHANGED.ClientContext != NULL) {
+                    free(Event->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+                }
+            }
+            break;
         default:
             break;
     }
@@ -614,6 +629,8 @@ quicsilver_create_configuration(VALUE self, VALUE unsecure)
     QUIC_SETTINGS Settings = {0};
     Settings.IdleTimeoutMs = 10000; // 10 second idle timeout to match server
     Settings.IsSet.IdleTimeoutMs = TRUE;
+    Settings.DatagramReceiveEnabled = TRUE;
+    Settings.IsSet.DatagramReceiveEnabled = TRUE;
     
     // Simple ALPN for now - Ruby can customize this later
     QUIC_BUFFER Alpn = { sizeof("h3") - 1, (uint8_t*)"h3" };
@@ -713,6 +730,8 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     Settings.IsSet.StreamRecvBufferDefault = TRUE;
     Settings.ConnFlowControlWindow = connection_flow_control_window;
     Settings.IsSet.ConnFlowControlWindow = TRUE;
+    Settings.DatagramReceiveEnabled = TRUE;
+    Settings.IsSet.DatagramReceiveEnabled = TRUE;
 
     // Throughput settings
     Settings.PacingEnabled = pacing_enabled;
@@ -1298,6 +1317,49 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data, VALUE send_f
     return Qtrue;
 }
 
+// Send an unreliable datagram on a QUIC connection (RFC 9221).
+// Datagrams are not retransmitted — best effort delivery.
+// Data must fit in a single QUIC packet (typically ~1200 bytes).
+static VALUE
+quicsilver_datagram_send(VALUE self, VALUE connection_data, VALUE data)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qnil;
+    }
+
+    VALUE conn_handle_val = rb_ary_entry(connection_data, 0);
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(conn_handle_val);
+
+    const char* data_str = RSTRING_PTR(data);
+    uint32_t data_len = (uint32_t)RSTRING_LEN(data);
+
+    void* SendBufferRaw = malloc(sizeof(QUIC_BUFFER) + data_len);
+    if (SendBufferRaw == NULL) {
+        rb_raise(rb_eRuntimeError, "Datagram buffer allocation failed!");
+        return Qnil;
+    }
+
+    QUIC_BUFFER* SendBuffer = (QUIC_BUFFER*)SendBufferRaw;
+    SendBuffer->Buffer = (uint8_t*)SendBufferRaw + sizeof(QUIC_BUFFER);
+    SendBuffer->Length = data_len;
+    memcpy(SendBuffer->Buffer, data_str, data_len);
+
+    QUIC_STATUS Status = MsQuic->DatagramSend(Connection, SendBuffer, 1, QUIC_SEND_FLAG_NONE, SendBufferRaw);
+    if (QUIC_FAILED(Status)) {
+        free(SendBufferRaw);
+        if (Status == QUIC_STATUS_BUFFER_TOO_SMALL) {
+            rb_raise(rb_eArgError, "Datagram too large (%u bytes) - must fit in a single QUIC packet", data_len);
+        } else {
+            rb_raise(rb_eRuntimeError, "DatagramSend failed, 0x%x", Status);
+        }
+        return Qfalse;
+    }
+
+    wake_event_loop();
+    return Qtrue;
+}
+
 // Get the QUIC stream ID for an open stream.
 // Must be called after data has been sent (MsQuic defers ID assignment
 // with QUIC_STREAM_START_FLAG_NONE until data flows).
@@ -1424,6 +1486,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "stream_stop_sending", quicsilver_stream_stop_sending, 2);
     rb_define_singleton_method(mQuicsilver, "set_stream_priority", quicsilver_set_stream_priority, 2);
     rb_define_singleton_method(mQuicsilver, "get_stream_id", quicsilver_get_stream_id, 1);
+    rb_define_singleton_method(mQuicsilver, "datagram_send", quicsilver_datagram_send, 2);
 
     // Event processing (custom execution — app drives MsQuic)
     rb_define_singleton_method(mQuicsilver, "poll", quicsilver_poll, 0);

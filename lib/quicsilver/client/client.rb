@@ -10,7 +10,7 @@ module Quicsilver
     StreamFailedToOpenError = Class.new(StandardError)
     GoAwayError = Class.new(StandardError)
 
-    FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING].freeze
+    FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING DATAGRAM_RECEIVED].freeze
 
     DEFAULT_REQUEST_TIMEOUT = 30  # seconds
     DEFAULT_CONNECTION_TIMEOUT = 5000  # ms
@@ -40,6 +40,7 @@ module Quicsilver
       @settings_received = false
       @control_stream_id = nil
       @uni_stream_types = {}
+      @datagram_callback = nil
     end
 
     # --- Class-level API (automatic pooling) ---
@@ -106,6 +107,25 @@ module Quicsilver
 
     def draining?
       !@peer_goaway_id.nil?
+    end
+
+    # Send an unreliable datagram (RFC 9297 / QUIC RFC 9221).
+    # Data must fit in a single QUIC packet (~1200 bytes).
+    # Not retransmitted — best effort delivery.
+    #
+    #   client.datagram_send("real-time-update")
+    #
+    def datagram_send(data)
+      ensure_connected!
+      Quicsilver.datagram_send(@connection_data, data.to_s.b)
+    end
+
+    # Register a callback for received datagrams.
+    #
+    #   client.on_datagram { |data| puts "Got: #{data}" }
+    #
+    def on_datagram(&block)
+      @datagram_callback = block
     end
 
     def receive_control_data(stream_id, data) # :nodoc:
@@ -226,6 +246,9 @@ module Quicsilver
           state&.dig(:body)&.close(RuntimeError.new("Peer sent STOP_SENDING"))
           entry = @inflight.delete(event.handle)
           entry[:request]&.fail(event.error_code, "Peer sent STOP_SENDING") if entry
+
+        when "DATAGRAM_RECEIVED"
+          @datagram_callback&.call(data)
         end
       end
     rescue => e

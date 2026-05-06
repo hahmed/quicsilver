@@ -615,6 +615,51 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # === H3 Datagrams (RFC 9297 / QUIC RFC 9221) ===
+
+  def test_server_sends_datagram_to_client
+    received = nil
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    client.on_datagram { |data| received = data }
+
+    # Make a request to establish the connection
+    response = client.get("/")
+    assert_equal 200, response[:status]
+
+    # Server sends a datagram
+    connection = @server.connections.values.first
+    @server.datagram_send(connection, "hello-datagram")
+    sleep 0.1  # allow event loop to deliver
+
+    assert_equal "hello-datagram", received
+  ensure
+    client&.disconnect
+  end
+
+  def test_client_sends_datagram_to_server
+    received = nil
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+    @server.on_datagram { |_conn, data| received = data }
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+
+    # Make a request to establish the connection
+    response = client.get("/")
+    assert_equal 200, response[:status]
+
+    # Client sends a datagram
+    client.datagram_send("client-datagram")
+    sleep 0.1  # allow event loop to deliver
+
+    assert_equal "client-datagram", received
+  ensure
+    client&.disconnect
+  end
+
   # === Extensible Priorities (RFC 9218) ===
 
   def test_client_sends_priority_header
