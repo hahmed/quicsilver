@@ -353,11 +353,11 @@ module Quicsilver
       else
         (@response_buffers[stream_id] ||= "".b) << event_obj.data
         strip_informational_frames!(stream_id)
-        # TODO: fix true incremental streaming — try_start_streaming eagerly
-        # transitions ALL responses to streaming mode, breaking buffered responses
-        # for large payloads (body comes back empty). Needs redesign: only transition
-        # when caller has called streaming_response before data arrives.
-        # try_start_streaming(stream_id, event_obj.handle)
+        # Only transition to streaming when the caller opted in via streaming_response.
+        # Buffered callers (.response) are unaffected.
+        if entry && entry[:request].streaming_requested?
+          try_start_streaming(stream_id, event_obj.handle)
+        end
       end
     end
 
@@ -379,7 +379,7 @@ module Quicsilver
         body_str = state[:body].rewind ? state[:body].read : ""
         entry[:request].complete({
           status: state[:status], headers: state[:headers],
-          body: body_str, trailers: {}
+          body: body_str, trailers: state[:trailers] || {}
         })
       else
         # Buffered mode: parse everything at once
@@ -399,14 +399,17 @@ module Quicsilver
 
         entry = @inflight.delete(event.handle)
         if entry
-          # Also deliver as streaming response for streaming_response() callers
-          streaming_body = Protocol::StreamInput.new
-          streaming_body.write(body_str) unless body_str.empty?
-          streaming_body.close_write
-          entry[:request].deliver_streaming(StreamingResponse.new(
-            status: response_parser.status, headers: response_parser.headers,
-            body: streaming_body, trailers: response_parser.trailers || {}
-          ))
+          # Deliver as streaming response if caller opted in but data arrived
+          # before streaming mode could be activated (race condition fallback).
+          if entry[:request].streaming_requested?
+            streaming_body = Protocol::StreamInput.new
+            streaming_body.write(body_str) unless body_str.empty?
+            streaming_body.close_write
+            entry[:request].deliver_streaming(StreamingResponse.new(
+              status: response_parser.status, headers: response_parser.headers,
+              body: streaming_body, trailers: response_parser.trailers || {}
+            ))
+          end
           entry[:request].complete(response)
         end
       end
@@ -443,7 +446,7 @@ module Quicsilver
       @response_buffers.delete(stream_id)
 
       body = Protocol::StreamInput.new
-      state = { body: body, frame_buffer: remaining, status: status, headers: headers }
+      state = { body: body, frame_buffer: remaining, status: status, headers: headers, trailers: {} }
       @streaming[stream_id] = state
 
       # Drain any DATA frames that arrived with the HEADERS
@@ -464,6 +467,11 @@ module Quicsilver
       Protocol::FrameReader.each(buf) do |type, payload, offset|
         if type == Protocol::FRAME_DATA
           state[:body].write(payload)
+        elsif type == Protocol::FRAME_HEADERS && state[:status]
+          # Trailing HEADERS frame — decode as trailers
+          trailers = {}
+          PEEK_DECODER.decode(payload) { |name, value| trailers[name] = value }
+          state[:trailers] = trailers
         end
         consumed = offset
       end

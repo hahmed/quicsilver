@@ -25,6 +25,12 @@ module Quicsilver
         @mutex = Mutex.new
         @response = nil
         @streaming_response = nil
+        @streaming_requested = false
+      end
+
+      # Whether the caller has opted into streaming via streaming_response.
+      def streaming_requested?
+        @streaming_requested
       end
 
       # Block until streaming response headers arrive.
@@ -40,6 +46,7 @@ module Quicsilver
       #
       def streaming_response(timeout: nil)
         timeout ||= @client.request_timeout
+        @streaming_requested = true
         return @streaming_response if @streaming_response
 
         result = @streaming_queue.pop(timeout: timeout)

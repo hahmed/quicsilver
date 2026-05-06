@@ -531,6 +531,66 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  def test_streaming_response_delivers_chunks_incrementally
+    app = ->(env) {
+      body = Enumerator.new do |y|
+        3.times do |i|
+          y << "chunk#{i}"
+          sleep 0.05
+        end
+      end
+      [200, {"content-type" => "text/plain"}, body]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    req = client.build_request("GET", "/stream")
+    streaming = req.streaming_response(timeout: 5)
+
+    assert_equal 200, streaming.status
+
+    # Read first chunk — should arrive before all chunks are sent
+    first_chunk = streaming.body.read
+    assert first_chunk, "Expected at least one chunk"
+    assert first_chunk.bytesize > 0
+
+    # Read remaining chunks
+    chunks = [first_chunk]
+    while (chunk = streaming.body.read)
+      chunks << chunk
+    end
+
+    assert_equal "chunk0chunk1chunk2", chunks.join
+  ensure
+    client&.disconnect
+  end
+
+  def test_streaming_response_receives_trailers
+    app = ->(env) {
+      env["rack.trailers"] = { "grpc-status" => "0", "grpc-message" => "OK" }
+      [200, {"content-type" => "application/grpc"}, ["response-data"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    req = client.build_request("GET", "/grpc")
+    streaming = req.streaming_response(timeout: 5)
+
+    assert_equal 200, streaming.status
+    body = "".b
+    while (chunk = streaming.body.read)
+      body << chunk
+    end
+    assert_equal "response-data", body
+
+    # Trailers should be available after body is fully read
+    resp = req.response(timeout: 5)
+    assert_equal "0", resp[:trailers]["grpc-status"]
+    assert_equal "OK", resp[:trailers]["grpc-message"]
+  ensure
+    client&.disconnect
+  end
+
   def test_streaming_and_buffered_both_work_for_same_request
     app = ->(env) { [200, {"content-type" => "text/plain"}, ["Hello"]] }
     start_server(app)
