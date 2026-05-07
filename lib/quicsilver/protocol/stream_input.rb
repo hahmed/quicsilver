@@ -21,7 +21,7 @@ module Quicsilver
     # - Read timeout for slow client protection
     #
     class StreamInput < ::Protocol::HTTP::Body::Writable
-      class ReadTimeout < StandardError; end
+      class ReadTimeout < Quicsilver::Error; end
 
       # @param length [Integer, nil] The content-length if known from headers.
       # @param queue_size [Integer, nil] Maximum buffered chunks for back-pressure.

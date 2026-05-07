@@ -7,9 +7,6 @@ module Quicsilver
     attr_reader :hostname, :port, :unsecure, :connection_timeout, :request_timeout
     attr_reader :peer_goaway_id, :peer_settings, :peer_max_field_section_size
 
-    StreamFailedToOpenError = Class.new(StandardError)
-    GoAwayError = Class.new(StandardError)
-
     FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING DATAGRAM_RECEIVED].freeze
 
     DEFAULT_REQUEST_TIMEOUT = 30  # seconds

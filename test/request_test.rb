@@ -125,7 +125,7 @@ class RequestTest < Minitest::Test
 
   # Error classes
   def test_cancelled_error_exists
-    assert_equal Quicsilver::Client::Request::CancelledError.superclass, StandardError
+    assert_equal Quicsilver::CancelledError.superclass, Quicsilver::Error
   end
 
   def test_reset_error_has_error_code

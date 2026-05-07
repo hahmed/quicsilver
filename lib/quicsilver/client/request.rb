@@ -5,9 +5,7 @@ module Quicsilver
     class Request
       attr_reader :stream, :status
 
-      CancelledError = Class.new(StandardError)
-
-      class ResetError < StandardError
+      class ResetError < Quicsilver::Error
         attr_reader :error_code
 
         def initialize(message, error_code = nil)

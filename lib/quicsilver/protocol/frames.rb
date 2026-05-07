@@ -49,7 +49,7 @@ module Quicsilver
     # Protocol errors that carry an HTTP/3 error code for CONNECTION_CLOSE / RESET_STREAM.
     # FrameError → connection error (CONNECTION_CLOSE)
     # MessageError → stream error (RESET_STREAM) on request streams
-    class FrameError < StandardError
+    class FrameError < Quicsilver::Error
       attr_reader :error_code
       def initialize(msg = nil, error_code: H3_FRAME_UNEXPECTED)
         @error_code = error_code
@@ -57,7 +57,7 @@ module Quicsilver
       end
     end
 
-    class MessageError < StandardError
+    class MessageError < Quicsilver::Error
       attr_reader :error_code
       def initialize(msg = nil, error_code: H3_MESSAGE_ERROR)
         @error_code = error_code

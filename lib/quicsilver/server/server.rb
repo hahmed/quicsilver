@@ -15,8 +15,8 @@ module Quicsilver
     STREAM_EVENT_STREAM_RESET = "STREAM_RESET"
     STREAM_EVENT_STOP_SENDING = "STOP_SENDING"
 
-    ServerStopError = Class.new(StandardError)
-    DrainTimeoutError = Class.new(StandardError)
+    ServerStopError = Class.new(Quicsilver::Error)
+    DrainTimeoutError = Class.new(Quicsilver::Error)
 
     # Tracks an in-flight streaming request between RECEIVE and RECEIVE_FIN.
     # The stream handle arrives at RECEIVE_FIN; the worker thread waits for it.

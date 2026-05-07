@@ -73,7 +73,7 @@ class ClientControlStreamTest < Minitest::Test
     @client.instance_variable_set(:@connection_data, [1, 2])
     send_server_control_stream(goaway_id: 0)
 
-    assert_raises(Quicsilver::Client::GoAwayError) do
+    assert_raises(Quicsilver::GoAwayError) do
       @client.build_request("GET", "/test")
     end
   end

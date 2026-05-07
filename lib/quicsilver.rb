@@ -2,6 +2,7 @@
 
 require "logger"
 require_relative "quicsilver/version"
+require_relative "quicsilver/errors"
 require_relative "quicsilver/response"
 
 # Protocol layer
@@ -52,14 +53,6 @@ end
 require_relative "rackup/handler/quicsilver"
 
 module Quicsilver
-  class Error < StandardError; end
-  class ServerIsRunningError < Error; end
-  class ServerConfigurationError < Error; end
-  class ServerListenerError < Error; end
-  class ServerError < Error; end
-  class ConnectionError < Error; end
-  class TimeoutError < Error; end
-
   class << self
     attr_writer :logger
 
