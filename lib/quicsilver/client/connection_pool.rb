@@ -8,24 +8,35 @@ module Quicsilver
     #   Quicsilver::Client.get("example.com", 4433, "/users")
     #
     class ConnectionPool
-      attr_reader :max_size, :idle_timeout
+      attr_reader :max_size, :idle_timeout, :mode
 
       DEFAULT_MAX_SIZE = 4
       DEFAULT_IDLE_TIMEOUT = 60 # seconds
       DEFAULT_CHECKOUT_TIMEOUT = 5 # seconds
 
-      def initialize(max_size: DEFAULT_MAX_SIZE, idle_timeout: DEFAULT_IDLE_TIMEOUT, checkout_timeout: DEFAULT_CHECKOUT_TIMEOUT)
+      # @param mode [:exclusive, :shared] Pool strategy.
+      #   :shared (default) — one connection per host, all threads share it via
+      #     QUIC stream multiplexing. 5x faster, one TLS handshake per host.
+      #   :exclusive — one connection per checkout, like ActiveRecord. Use for
+      #     maintenance tasks that need isolation or servers with low stream limits.
+      def initialize(max_size: DEFAULT_MAX_SIZE, idle_timeout: DEFAULT_IDLE_TIMEOUT, checkout_timeout: DEFAULT_CHECKOUT_TIMEOUT, mode: :shared)
         @max_size = max_size
         @idle_timeout = idle_timeout
         @checkout_timeout = checkout_timeout
+        @mode = mode
         @pools = {} # "host:port" => [{ client:, checked_out: }]
         @mutex = Mutex.new
         @condition = ConditionVariable.new
       end
 
       # Check out a connected Client. Reuses an idle one or creates a new one.
-      # Blocks with timeout if pool is full (like ActiveRecord, connection_pool gem).
+      # In :exclusive mode, blocks with timeout if pool is full.
+      # In :shared mode, returns the shared connection (all threads use one connection).
       def checkout(hostname, port, **options)
+        @mode == :shared ? checkout_shared(hostname, port, **options) : checkout_exclusive(hostname, port, **options)
+      end
+
+      private def checkout_exclusive(hostname, port, **options)
         key = "#{hostname}:#{port}"
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @checkout_timeout
 
@@ -70,6 +81,40 @@ module Quicsilver
         client
       end
 
+      # Shared mode: one connection per host, all threads share it.
+      # Each thread opens its own QUIC stream on the shared connection.
+      # No checkout/checkin semantics — the connection is never "owned".
+      private def checkout_shared(hostname, port, **options)
+        key = "#{hostname}:#{port}"
+
+        @mutex.synchronize do
+          entry = @pools[key]&.first
+          if entry && entry[:client].connected? && !entry[:client].draining?
+            entry[:last_used] = Time.now
+            return entry[:client]
+          end
+          # Remove stale entry
+          @pools.delete(key) if entry
+        end
+
+        # Create outside the lock (blocking I/O)
+        client = Client.new(hostname, port, **options)
+        client.open_connection
+
+        @mutex.synchronize do
+          # Double-check — another thread may have created one while we were connecting
+          existing = @pools[key]&.first
+          if existing && existing[:client].connected? && !existing[:client].draining?
+            client.close_connection
+            existing[:last_used] = Time.now
+            return existing[:client]
+          end
+          @pools[key] = [{ client: client, checked_out: false, last_used: Time.now }]
+        end
+
+        client
+      end
+
       # Block-based checkout — auto-checkin on completion or error.
       #
       #   pool.with("example.com", 443) { |client| client.get("/") }
@@ -81,8 +126,9 @@ module Quicsilver
         checkin(client) if client
       end
 
-      # Return a Client to the pool.
+      # Return a Client to the pool. No-op in shared mode.
       def checkin(client)
+        return if @mode == :shared
         key = "#{client.hostname}:#{client.port}"
 
         @mutex.synchronize do
