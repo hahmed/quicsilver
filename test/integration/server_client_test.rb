@@ -660,6 +660,36 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # === Per-request timeout ===
+
+  def test_per_request_timeout_raises_on_slow_response
+    app = ->(env) {
+      sleep 2
+      [200, {"content-type" => "text/plain"}, ["OK"]]
+    }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    assert_raises(Quicsilver::TimeoutError) do
+      client.get("/slow", timeout: 0.3)
+    end
+  ensure
+    client&.disconnect
+  end
+
+  def test_per_request_timeout_does_not_affect_fast_response
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["fast"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    response = client.get("/", timeout: 5)
+
+    assert_equal 200, response[:status]
+    assert_equal "fast", response[:body]
+  ensure
+    client&.disconnect
+  end
+
   # === Extensible Priorities (RFC 9218) ===
 
   def test_client_sends_priority_header

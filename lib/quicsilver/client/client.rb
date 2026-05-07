@@ -67,9 +67,9 @@ module Quicsilver
         end
       end
 
-      def request(hostname, port, method, path, headers: {}, body: nil, priority: nil, **options, &block)
+      def request(hostname, port, method, path, headers: {}, body: nil, priority: nil, timeout: nil, **options, &block)
         client = pool.checkout(hostname, port, **options)
-        client.public_send(method, path, headers: headers, body: body, priority: priority, &block)
+        client.public_send(method, path, headers: headers, body: body, priority: priority, timeout: timeout, &block)
       ensure
         pool.checkin(client) if client
       end
@@ -99,9 +99,9 @@ module Quicsilver
     #   client.post("/data", body: json)
     #
     %i[get post patch delete head put].each do |method|
-      define_method(method) do |path, headers: {}, body: nil, priority: nil, &block|
+      define_method(method) do |path, headers: {}, body: nil, priority: nil, timeout: nil, &block|
         req = build_request(method.to_s.upcase, path, headers: headers, body: body, priority: priority)
-        block ? block.call(req) : req.response
+        block ? block.call(req) : req.response(timeout: timeout)
       end
     end
 
