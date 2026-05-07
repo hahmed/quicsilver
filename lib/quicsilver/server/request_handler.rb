@@ -37,6 +37,7 @@ module Quicsilver
       ensure
         @request_registry.complete(stream.stream_id) if @request_registry.include?(stream.stream_id)
         @cancelled_mutex.synchronize { @cancelled_streams.delete(stream.stream_id) }
+        connection.remove_stream(stream.stream_id) if connection
       end
 
       private
@@ -128,6 +129,7 @@ module Quicsilver
         connection.send_response(stream, response.status, response_headers, body,
           head_request: request.head?, trailers: trailers)
         @request_registry.complete(stream.stream_id)
+        connection.remove_stream(stream.stream_id)
       end
 
       def cancelled_stream?(stream_id)

@@ -272,14 +272,16 @@ module Quicsilver
           pending = @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
           pending&.body&.close(RuntimeError.new("Stream #{stream_id} reset by peer"))
           @request_registry.complete(stream_id)
+          connection.remove_stream(stream_id)
         end
       when STREAM_EVENT_STOP_SENDING
-        return unless @connections[connection_handle]
+        return unless (connection = @connections[connection_handle])
         event = Transport::StreamEvent.new(data, "STOP_SENDING")
         Quicsilver.logger.debug("Stream #{stream_id} stop sending requested with error code: 0x#{event.error_code.to_s(16)}")
         @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
         Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
         @request_registry.complete(stream_id)
+        connection.remove_stream(stream_id)
 
       when "DATAGRAM_RECEIVED"
         return unless (connection = @connections[connection_handle])
@@ -543,6 +545,7 @@ module Quicsilver
       @pending_mutex.synchronize { @pending_streams.delete(pending.stream_id) }
       @request_registry.complete(pending.stream_id) if @request_registry.include?(pending.stream_id)
       @cancelled_mutex.synchronize { @cancelled_streams.delete(pending.stream_id) }
+      pending.connection.remove_stream(pending.stream_id)
     end
 
     # Incrementally extract complete DATA frame payloads from the frame buffer.
