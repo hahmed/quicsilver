@@ -12,39 +12,50 @@ module Quicsilver
 
       DEFAULT_MAX_SIZE = 4
       DEFAULT_IDLE_TIMEOUT = 60 # seconds
+      DEFAULT_CHECKOUT_TIMEOUT = 5 # seconds
 
-      def initialize(max_size: DEFAULT_MAX_SIZE, idle_timeout: DEFAULT_IDLE_TIMEOUT)
+      def initialize(max_size: DEFAULT_MAX_SIZE, idle_timeout: DEFAULT_IDLE_TIMEOUT, checkout_timeout: DEFAULT_CHECKOUT_TIMEOUT)
         @max_size = max_size
         @idle_timeout = idle_timeout
+        @checkout_timeout = checkout_timeout
         @pools = {} # "host:port" => [{ client:, checked_out: }]
         @mutex = Mutex.new
+        @condition = ConditionVariable.new
       end
 
       # Check out a connected Client. Reuses an idle one or creates a new one.
+      # Blocks with timeout if pool is full (like ActiveRecord, connection_pool gem).
       def checkout(hostname, port, **options)
         key = "#{hostname}:#{port}"
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @checkout_timeout
 
         @mutex.synchronize do
-          entries = @pools[key] ||= []
+          loop do
+            entries = @pools[key] ||= []
 
-          # Evict dead/stale/draining
-          entries.reject! do |e|
-            if !e[:checked_out] && (!e[:client].connected? || e[:client].draining? || e[:last_used] < Time.now - @idle_timeout)
-              e[:client].close_connection
-              true
+            # Evict dead/stale/draining
+            entries.reject! do |e|
+              if !e[:checked_out] && (!e[:client].connected? || e[:client].draining? || e[:last_used] < Time.now - @idle_timeout)
+                e[:client].close_connection
+                true
+              end
             end
-          end
 
-          # Reuse an idle client (skip draining ones)
-          idle = entries.find { |e| !e[:checked_out] && e[:client].connected? && !e[:client].draining? }
-          if idle
-            idle[:checked_out] = true
-            idle[:last_used] = Time.now
-            return idle[:client]
-          end
+            # Reuse an idle client (skip draining ones)
+            idle = entries.find { |e| !e[:checked_out] && e[:client].connected? && !e[:client].draining? }
+            if idle
+              idle[:checked_out] = true
+              idle[:last_used] = Time.now
+              return idle[:client]
+            end
 
-          if entries.size >= @max_size
-            raise ConnectionError, "Connection pool full for #{key} (max: #{@max_size})"
+            # Room to create a new connection
+            break if entries.size < @max_size
+
+            # Pool full — wait for a checkin
+            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            raise ConnectionError, "Connection pool full for #{key} (waited #{@checkout_timeout}s, max: #{@max_size})" if remaining <= 0
+            @condition.wait(@mutex, remaining)
           end
         end
 
@@ -57,6 +68,17 @@ module Quicsilver
         end
 
         client
+      end
+
+      # Block-based checkout — auto-checkin on completion or error.
+      #
+      #   pool.with("example.com", 443) { |client| client.get("/") }
+      #
+      def with(hostname, port, **options)
+        client = checkout(hostname, port, **options)
+        yield client
+      ensure
+        checkin(client) if client
       end
 
       # Return a Client to the pool.
@@ -78,6 +100,8 @@ module Quicsilver
             client.close_connection
             @pools.delete(key) if entries.empty?
           end
+
+          @condition.broadcast  # wake threads waiting for a connection
         end
       end
 
