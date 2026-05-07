@@ -238,7 +238,7 @@ module Quicsilver
         frame_type + frame_length + payload
       end
 
-      # Generate a random GREASE ID (RFC 9297): 31 * n + 33
+      # Generate a random GREASE ID (RFC 9114 §7.2.4.1): 0x1f * N + 0x21
       def grease_id
         31 * rand(0..20) + 33
       end
@@ -255,7 +255,7 @@ module Quicsilver
           SETTINGS_H3_DATAGRAM => 1,
         }
         settings_hash[SETTINGS_MAX_FIELD_SECTION_SIZE] = max_field_section_size if max_field_section_size
-        settings_hash[grease_id] = grease_id  # GREASE setting (RFC 9297)
+        settings_hash[grease_id] = grease_id  # GREASE setting (RFC 9114 §7.2.4.1)
 
         stream_type + build_settings_frame(settings_hash)
       end

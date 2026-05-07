@@ -52,7 +52,7 @@ module Quicsilver
           stream.send([type].pack("C"))
         end
 
-        # GREASE unidirectional stream (RFC 9297)
+        # GREASE unidirectional stream (RFC 9114 §6.2)
         stream = open_stream(unidirectional: true)
         stream.send(Protocol.encode_varint(Protocol.grease_id) + "GREASE".b)
       end

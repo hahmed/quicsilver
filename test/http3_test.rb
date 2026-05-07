@@ -163,7 +163,7 @@ class HTTP3Test < Minitest::Test
     assert_equal 1, settings[0x33], "SETTINGS_H3_DATAGRAM must be 1"
   end
 
-  # === GREASE (RFC 9297) ===
+  # === GREASE (RFC 9114) ===
 
   def test_control_stream_settings_contain_a_grease_id
     stream = Quicsilver::Protocol.build_control_stream
@@ -214,7 +214,7 @@ class HTTP3Test < Minitest::Test
 
   private
 
-  # RFC 9297: GREASE IDs follow the formula 31 * n + 33
+  # RFC 9114 §7.2.4.1: GREASE IDs follow the formula 0x1f * N + 0x21
   def grease_id?(id)
     id >= 33 && (id - 33) % 31 == 0
   end
