@@ -62,7 +62,7 @@ puts "-" * 60
   response = Quicsilver::Client.get(HOST, PORT, "/", unsecure: true)
   elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
   label = i == 0 ? "← handshake" : "← reused"
-  puts "  Request #{i}: #{response[:status]} — #{elapsed}ms #{label}"
+  puts "  Request #{i}: #{response.status} — #{elapsed}ms #{label}"
 end
 
 # === 2. Multiple Endpoints ===
@@ -71,8 +71,8 @@ puts "-" * 60
 
 ["/", "/api/users", "/stream", "/nonexistent"].each do |path|
   response = Quicsilver::Client.get(HOST, PORT, path, unsecure: true)
-  body_preview = response[:body][0..50].gsub("\n", "\\n")
-  puts "  GET #{path} → #{response[:status]} | #{body_preview}"
+  body_preview = response.body[0..50].gsub("\n", "\\n")
+  puts "  GET #{path} → #{response.status} | #{body_preview}"
 end
 
 # === 3. POST with Body ===
@@ -83,7 +83,7 @@ response = Quicsilver::Client.post(HOST, PORT, "/echo",
   body: "Hello from quicsilver client!",
   headers: { "content-type" => "text/plain" },
   unsecure: true)
-puts "  POST /echo → #{response[:status]} | #{response[:body]}"
+puts "  POST /echo → #{response.status} | #{response.body}"
 
 # === 4. Concurrent Requests ===
 puts "\n4️⃣  Concurrent Requests (multiplexing)"
@@ -95,7 +95,7 @@ t_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   response = client.get("/api/users")
   elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
-  puts "  Request #{i}: #{response[:status]} — #{elapsed}ms"
+  puts "  Request #{i}: #{response.status} — #{elapsed}ms"
 end
 total = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_start) * 1000).round(1)
 puts "  All 10 completed in #{total}ms (single connection)"
@@ -108,8 +108,8 @@ puts "-" * 60
 client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
 %i[get post put patch delete head].each do |method|
   response = client.public_send(method, "/api/users")
-  body_size = response[:body]&.bytesize || 0
-  puts "  #{method.to_s.upcase.ljust(6)} /api/users → #{response[:status]} (#{body_size} bytes)"
+  body_size = response.body&.bytesize || 0
+  puts "  #{method.to_s.upcase.ljust(6)} /api/users → #{response.status} (#{body_size} bytes)"
 end
 client.disconnect
 

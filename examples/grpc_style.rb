@@ -76,7 +76,7 @@ request_frame = grpc_encode({ "id" => 1 })
 response = client.post("/grpc.UserService/GetUser",
   body: request_frame,
   headers: { "content-type" => "application/grpc+json" })
-user = grpc_decode(response[:body])
+user = grpc_decode(response.body)
 puts "    → #{user}"
 
 # ListUsers
@@ -85,7 +85,7 @@ request_frame = grpc_encode({})
 response = client.post("/grpc.UserService/ListUsers",
   body: request_frame,
   headers: { "content-type" => "application/grpc+json" })
-users = grpc_decode(response[:body])
+users = grpc_decode(response.body)
 puts "    → #{users}"
 
 puts "\n  gRPC is just HTTP + framing. Quicsilver carries the bytes."

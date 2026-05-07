@@ -13,9 +13,9 @@ begin
 
   response = client.get("/")
 
-  puts "Status: #{response[:status]}"
-  puts "Headers: #{response[:headers].inspect}"
-  puts "Body: #{response[:body]}"
+  puts "Status: #{response.status}"
+  puts "Headers: #{response.headers.inspect}"
+  puts "Body: #{response.body}"
 
 rescue => e
   puts "❌ Error: #{e.class} - #{e.message}"

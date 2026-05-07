@@ -42,7 +42,7 @@ class StreamControlIntegrationTest < Minitest::Test
     start_server_and_client(app)
 
     response = @client.get("/test")
-    assert_equal 500, response[:status]
+    assert_equal 500, response.status
   end
 
   def test_block_based_cancel
@@ -88,7 +88,7 @@ class StreamControlIntegrationTest < Minitest::Test
     shutdown_thread = Thread.new { @server.shutdown(timeout: 2) }
 
     response = response_thread.value
-    assert_equal 200, response[:status]
+    assert_equal 200, response.status
 
     shutdown_thread.join(5)
     refute @server.running?, "Server should be stopped after shutdown"
@@ -110,8 +110,8 @@ class StreamControlIntegrationTest < Minitest::Test
     slow_req.cancel
 
     fast_response = fast_req.response(timeout: 3)
-    assert_equal 200, fast_response[:status]
-    assert_match(/fast/, fast_response[:body])
+    assert_equal 200, fast_response.status
+    assert_match(/fast/, fast_response.body)
 
     assert slow_req.cancelled?
   end
@@ -163,7 +163,7 @@ class StreamControlIntegrationTest < Minitest::Test
     # All 3 should eventually complete (3rd waits for a slot)
     responses = threads.map { |t| t.value }
     assert_equal 3, responses.size
-    responses.each { |r| assert_equal 200, r[:status] }
+    responses.each { |r| assert_equal 200, r.status }
   end
 
   def test_cancel_after_disconnect_does_not_crash
@@ -232,8 +232,8 @@ class StreamControlIntegrationTest < Minitest::Test
     start_server_and_client(app)
 
     response = @client.get("/unicode")
-    assert_equal 200, response[:status]
-    assert_equal unicode_body, response[:body].force_encoding("UTF-8")
+    assert_equal 200, response.status
+    assert_equal unicode_body, response.body.force_encoding("UTF-8")
   end
 
   # STOP_SENDING compliance: when client cancels, server skips sending the response

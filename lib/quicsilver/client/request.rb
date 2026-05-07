@@ -72,14 +72,13 @@ module Quicsilver
           case result
           when nil
             raise Quicsilver::TimeoutError, "Request timeout after #{timeout}s"
+          when Response
+            @status = :completed
+            @response = result
           when Hash
-            if result[:error]
-              @status = :error
-              raise ResetError.new(result[:message] || "Stream reset by peer", result[:error_code])
-            else
-              @status = :completed
-              @response = result
-            end
+            # Error hash from #fail
+            @status = :error
+            raise ResetError.new(result[:message] || "Stream reset by peer", result[:error_code])
           end
         end
 

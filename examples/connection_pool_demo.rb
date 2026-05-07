@@ -34,7 +34,7 @@ puts "-" * 50
   elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
 
   label = i == 0 ? "← new connection + QUIC handshake" : "← reused"
-  puts "  Request #{i}: #{response[:status]} — #{elapsed}ms #{label}"
+  puts "  Request #{i}: #{response.status} — #{elapsed}ms #{label}"
 end
 
 puts "\n  Pool: #{Quicsilver::Client.pool.size} connection(s) ready for reuse"

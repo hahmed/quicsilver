@@ -414,10 +414,10 @@ module Quicsilver
         entry = @inflight.delete(event.handle)
         return unless entry
         body_str = state[:body].rewind ? state[:body].read : ""
-        entry[:request].complete({
+        entry[:request].complete(Response.new(
           status: state[:status], headers: state[:headers],
           body: body_str, trailers: state[:trailers] || {}
-        })
+        ))
       else
         # Buffered mode: parse everything at once
         buffer = @response_buffers.delete(stream_id)
@@ -429,10 +429,10 @@ module Quicsilver
         response_parser.parse
 
         body_str = response_parser.body&.read || ""
-        response = {
+        response = Response.new(
           status: response_parser.status, headers: response_parser.headers,
           body: body_str, trailers: response_parser.trailers || {}
-        }
+        )
 
         entry = @inflight.delete(event.handle)
         if entry
@@ -442,7 +442,7 @@ module Quicsilver
             streaming_body = Protocol::StreamInput.new
             streaming_body.write(body_str) unless body_str.empty?
             streaming_body.close_write
-            entry[:request].deliver_streaming(StreamingResponse.new(
+            entry[:request].deliver_streaming(Response.new(
               status: response_parser.status, headers: response_parser.headers,
               body: streaming_body, trailers: response_parser.trailers || {}
             ))
@@ -491,7 +491,7 @@ module Quicsilver
 
       # Deliver StreamingResponse to streaming_response() callers
       entry = @inflight[handle]
-      entry[:request].deliver_streaming(StreamingResponse.new(
+      entry[:request].deliver_streaming(Response.new(
         status: status, headers: headers, body: body
       )) if entry
     end

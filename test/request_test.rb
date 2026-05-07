@@ -23,20 +23,20 @@ class RequestTest < Minitest::Test
   end
 
   def test_complete_delivers_response
-    response = { status: 200, headers: {}, body: "OK" }
+    response = Quicsilver::Response.new(status: 200, headers: {}, body: "OK")
 
     thread = Thread.new { @request.response(timeout: 1) }
     sleep 0.01
     @request.complete(response)
 
     result = thread.value
-    assert_equal 200, result[:status]
-    assert_equal "OK", result[:body]
+    assert_equal 200, result.status
+    assert_equal "OK", result.body
     assert @request.completed?
   end
 
   def test_response_returns_cached_response_on_subsequent_calls
-    response = { status: 200, headers: {}, body: "OK" }
+    response = Quicsilver::Response.new(status: 200, headers: {}, body: "OK")
     @request.complete(response)
 
     result1 = @request.response(timeout: 1)
@@ -74,7 +74,7 @@ class RequestTest < Minitest::Test
   end
 
   def test_cancel_returns_false_if_already_completed
-    @request.complete({ status: 200, headers: {}, body: "" })
+    @request.complete(Quicsilver::Response.new(status: 200, headers: {}, body: ""))
     @request.response(timeout: 1)
 
     result = @request.cancel

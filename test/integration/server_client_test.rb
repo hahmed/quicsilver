@@ -24,8 +24,8 @@ class ServerClientIntegrationTest < Minitest::Test
 
     response = client.get("/test-path")
 
-    assert_equal 200, response[:status]
-    assert_equal "Hello from GET /test-path", response[:body]
+    assert_equal 200, response.status
+    assert_equal "Hello from GET /test-path", response.body
   ensure
     client&.disconnect
   end
@@ -43,7 +43,7 @@ class ServerClientIntegrationTest < Minitest::Test
 
     response = client.post("/upload", body: "test body content")
 
-    assert_equal 200, response[:status]
+    assert_equal 200, response.status
     assert_equal "test body content", received_body
   ensure
     client&.disconnect
@@ -63,7 +63,7 @@ class ServerClientIntegrationTest < Minitest::Test
     responses = 3.times.map { client.get("/") }
 
     assert_equal 3, request_count
-    assert(responses.all? { |r| r[:status] == 200 })
+    assert(responses.all? { |r| r.status == 200 })
   ensure
     client&.disconnect
   end
@@ -102,8 +102,8 @@ class ServerClientIntegrationTest < Minitest::Test
 
     response = client.get("/")
 
-    assert_equal "response-value", response[:headers]["x-custom-response"]
-    assert_equal "application/json", response[:headers]["content-type"]
+    assert_equal "response-value", response.headers["x-custom-response"]
+    assert_equal "application/json", response.headers["content-type"]
   ensure
     client&.disconnect
   end
@@ -117,8 +117,8 @@ class ServerClientIntegrationTest < Minitest::Test
 
     response = client.put("/resource/123", body: '{"name":"updated"}')
 
-    assert_equal 200, response[:status]
-    assert_equal "Updated", response[:body]
+    assert_equal 200, response.status
+    assert_equal "Updated", response.body
   ensure
     client&.disconnect
   end
@@ -132,7 +132,7 @@ class ServerClientIntegrationTest < Minitest::Test
 
     response = client.get("/")
 
-    assert_equal 500, response[:status]
+    assert_equal 500, response.status
     assert @server.running?, "Server should still be running after app exception"
   ensure
     client&.disconnect
@@ -169,7 +169,7 @@ class ServerClientIntegrationTest < Minitest::Test
     large_body = "x" * 262_144
     response = client.post("/upload", body: large_body)
 
-    assert_equal 200, response[:status]
+    assert_equal 200, response.status
     assert_equal large_body.bytesize, received_body&.bytesize
     assert_equal large_body, received_body
   ensure
@@ -223,7 +223,7 @@ class ServerClientIntegrationTest < Minitest::Test
 
     response = client.get("/")
 
-    assert_equal 200, response[:status]
+    assert_equal 200, response.status
     assert client.connected?
   ensure
     client&.disconnect
@@ -275,9 +275,9 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/large")
 
-    assert_equal 200, response[:status]
-    assert_equal 50_000, response[:body].bytesize
-    assert_equal body, response[:body]
+    assert_equal 200, response.status
+    assert_equal 50_000, response.body.bytesize
+    assert_equal body, response.body
   ensure
     client&.disconnect
   end
@@ -294,8 +294,8 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 200, response[:status]
-    assert_equal "Hello", response[:body]
+    assert_equal 200, response.status
+    assert_equal "Hello", response.body
   ensure
     client&.disconnect
   end
@@ -307,8 +307,8 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 200, response[:status]
-    assert_equal "OK", response[:body]
+    assert_equal 200, response.status
+    assert_equal "OK", response.body
   ensure
     client&.disconnect
   end
@@ -328,9 +328,9 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 200, response[:status]
-    assert_equal "Hello", response[:body]
-    assert_equal "0", response[:trailers]["grpc-status"]
+    assert_equal 200, response.status
+    assert_equal "Hello", response.body
+    assert_equal "0", response.trailers["grpc-status"]
   ensure
     client&.disconnect
   end
@@ -345,10 +345,10 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 200, response[:status]
-    assert_equal "Hello", response[:body]
-    assert_equal "0", response[:trailers]["grpc-status"]
-    assert_equal "OK", response[:trailers]["grpc-message"]
+    assert_equal 200, response.status
+    assert_equal "Hello", response.body
+    assert_equal "0", response.trailers["grpc-status"]
+    assert_equal "OK", response.trailers["grpc-message"]
   ensure
     client&.disconnect
   end
@@ -363,9 +363,9 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 500, response[:status]
-    assert_equal "13", response[:trailers]["grpc-status"]
-    assert_equal "INTERNAL", response[:trailers]["grpc-message"]
+    assert_equal 500, response.status
+    assert_equal "13", response.trailers["grpc-status"]
+    assert_equal "INTERNAL", response.trailers["grpc-message"]
   ensure
     client&.disconnect
   end
@@ -380,8 +380,8 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 200, response[:status]
-    assert_equal({}, response[:trailers])
+    assert_equal 200, response.status
+    assert_equal({}, response.trailers)
   ensure
     client&.disconnect
   end
@@ -396,8 +396,8 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 200, response[:status]
-    assert_equal({}, response[:trailers])
+    assert_equal 200, response.status
+    assert_equal({}, response.trailers)
   ensure
     client&.disconnect
   end
@@ -417,11 +417,11 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 200, response[:status]
-    assert_equal "0", response[:trailers]["grpc-status"]
-    assert_equal "OK", response[:trailers]["grpc-message"]
-    assert_equal "abc-123", response[:trailers]["x-request-id"]
-    assert_equal "42ms", response[:trailers]["x-timing"]
+    assert_equal 200, response.status
+    assert_equal "0", response.trailers["grpc-status"]
+    assert_equal "OK", response.trailers["grpc-message"]
+    assert_equal "abc-123", response.trailers["x-request-id"]
+    assert_equal "42ms", response.trailers["x-timing"]
   ensure
     client&.disconnect
   end
@@ -433,7 +433,7 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal({}, response[:trailers])
+    assert_equal({}, response.trailers)
   ensure
     client&.disconnect
   end
@@ -457,7 +457,7 @@ class ServerClientIntegrationTest < Minitest::Test
     end
     resp = req.response(timeout: 5)
 
-    assert_equal 200, resp[:status]
+    assert_equal 200, resp.status
     assert_equal "chunk1chunk2chunk3", received_body
   ensure
     client&.disconnect
@@ -477,8 +477,8 @@ class ServerClientIntegrationTest < Minitest::Test
     end
     resp = req.response(timeout: 5)
 
-    assert_equal 200, resp[:status]
-    assert_includes resp[:body], "0 bytes"
+    assert_equal 200, resp.status
+    assert_includes resp.body, "0 bytes"
   ensure
     client&.disconnect
   end
@@ -499,11 +499,11 @@ class ServerClientIntegrationTest < Minitest::Test
     end
     resp = req.response(timeout: 5)
 
-    assert_equal 200, resp[:status]
-    assert_equal "done", resp[:body]
+    assert_equal 200, resp.status
+    assert_equal "done", resp.body
     assert_equal "request-data", received_body
-    assert_equal "0", resp[:trailers]["grpc-status"]
-    assert_equal "OK", resp[:trailers]["grpc-message"]
+    assert_equal "0", resp.trailers["grpc-status"]
+    assert_equal "OK", resp.trailers["grpc-message"]
   ensure
     client&.disconnect
   end
@@ -585,8 +585,8 @@ class ServerClientIntegrationTest < Minitest::Test
 
     # Trailers should be available after body is fully read
     resp = req.response(timeout: 5)
-    assert_equal "0", resp[:trailers]["grpc-status"]
-    assert_equal "OK", resp[:trailers]["grpc-message"]
+    assert_equal "0", resp.trailers["grpc-status"]
+    assert_equal "OK", resp.trailers["grpc-message"]
   ensure
     client&.disconnect
   end
@@ -599,8 +599,8 @@ class ServerClientIntegrationTest < Minitest::Test
 
     # Buffered
     resp = client.get("/")
-    assert_equal 200, resp[:status]
-    assert_equal "Hello", resp[:body]
+    assert_equal 200, resp.status
+    assert_equal "Hello", resp.body
 
     # Streaming
     req = client.build_request("GET", "/")
@@ -627,7 +627,7 @@ class ServerClientIntegrationTest < Minitest::Test
 
     # Make a request to establish the connection
     response = client.get("/")
-    assert_equal 200, response[:status]
+    assert_equal 200, response.status
 
     # Server sends a datagram
     connection = @server.connections.values.first
@@ -649,7 +649,7 @@ class ServerClientIntegrationTest < Minitest::Test
 
     # Make a request to establish the connection
     response = client.get("/")
-    assert_equal 200, response[:status]
+    assert_equal 200, response.status
 
     # Client sends a datagram
     client.datagram_send("client-datagram")
@@ -684,8 +684,8 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/", timeout: 5)
 
-    assert_equal 200, response[:status]
-    assert_equal "fast", response[:body]
+    assert_equal 200, response.status
+    assert_equal "fast", response.body
   ensure
     client&.disconnect
   end
@@ -704,7 +704,7 @@ class ServerClientIntegrationTest < Minitest::Test
     priority = Quicsilver::Protocol::Priority.new(urgency: 0, incremental: true)
     response = client.get("/", priority: priority)
 
-    assert_equal 200, response[:status]
+    assert_equal 200, response.status
     assert_equal "u=0, i", received_priority
   ensure
     client&.disconnect
@@ -721,7 +721,7 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     response = client.get("/")
 
-    assert_equal 200, response[:status]
+    assert_equal 200, response.status
     assert_nil received_priority
   ensure
     client&.disconnect
@@ -758,7 +758,7 @@ class ServerClientIntegrationTest < Minitest::Test
     client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
     10.times do |i|
       resp = client.get("/count/#{i}")
-      assert_equal 200, resp[:status], "Request #{i} should succeed"
+      assert_equal 200, resp.status, "Request #{i} should succeed"
     end
   ensure
     client&.disconnect

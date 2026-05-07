@@ -47,21 +47,21 @@ client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
 
 puts "\n  Streaming with checksum trailer:"
 response = client.get("/stream-with-checksum")
-puts "    Status:   #{response[:status]}"
-puts "    Body:     #{response[:body].inspect}"
-puts "    Trailers: #{response[:trailers]}"
+puts "    Status:   #{response.status}"
+puts "    Body:     #{response.body.inspect}"
+puts "    Trailers: #{response.trailers}"
 
 puts "\n  gRPC-style success:"
 response = client.get("/grpc-style")
-puts "    Status:   #{response[:status]}"
-puts "    Body:     #{response[:body]}"
-puts "    Trailers: #{response[:trailers]}"
+puts "    Status:   #{response.status}"
+puts "    Body:     #{response.body}"
+puts "    Trailers: #{response.trailers}"
 
 puts "\n  gRPC-style error:"
 response = client.get("/grpc-error")
-puts "    Status:   #{response[:status]}"
-puts "    Body:     #{response[:body]}"
-puts "    Trailers: #{response[:trailers]}"
+puts "    Status:   #{response.status}"
+puts "    Body:     #{response.body}"
+puts "    Trailers: #{response.trailers}"
 
 client.disconnect
 server.stop

@@ -45,11 +45,11 @@ client = Quicsilver::Client.new(HOST, PORT, unsecure: true)
 # Request with priority header (what a browser would send)
 puts "\n  CSS request (high priority):"
 response = client.get("/style.css", headers: { "priority" => "u=0, i" })
-puts "    Status: #{response[:status]}, Size: #{response[:body].bytesize} bytes"
+puts "    Status: #{response.status}, Size: #{response.body.bytesize} bytes"
 
 puts "\n  Image request (low priority):"
 response = client.get("/image.png", headers: { "priority" => "u=5" })
-puts "    Status: #{response[:status]}, Size: #{response[:body].bytesize} bytes"
+puts "    Status: #{response.status}, Size: #{response.body.bytesize} bytes"
 
 puts "\n  MsQuic schedules CSS data before image data"
 puts "  when both are in flight on the same connection."
