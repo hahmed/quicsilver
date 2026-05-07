@@ -6,6 +6,10 @@ require "socket"
 require "minitest/autorun"
 require "minitest/focus"
 
+# Silence server logs during tests. Override per test with:
+#   Quicsilver.logger = Logger.new($stderr)
+Quicsilver.logger = Logger.new(File::NULL)
+
 def cert_file_path
   Localhost::Authority.fetch.certificate_path
 end

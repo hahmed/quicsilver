@@ -97,7 +97,6 @@ class InformationalResponseTest < Minitest::Test
 
   def test_send_informational_sends_headers_without_fin
     sent_frames = []
-    mock_stream = Minitest::Mock.new
 
     # send_informational should call send_stream with fin=false
     Quicsilver.stub(:send_stream, ->(handle, data, fin) {

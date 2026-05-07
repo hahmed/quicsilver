@@ -58,7 +58,7 @@ class QuicsilverTest < Minitest::Test
 
     # Test client connection
     begin
-      response = client.get("/")
+      client.get("/")
       assert client.connected?, "Client should be connected after first request"
       
       # Test connection info when connected

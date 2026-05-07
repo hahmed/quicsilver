@@ -35,13 +35,13 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
   def test_bodyless_vs_body_methods
     %w[GET HEAD TRACE].each do |method|
       headers = { ":method" => method, ":scheme" => "https", ":path" => "/", ":authority" => "x.com" }
-      request, body = @adapter.build_request(headers)
+      _, body = @adapter.build_request(headers)
       assert_nil body, "#{method} should not have an input body"
     end
 
     %w[POST PUT PATCH DELETE OPTIONS].each do |method|
       headers = { ":method" => method, ":scheme" => "https", ":path" => "/", ":authority" => "x.com" }
-      request, body = @adapter.build_request(headers)
+      _, body = @adapter.build_request(headers)
       assert_instance_of Quicsilver::Protocol::StreamInput, body, "#{method} should have an input body"
     end
   end
@@ -169,7 +169,7 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
       ":protocol" => "websocket",
       ":scheme" => "https"
     }
-    request, body = @adapter.build_request(headers)
+    request, _ = @adapter.build_request(headers)
 
     assert_equal "CONNECT", request.method
     assert_equal "/cable", request.path

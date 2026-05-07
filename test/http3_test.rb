@@ -132,7 +132,7 @@ class HTTP3Test < Minitest::Test
     stream = Quicsilver::Protocol.build_control_stream
     bytes = stream.bytes
 
-    frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+    _, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
     frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
     settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
 
@@ -145,7 +145,7 @@ class HTTP3Test < Minitest::Test
     stream = Quicsilver::Protocol.build_control_stream
     bytes = stream.bytes
 
-    frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+    _, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
     frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
     settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
 
@@ -156,7 +156,7 @@ class HTTP3Test < Minitest::Test
     stream = Quicsilver::Protocol.build_control_stream
     bytes = stream.bytes
 
-    frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+    _, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
     frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
     settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
 
@@ -170,7 +170,7 @@ class HTTP3Test < Minitest::Test
     bytes = stream.bytes
 
     # Parse past stream type (0x00) to SETTINGS frame
-    frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+    _, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
     frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
     settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
 
@@ -182,7 +182,7 @@ class HTTP3Test < Minitest::Test
     ids = 10.times.map do
       stream = Quicsilver::Protocol.build_control_stream
       bytes = stream.bytes
-      frame_type, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+      _, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
       frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
       settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
       settings.keys.find { |id| grease_id?(id) }

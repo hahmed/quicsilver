@@ -55,6 +55,7 @@ class RequestTest < Minitest::Test
     thread = Thread.new do
       @request.response(timeout: 1)
     end
+    thread.report_on_exception = false
     sleep 0.01
     @request.fail(0x10c, "Stream reset")
 
