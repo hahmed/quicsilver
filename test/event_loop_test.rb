@@ -40,7 +40,7 @@ class EventLoopTest < Minitest::Test
 
     begin
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      response = client.get("/") { |_req| }
+      client.get("/") { |_req| }
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
 
       # With wake, round-trip should be fast (no 100ms stalls per hop).
