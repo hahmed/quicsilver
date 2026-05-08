@@ -2,6 +2,7 @@
 #include <ruby/thread.h>
 #define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 #include "msquic.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -190,11 +191,13 @@ eventq_wait_nogvl(void* arg)
     struct poll_args* a = (struct poll_args*)arg;
 #if __linux__
     a->count = epoll_wait(a->eq, a->events, a->max_events, a->timeout_ms);
+    if (a->count < 0 && errno == EINTR) a->count = 0;
 #elif __APPLE__ || __FreeBSD__
     struct timespec ts;
     ts.tv_sec = a->timeout_ms / 1000;
     ts.tv_nsec = (a->timeout_ms % 1000) * 1000000;
     a->count = kevent(a->eq, NULL, 0, a->events, a->max_events, &ts);
+    if (a->count < 0 && errno == EINTR) a->count = 0;
 #endif
     return NULL;
 }
@@ -384,8 +387,8 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
             ctx->shutdown = 1;
-            free(ctx);
             MsQuic->SetCallbackHandler(Stream, (void*)StreamCallback, NULL);
+            free(ctx);
             if (Event->SHUTDOWN_COMPLETE.AppCloseInProgress == FALSE) {
                 MsQuic->StreamClose(Stream);
             }
