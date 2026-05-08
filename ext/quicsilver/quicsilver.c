@@ -156,8 +156,22 @@ dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
     int state = 0;
     rb_protect(dispatch_ruby_body, (VALUE)&args, &state);
     if (state) {
+        VALUE err = rb_errinfo();
+        if (!NIL_P(err)) {
+            VALUE klass = rb_class_name(rb_obj_class(err));
+            VALUE msg = rb_funcall(err, rb_intern("message"), 0);
+            VALUE bt = rb_funcall(err, rb_intern("backtrace"), 0);
+            fprintf(stderr, "Quicsilver: exception in callback: %s: %s\n",
+                StringValueCStr(klass), StringValueCStr(msg));
+            if (RB_TYPE_P(bt, T_ARRAY) && RARRAY_LEN(bt) > 0) {
+                long bt_len = RARRAY_LEN(bt) < 5 ? RARRAY_LEN(bt) : 5;
+                for (long i = 0; i < bt_len; i++) {
+                    VALUE line = rb_ary_entry(bt, i);
+                    fprintf(stderr, "  %s\n", StringValueCStr(line));
+                }
+            }
+        }
         rb_set_errinfo(Qnil);
-        fprintf(stderr, "Quicsilver: exception in callback\n");
     }
 }
 
@@ -1302,7 +1316,7 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data, VALUE send_f
     }
 
     HQUIC Stream = (HQUIC)(uintptr_t)NUM2ULL(stream_handle);
-    // Use StringValuePtr and RSTRING_LEN for binary data with null bytes
+    StringValue(data);
     const char* data_str = RSTRING_PTR(data);
     uint32_t data_len = (uint32_t)RSTRING_LEN(data);
     
@@ -1348,6 +1362,7 @@ quicsilver_datagram_send(VALUE self, VALUE connection_data, VALUE data)
     VALUE conn_handle_val = rb_ary_entry(connection_data, 0);
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(conn_handle_val);
 
+    StringValue(data);
     const char* data_str = RSTRING_PTR(data);
     uint32_t data_len = (uint32_t)RSTRING_LEN(data);
 
