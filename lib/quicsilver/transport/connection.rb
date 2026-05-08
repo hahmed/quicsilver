@@ -355,11 +355,14 @@ module Quicsilver
         if (byte & 0xE0) == 0x20
           capacity, _ = Protocol.decode_varint(data.bytes, 0)
           capacity &= 0x1F  # mask off the instruction prefix
-          # We advertised capacity 0, any non-zero is an error
-          raise Protocol::FrameError.new(
-            "Dynamic table capacity exceeds advertised maximum",
-            error_code: Protocol::QPACK_ENCODER_STREAM_ERROR
-          )
+          # We advertised capacity 0 — setting to 0 is valid (RFC 9204 §3.2.2),
+          # only non-zero exceeds our advertised maximum.
+          if capacity > 0
+            raise Protocol::FrameError.new(
+              "Dynamic table capacity exceeds advertised maximum",
+              error_code: Protocol::QPACK_ENCODER_STREAM_ERROR
+            )
+          end
         end
       end
 

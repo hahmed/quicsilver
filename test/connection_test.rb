@@ -285,9 +285,17 @@ class ConnectionTest < Minitest::Test
 
   # === QPACK stream validation ===
 
-  def test_validate_qpack_encoder_rejects_dynamic_table_capacity
-    # 001xxxxx = Set Dynamic Table Capacity instruction
-    data = "\x20".b  # 0x20 = 001_00000, capacity 0 (but any instruction is invalid for us)
+  def test_validate_qpack_encoder_allows_zero_capacity
+    # 001xxxxx = Set Dynamic Table Capacity, value 0
+    # RFC 9204 §3.2.2: capacity must not exceed advertised max (0), so 0 is valid
+    data = "\x20".b  # 0x20 = 001_00000, capacity 0
+    @connection.send(:validate_qpack_encoder_data, data)  # should not raise
+  end
+
+  def test_validate_qpack_encoder_rejects_nonzero_capacity
+    # 001xxxxx = Set Dynamic Table Capacity, value 1
+    # We advertised capacity 0, so any non-zero value is an error
+    data = "\x21".b  # 0x21 = 001_00001, capacity 1
 
     error = assert_raises(Quicsilver::Protocol::FrameError) do
       @connection.send(:validate_qpack_encoder_data, data)
