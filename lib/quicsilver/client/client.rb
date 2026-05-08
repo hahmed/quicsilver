@@ -290,6 +290,16 @@ module Quicsilver
     def open_stream
       handle = Quicsilver.open_stream(@connection_data, false)
       Transport::Stream.new(handle)
+    rescue RuntimeError => e
+      status = TransportError.parse_status(e.message)
+      case e.message
+      when /\AStreamOpen failed/, /\AStreamStart failed/
+        raise StreamFailedToOpenError.new(e.message, status: status)
+      when /\AFailed to allocate/
+        raise TransportError.new(e.message, status: status)
+      else
+        raise
+      end
     end
 
     def open_unidirectional_stream
