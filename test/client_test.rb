@@ -83,48 +83,49 @@ class ClientTest < Minitest::Test
 end
 
 class ClientOpenStreamErrorTest < Minitest::Test
+  private
+
+  def stub_open_stream(fake, &test)
+    original = Quicsilver.method(:open_stream)
+    old_verbose, $VERBOSE = $VERBOSE, nil
+    Quicsilver.define_singleton_method(:open_stream, fake)
+    $VERBOSE = old_verbose
+    test.call
+  ensure
+    old_verbose, $VERBOSE = $VERBOSE, nil
+    Quicsilver.define_singleton_method(:open_stream, original)
+    $VERBOSE = old_verbose
+  end
+
+  public
+
   def test_open_stream_wraps_stream_open_failure
     client = Quicsilver::Client.new("localhost", 4433)
     client.instance_variable_set(:@connection_data, [1, 2])
 
-    original_open = Quicsilver.method(:open_stream)
-    Quicsilver.define_singleton_method(:open_stream) do |*_args|
-      raise RuntimeError, "StreamOpen failed, 0x1!"
+    stub_open_stream(->(*_) { raise RuntimeError, "StreamOpen failed, 0x1!" }) do
+      err = assert_raises(Quicsilver::StreamFailedToOpenError) { client.send(:open_stream) }
+      assert_match(/StreamOpen failed/, err.message)
+      assert_equal 1, err.status  # EPERM / QUIC_STATUS_INVALID_STATE
     end
-
-    err = assert_raises(Quicsilver::StreamFailedToOpenError) { client.send(:open_stream) }
-    assert_match(/StreamOpen failed/, err.message)
-    assert_equal 1, err.status  # EPERM / QUIC_STATUS_INVALID_STATE
-  ensure
-    Quicsilver.define_singleton_method(:open_stream, original_open)
   end
 
   def test_open_stream_wraps_allocation_failure
     client = Quicsilver::Client.new("localhost", 4433)
     client.instance_variable_set(:@connection_data, [1, 2])
 
-    original_open = Quicsilver.method(:open_stream)
-    Quicsilver.define_singleton_method(:open_stream) do |*_args|
-      raise RuntimeError, "Failed to allocate stream context"
+    stub_open_stream(->(*_) { raise RuntimeError, "Failed to allocate stream context" }) do
+      err = assert_raises(Quicsilver::TransportError) { client.send(:open_stream) }
+      assert_match(/Failed to allocate/, err.message)
     end
-
-    err = assert_raises(Quicsilver::TransportError) { client.send(:open_stream) }
-    assert_match(/Failed to allocate/, err.message)
-  ensure
-    Quicsilver.define_singleton_method(:open_stream, original_open)
   end
 
   def test_open_stream_passes_through_unknown_errors
     client = Quicsilver::Client.new("localhost", 4433)
     client.instance_variable_set(:@connection_data, [1, 2])
 
-    original_open = Quicsilver.method(:open_stream)
-    Quicsilver.define_singleton_method(:open_stream) do |*_args|
-      raise RuntimeError, "Something unexpected"
+    stub_open_stream(->(*_) { raise RuntimeError, "Something unexpected" }) do
+      assert_raises(RuntimeError) { client.send(:open_stream) }
     end
-
-    assert_raises(RuntimeError) { client.send(:open_stream) }
-  ensure
-    Quicsilver.define_singleton_method(:open_stream, original_open)
   end
 end

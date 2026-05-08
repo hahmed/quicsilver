@@ -48,7 +48,15 @@ module Quicsilver
       def initialize(cert_file = nil, key_file = nil, options = {})
         @idle_timeout_ms = options.fetch(:idle_timeout_ms, 10000)
         @server_resumption_level = options.fetch(:server_resumption_level, QUIC_SERVER_RESUME_AND_ZERORTT)
+        # Maximum concurrent bidirectional streams the peer can open.
+        # Matches quic-go and Chromium defaults. MsQuic ceiling: 65,535.
         @max_concurrent_requests = options.fetch(:max_concurrent_requests, 100)
+
+        # Maximum concurrent unidirectional streams the peer can open.
+        # HTTP/3 requires 3 (control, QPACK encoder, QPACK decoder).
+        # Default of 10 provides headroom for GREASE and server push.
+        # Bump to 100 for WebTransport (opens many uni streams for
+        # server-initiated data channels) or MASQUE proxy tunnels.
         @max_unidirectional_streams = options.fetch(:max_unidirectional_streams, 10)
         @alpn = options.fetch(:alpn, DEFAULT_ALPN)
 

@@ -14,6 +14,8 @@ module Quicsilver
     STREAM_EVENT_CONNECTION_CLOSED = "CONNECTION_CLOSED"
     STREAM_EVENT_STREAM_RESET = "STREAM_RESET"
     STREAM_EVENT_STOP_SENDING = "STOP_SENDING"
+    STREAM_EVENT_START_COMPLETE = "STREAM_START_COMPLETE"
+    STREAM_EVENT_PEER_ACCEPTED = "STREAM_PEER_ACCEPTED"
 
     ServerStopError = Class.new(Quicsilver::Error)
     DrainTimeoutError = Class.new(Quicsilver::Error)
@@ -282,6 +284,17 @@ module Quicsilver
         Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
         @request_registry.complete(stream_id)
         connection.remove_stream(stream_id)
+
+      when STREAM_EVENT_START_COMPLETE
+        # peer_accepted=true: stream is flowing. false: queued at peer's limit.
+        # Server-side: this fires for outbound streams (control, QPACK).
+        # Frequent false here means the client's stream limit is too low.
+        accepted = data.getbyte(8) == 1
+        Quicsilver.logger.debug("Stream #{stream_id} start complete (peer_accepted=#{accepted})")
+
+      when STREAM_EVENT_PEER_ACCEPTED
+        # Queued stream now accepted — client sent MAX_STREAMS.
+        Quicsilver.logger.debug("Stream #{stream_id} accepted by peer (MAX_STREAMS raised)")
 
       when "DATAGRAM_RECEIVED"
         return unless (connection = @connections[connection_handle])

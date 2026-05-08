@@ -7,7 +7,7 @@ module Quicsilver
     attr_reader :hostname, :port, :unsecure, :connection_timeout, :request_timeout
     attr_reader :peer_goaway_id, :peer_settings, :peer_max_field_section_size
 
-    FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING DATAGRAM_RECEIVED].freeze
+    FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING DATAGRAM_RECEIVED STREAM_START_COMPLETE STREAM_PEER_ACCEPTED].freeze
 
     DEFAULT_REQUEST_TIMEOUT = 30  # seconds
     DEFAULT_CONNECTION_TIMEOUT = 5000  # ms
@@ -226,26 +226,54 @@ module Quicsilver
         case event
         when "RECEIVE"
           handle_receive(stream_id, data)
-
         when "RECEIVE_FIN"
           handle_receive_fin(stream_id, data)
-
         when "STREAM_RESET"
           event = Transport::StreamEvent.new(data, "STREAM_RESET")
           state = @streaming.delete(stream_id)
           state&.dig(:body)&.close(RuntimeError.new("Stream reset by peer"))
           entry = @inflight.delete(event.handle)
           entry[:request]&.fail(event.error_code, "Stream reset by peer") if entry
-
         when "STOP_SENDING"
           event = Transport::StreamEvent.new(data, "STOP_SENDING")
           state = @streaming.delete(stream_id)
           state&.dig(:body)&.close(RuntimeError.new("Peer sent STOP_SENDING"))
           entry = @inflight.delete(event.handle)
           entry[:request]&.fail(event.error_code, "Peer sent STOP_SENDING") if entry
-
         when "DATAGRAM_RECEIVED"
           @datagram_callback&.call(data)
+        when "STREAM_START_COMPLETE"
+          # QUIC stream concurrency limit (MAX_STREAMS, RFC 9000 §4.6):
+          #
+          # The peer advertises how many streams can be open simultaneously
+          # on this connection via the initial_max_streams_bidi transport
+          # parameter. Controlled server-side by max_concurrent_requests
+          # (default 100, matches quic-go and Chromium).
+          #
+          # When the limit is hit, MsQuic queues new streams locally and
+          # sends a STREAMS_BLOCKED frame to the peer (RFC 9000 §19.14,
+          # SHOULD send, useful for debugging — not a flow control
+          # mechanism). The peer independently raises the limit by
+          # sending MAX_STREAMS as existing streams close.
+          #
+          # peer_accepted=true:  stream is flowing immediately.
+          # peer_accepted=false: stream queued, connection is saturated.
+          #
+          # When saturated, the shared pool could open a second connection
+          # to the same host. Each QUIC connection has independent stream
+          # capacity, congestion control, and TLS state — so a saturated
+          # connection doesn't block a fresh one. This scales to
+          # N connections × 100 streams = N×100 concurrent requests.
+          # The ceiling is the server's max_connections (default 100).
+          #
+          # Rotation can be useful for long-lived streams:
+          # SSE, WebTransport data channels, gRPC streaming RPCs.
+          accepted = data.getbyte(8) == 1
+          Quicsilver.logger.debug("Stream #{stream_id} start complete (peer_accepted=#{accepted})")
+        when "STREAM_PEER_ACCEPTED"
+          # Previously queued stream now accepted — peer sent MAX_STREAMS
+          # (existing streams closed, freeing stream concurrency capacity).
+          Quicsilver.logger.debug("Stream #{stream_id} accepted by peer (MAX_STREAMS raised)")
         end
       end
     rescue => e

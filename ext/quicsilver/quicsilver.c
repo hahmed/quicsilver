@@ -376,6 +376,21 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                 MsQuic->StreamClose(Stream);
             }
             break;
+        case QUIC_STREAM_EVENT_START_COMPLETE: {
+            // Pack [stream_handle(8)][peer_accepted(1)] for Ruby
+            uint8_t accepted = Event->START_COMPLETE.PeerAccepted ? 1 : 0;
+            char payload[sizeof(HQUIC) + 1];
+            memcpy(payload, &Stream, sizeof(HQUIC));
+            payload[sizeof(HQUIC)] = accepted;
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                "STREAM_START_COMPLETE", ctx->stream_id, payload, sizeof(payload), 0);
+            break;
+        }
+        case QUIC_STREAM_EVENT_PEER_ACCEPTED:
+            // Queued stream now accepted — peer raised MAX_STREAMS
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                "STREAM_PEER_ACCEPTED", ctx->stream_id, (const char*)&Stream, sizeof(HQUIC), 0);
+            break;
         case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED: {
@@ -1262,8 +1277,10 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
         return Qnil;
     }
     
-    // Start the stream
-    Status = MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE);
+    // Start the stream. INDICATE_PEER_ACCEPT gives us visibility into
+    // stream flow control — fires PEER_ACCEPTED event when the peer
+    // raises MAX_STREAMS if the stream was initially queued.
+    Status = MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_INDICATE_PEER_ACCEPT);
     if (QUIC_FAILED(Status)) {
         // StreamClose fires SHUTDOWN_COMPLETE synchronously which frees ctx
         MsQuic->StreamClose(Stream);
