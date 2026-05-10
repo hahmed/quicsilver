@@ -84,22 +84,45 @@ curl --http3-only -k https://localhost:4433/
 
 Any HTTP/3 client connects directly — no extra setup needed.
 
-Browsers are different — they discover HTTP/3 via the `Alt-Svc` header from an existing HTTP/1.1 or HTTP/2 server. Run quicsilver alongside your regular server:
+Browsers discover HTTP/3 via the `Alt-Svc` header from an existing HTTP/1.1
+or HTTP/2 server. Run quicsilver alongside your regular Rails/Rack server on
+the **same port** — TCP for HTTP/1.1+2, UDP for HTTP/3:
 
 ```bash
-# HTTP/1.1 on port 3000 (Puma)
-rails server
+# Your normal Rails server (HTTP/1.1 + HTTP/2 over TCP)
+bin/rails server -p 3000
 
-# HTTP/3 on port 4433 (Quicsilver)
-rackup -s quicsilver -p 4433
+# Quicsilver (HTTP/3 over UDP, same port)
+rackup -s quicsilver -p 3000
 ```
 
-Add the `Alt-Svc` header so browsers upgrade to HTTP/3:
+Add the `Alt-Svc` header so browsers discover HTTP/3. The port must match
+the port quicsilver is listening on:
 
 ```ruby
 # config/application.rb
-config.action_dispatch.default_headers["Alt-Svc"] = 'h3=":4433"; ma=86400'
+config.action_dispatch.default_headers["Alt-Svc"] = 'h3=":3000"; ma=86400'
 ```
+
+With a publicly-trusted certificate (e.g. Let's Encrypt), browsers upgrade
+to HTTP/3 automatically via Alt-Svc — no special configuration needed.
+
+### Local Development
+
+Both your TCP server and quicsilver need a TLS certificate trusted by
+your system. Both servers **must use the same certificate**. The
+[localhost](https://github.com/socketry/localhost) gem can generate
+local certificates — run `bake localhost:install` to add the CA to
+your system trust store.
+
+Chrome requires one additional flag for local development because it
+does not allow QUIC connections with locally-trusted certificates:
+
+```bash
+chrome --origin-to-force-quic-on=myapp.test:3000 https://myapp.test:3000
+```
+
+This is not needed in production with publicly-trusted certificates.
 
 ## Configuration
 
