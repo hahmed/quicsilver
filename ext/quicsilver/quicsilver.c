@@ -1217,14 +1217,18 @@ quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALU
     QUIC_ADDR Address;
     memset(&Address, 0, sizeof(Address));
 
-    // Parse address string to determine family
+    // Parse address string to determine family.
+    // IMPORTANT: We must set the exact family (INET or INET6), NOT UNSPEC.
+    // On macOS, MsQuic interprets UNSPEC as IPv6 with IPV6_V6ONLY=1,
+    // which creates an IPv6-only socket that silently drops IPv4 packets.
+    // This breaks HTTP/3 Alt-Svc upgrades when browsers connect via IPv4.
     const char* addr_str = StringValueCStr(address);
     if (strchr(addr_str, ':') != NULL) {
         // IPv6 address (contains ':')
         QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_INET6);
     } else {
-        // IPv4 address or unspecified - use UNSPEC for dual-stack
-        QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_UNSPEC);
+        // IPv4 address (e.g. "0.0.0.0", "127.0.0.1")
+        QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_INET);
     }
     QuicAddrSetPort(&Address, Port);
 
