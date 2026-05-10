@@ -3,10 +3,22 @@
 require "protocol/http/request"
 require "protocol/http/response"
 require "protocol/http/headers"
+require "protocol/http/peer"
 require_relative "stream_input"
 require_relative "stream_output"
 
 module Quicsilver
+  module Protocol
+    # HTTP/3 request with peer address from the QUIC connection.
+    class Request < ::Protocol::HTTP::Request
+      attr_reader :peer
+
+      def initialize(*args, peer: nil, **kwargs)
+        super(*args, **kwargs)
+        @peer = peer
+      end
+    end
+  end
   module Protocol
     # Converts between QUIC/HTTP/3 frames and protocol-http Request/Response
     # objects. This enables integration with Falcon and any other server
@@ -37,7 +49,10 @@ module Quicsilver
       # @return [Array(Protocol::HTTP::Request, Protocol::StreamInput)] request and body.
       #   Body is nil for bodyless methods (GET, HEAD, TRACE).
       #   Caller feeds RECEIVE data into body via write(), then close_write on FIN.
-      def build_request(headers)
+      # @param headers [Hash] Parsed headers from RequestParser (includes pseudo-headers).
+      # @param remote_address [String, nil] Peer IP from the QUIC connection (e.g. "127.0.0.1").
+      # @param remote_port [Integer] Peer port from the QUIC connection.
+      def build_request(headers, remote_address: nil, remote_port: 0)
         method = headers[":method"]
         scheme = headers[":scheme"] || "https"
         authority = headers[":authority"]
@@ -55,9 +70,13 @@ module Quicsilver
           Protocol::StreamInput.new(content_length)
         end
 
-        request = ::Protocol::HTTP::Request.new(
+        peer = if remote_address
+          ::Protocol::HTTP::Peer.new(Addrinfo.tcp(remote_address, remote_port))
+        end
+
+        request = Request.new(
           scheme, authority, method, path, VERSION,
-          protocol_headers, body, protocol
+          protocol_headers, body, protocol, peer: peer
         )
 
         [request, body]

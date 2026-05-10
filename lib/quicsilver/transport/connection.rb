@@ -15,6 +15,7 @@ module Quicsilver
       attr_reader :server_control_stream
       attr_reader :peer_goaway_id, :local_goaway_id
       attr_reader :stream_priorities
+      attr_reader :remote_address, :remote_port
 
       def initialize(handle, data, max_header_size: nil)
         @handle = handle
@@ -37,6 +38,8 @@ module Quicsilver
         @peer_goaway_id = nil
         @local_goaway_id = nil
         @stream_priorities = {}
+        @remote_address = @data[2]  # Peer IP from C, populated at QUIC handshake
+        @remote_port = @data[3]&.to_i || 0
       end
 
       # === Setup (called after connection established) ===

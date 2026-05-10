@@ -513,6 +513,26 @@ class ConnectionTest < Minitest::Test
     # no error — first GOAWAY has no previous to compare against
   end
 
+  # === Remote address (peer IP from QUIC handshake) ===
+
+  def test_remote_address_from_connection_data
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890, "127.0.0.1", 54321])
+    assert_equal "127.0.0.1", conn.remote_address
+    assert_equal 54321, conn.remote_port
+  end
+
+  def test_remote_address_ipv6
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890, "::1", 8080])
+    assert_equal "::1", conn.remote_address
+    assert_equal 8080, conn.remote_port
+  end
+
+  def test_remote_address_nil_when_not_provided
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
+    assert_nil conn.remote_address
+    assert_equal 0, conn.remote_port
+  end
+
   private
 
   def encode_varint(value)

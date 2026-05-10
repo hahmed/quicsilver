@@ -59,6 +59,8 @@ typedef struct {
     QUIC_STATUS error_status;
     uint64_t error_code;
     VALUE client_obj;  // Ruby client object (Qnil for server connections)
+    char remote_address[INET6_ADDRSTRLEN];  // Peer IP, populated on CONNECTED
+    uint16_t remote_port;                     // Peer port, populated on CONNECTED
 } ConnectionContext;
 
 // Listener state tracking
@@ -110,9 +112,12 @@ dispatch_ruby_body(VALUE arg)
     if (NIL_P(a->client_obj)) {
         VALUE server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
         if (rb_class_real(CLASS_OF(server_class)) == rb_cClass) {
-            VALUE connection_data = rb_ary_new2(2);
+            ConnectionContext* conn_ctx = (ConnectionContext*)a->connection_ctx;
+            VALUE connection_data = rb_ary_new2(4);
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection));
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection_ctx));
+            rb_ary_push(connection_data, conn_ctx && conn_ctx->remote_address[0] ? rb_str_new_cstr(conn_ctx->remote_address) : Qnil);
+            rb_ary_push(connection_data, conn_ctx ? UINT2NUM(conn_ctx->remote_port) : INT2FIX(0));
             VALUE argv[5] = {
                 connection_data,
                 ULL2NUM(a->stream_id),
@@ -449,7 +454,29 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
         case QUIC_CONNECTION_EVENT_CONNECTED:
             ctx->connected = 1;
             ctx->failed = 0;
-            // Notify Ruby about new connection - pass ctx pointer for building connection_data
+            // Grab the peer address upfront so Ruby gets it in connection_data.
+            // One GetParam call — no back-and-forth between C and Ruby.
+            {
+                QUIC_ADDR peer_addr;
+                uint32_t addr_size = sizeof(peer_addr);
+                if (QUIC_SUCCEEDED(MsQuic->GetParam(Connection, QUIC_PARAM_CONN_REMOTE_ADDRESS, &addr_size, &peer_addr))) {
+                    if (peer_addr.Ip.sa_family == QUIC_ADDRESS_FAMILY_INET) {
+                        struct sockaddr_in *v4 = (struct sockaddr_in *)&peer_addr;
+                        inet_ntop(AF_INET, &v4->sin_addr, ctx->remote_address, sizeof(ctx->remote_address));
+                        ctx->remote_port = ntohs(v4->sin_port);
+                    } else {
+                        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&peer_addr;
+                        ctx->remote_port = ntohs(v6->sin6_port);
+                        if (IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) {
+                            struct in_addr v4;
+                            memcpy(&v4, &v6->sin6_addr.s6_addr[12], 4);
+                            inet_ntop(AF_INET, &v4, ctx->remote_address, sizeof(ctx->remote_address));
+                        } else {
+                            inet_ntop(AF_INET6, &v6->sin6_addr, ctx->remote_address, sizeof(ctx->remote_address));
+                        }
+                    }
+                }
+            }
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
@@ -537,6 +564,8 @@ ListenerCallback(HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event)
                 conn_ctx->error_status = QUIC_STATUS_SUCCESS;
                 conn_ctx->error_code = 0;
                 conn_ctx->client_obj = Qnil;  // Server connections have no client object
+                conn_ctx->remote_address[0] = '\0';
+                conn_ctx->remote_port = 0;
 
                 // Set the connection callback
                 MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, (void*)ConnectionCallback, conn_ctx);
@@ -842,6 +871,8 @@ quicsilver_create_connection(VALUE self, VALUE client_obj)
     ctx->error_status = QUIC_STATUS_SUCCESS;
     ctx->error_code = 0;
     ctx->client_obj = client_obj;  // Store Ruby client object (Qnil for server)
+    ctx->remote_address[0] = '\0';
+    ctx->remote_port = 0;
 
     // Protect from GC if it's a Ruby object
     if (!NIL_P(client_obj)) {

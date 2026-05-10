@@ -272,4 +272,20 @@ class CurlHttp3IntegrationTest < Minitest::Test
     assert_equal "/api/users", received_path
     assert_equal "role=admin&active=true", received_query
   end
+
+  # --- REMOTE_ADDR ---
+
+  def test_rack_env_remote_addr_is_set
+    received_remote_addr = nil
+    app = ->(env) {
+      received_remote_addr = env["REMOTE_ADDR"]
+      [200, {}, [received_remote_addr.to_s]]
+    }
+    start_server(app)
+
+    result = curl(curl_url("/"))
+
+    assert result.success?, "curl failed: #{result.stderr}"
+    assert_match(/\A(127\.0\.0\.1|::1)\z/, received_remote_addr, "REMOTE_ADDR should be a loopback IP")
+  end
 end

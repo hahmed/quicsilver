@@ -55,6 +55,22 @@ module Quicsilver
     DEFAULT_QUEUE_MULTIPLIER = 4
     DEFAULT_MAX_CONNECTIONS = 100
 
+    # Default bind address is 0.0.0.0 (IPv4).
+    #
+    # ⚠️  IPv4 vs IPv6 matters for QUIC!
+    # MsQuic creates either an AF_INET or AF_INET6 socket based on the address.
+    # On macOS, MsQuic sets IPV6_V6ONLY=1 by default (no dual-stack), so:
+    #   - address: "::"      → IPv6 only (drops IPv4 UDP packets silently)
+    #   - address: "0.0.0.0" → IPv4 only (most /etc/hosts map to 127.0.0.1)
+    #
+    # For HTTP/3 Alt-Svc upgrades to work, the browser must be able to reach
+    # the QUIC server at the same IP family it used for the TCP connection.
+    # Since most local setups map hostnames to 127.0.0.1 in /etc/hosts,
+    # defaulting to 0.0.0.0 (IPv4) is the safest choice.
+    #
+    # If you need IPv6, either:
+    #   1. Add "::1 your-hostname" to /etc/hosts, OR
+    #   2. Run two server instances (one IPv4, one IPv6) like Caddy/ngtcp2
     def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil, max_connections: DEFAULT_MAX_CONNECTIONS, scheduler: nil)
       @port = port
       @address = address
@@ -459,7 +475,7 @@ module Quicsilver
         return
       end
 
-      request, body = @request_handler.adapter.build_request(headers)
+      request, body = @request_handler.adapter.build_request(headers, remote_address: connection.remote_address, remote_port: connection.remote_port)
       request.headers.add("quicsilver-early-data", early_data.to_s)
 
       # Feed body data from the first RECEIVE.

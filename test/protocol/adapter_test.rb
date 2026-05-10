@@ -246,4 +246,37 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
     # But it lost the trailer? semantic — a plain Hash can't distinguish
     refute flat.respond_to?(:trailer?), "Plain Hash has no trailer? method"
   end
+
+  # === Peer / REMOTE_ADDR ===
+
+  def test_build_request_sets_peer_from_remote_address
+    headers = {
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "example.com", ":path" => "/"
+    }
+    request, _ = @adapter.build_request(headers, remote_address: "192.168.1.42", remote_port: 54321)
+
+    assert_respond_to request, :peer
+    assert_equal "192.168.1.42", request.peer.ip_address
+  end
+
+  def test_build_request_peer_nil_without_remote_address
+    headers = {
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "example.com", ":path" => "/"
+    }
+    request, _ = @adapter.build_request(headers)
+
+    assert_nil request.peer
+  end
+
+  def test_build_request_sets_peer_with_ipv6
+    headers = {
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "example.com", ":path" => "/"
+    }
+    request, _ = @adapter.build_request(headers, remote_address: "::1", remote_port: 8080)
+
+    assert_equal "::1", request.peer.ip_address
+  end
 end
