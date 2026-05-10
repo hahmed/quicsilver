@@ -764,6 +764,20 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # Verify client connections don't race with server-side GetParam.
+  # The CONNECTED callback only fetches the peer address for server
+  # connections — client connections skip it to avoid delaying
+  # StreamOpen on slower machines (Linux CI).
+  def test_client_connects_without_stream_open_race
+    app = ->(_env) { [200, {}, ["ok"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("localhost", @port, unsecure: true)
+    response = client.get("/")
+    assert_equal 200, response.status
+    client.disconnect
+  end
+
   private
 
   def start_server(app, **options)

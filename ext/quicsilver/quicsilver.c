@@ -457,9 +457,12 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             ctx->connected = 1;
             ctx->failed = 0;
             ctx->session_resumed = Event->CONNECTED.SessionResumed;
-            // Grab the peer address upfront so Ruby gets it in connection_data.
-            // One GetParam call — no back-and-forth between C and Ruby.
-            {
+            // Grab the peer address for server connections only.
+            // Client connections don't need this — they already know the peer.
+            // Running GetParam here delays the CONNECTED callback, which on
+            // Linux can cause StreamOpen to fail with INVALID_STATE (0x7d)
+            // if the client opens streams immediately after connection.
+            if (NIL_P(ctx->client_obj)) {
                 QUIC_ADDR peer_addr;
                 uint32_t addr_size = sizeof(peer_addr);
                 if (QUIC_SUCCEEDED(MsQuic->GetParam(Connection, QUIC_PARAM_CONN_REMOTE_ADDRESS, &addr_size, &peer_addr))) {
