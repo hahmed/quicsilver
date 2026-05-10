@@ -91,6 +91,10 @@ module Quicsilver
       @pending_streams = {}  # stream_id => PendingStream (for streaming dispatch)
       @pending_mutex = Mutex.new
       @datagram_callback = nil
+      @connection_callback = nil
+      @connection_closed_callback = nil
+      @connection_migrated_callback = nil
+      @connection_error_callback = nil
 
       protocol_app = wrap_app(@app, @server_configuration.mode)
 
@@ -120,6 +124,48 @@ module Quicsilver
     #
     def on_datagram(&block)
       @datagram_callback = block
+    end
+
+    # Register a callback for new QUIC connections.
+    #
+    #   server.on_connection { |conn|
+    #     puts "New connection from #{conn.remote_address} (resumed: #{conn.session_resumed})"
+    #   }
+    #
+    def on_connection(&block)
+      @connection_callback = block
+    end
+
+    # Register a callback for closed connections.
+    #
+    #   server.on_connection_closed { |conn| StatsD.decrement("quic.connections") }
+    #
+    def on_connection_closed(&block)
+      @connection_closed_callback = block
+    end
+
+    # Register a callback for connection migration (client IP changed).
+    # This event only exists in QUIC — TCP connections die on IP change.
+    #
+    #   server.on_connection_migrated { |conn, old_address, new_address|
+    #     Rails.logger.info("Client migrated #{old_address} → #{new_address}")
+    #   }
+    #
+    def on_connection_migrated(&block)
+      @connection_migrated_callback = block
+    end
+
+    # Register a callback for connection errors (transport failure or peer shutdown).
+    #
+    #   server.on_connection_error { |conn, error_code, reason|
+    #     # reason: :transport — network/protocol failure
+    #     # reason: :peer     — client sent CONNECTION_CLOSE
+    #     # error_code: QUIC/HTTP/3 error code (e.g. H3_NO_ERROR = 0x100)
+    #     Envoy.drain(conn) if reason == :transport
+    #   }
+    #
+    def on_connection_error(&block)
+      @connection_error_callback = block
     end
 
     def start
@@ -263,9 +309,12 @@ module Quicsilver
           max_header_size: @server_configuration.max_header_size)
         @connections[connection_handle] = connection
         connection.setup_http3_streams
+        @connection_callback&.call(connection)
 
       when STREAM_EVENT_CONNECTION_CLOSED
-        @connections.delete(connection_handle)&.streams&.clear
+        connection = @connections.delete(connection_handle)
+        @connection_closed_callback&.call(connection) if connection
+        connection&.streams&.clear
         Quicsilver.close_server_connection(connection_handle)
 
       when STREAM_EVENT_SEND_COMPLETE
@@ -311,6 +360,21 @@ module Quicsilver
       when STREAM_EVENT_PEER_ACCEPTED
         # Queued stream now accepted — client sent MAX_STREAMS.
         Quicsilver.logger.debug("Stream #{stream_id} accepted by peer (MAX_STREAMS raised)")
+
+      when "CONNECTION_ERROR"
+        return unless (connection = @connections[connection_handle])
+        if @connection_error_callback && data.bytesize >= 13
+          error_code = data.unpack1("Q<")
+          reason = data.getbyte(12) == 0 ? :transport : :peer
+          @connection_error_callback.call(connection, error_code, reason)
+        end
+
+      when "CONNECTION_MIGRATED"
+        return unless (connection = @connections[connection_handle])
+        old_address = connection.remote_address
+        new_address = data.force_encoding(Encoding::UTF_8)
+        connection.instance_variable_set(:@remote_address, new_address)
+        @connection_migrated_callback&.call(connection, old_address, new_address)
 
       when "DATAGRAM_RECEIVED"
         return unless (connection = @connections[connection_handle])
