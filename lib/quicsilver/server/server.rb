@@ -2,6 +2,7 @@
 
 require_relative "scheduler"
 require_relative "schedulers/thread_scheduler"
+require_relative "web_transport_session"
 
 module Quicsilver
   class Server
@@ -95,6 +96,8 @@ module Quicsilver
       @connection_closed_callback = nil
       @connection_migrated_callback = nil
       @connection_error_callback = nil
+      @webtransport_callback = nil
+      @webtransport_sessions = {}  # stream_id => WebTransportSession
 
       protocol_app = wrap_app(@app, @server_configuration.mode)
 
@@ -166,6 +169,19 @@ module Quicsilver
     #
     def on_connection_error(&block)
       @connection_error_callback = block
+    end
+
+    # Register a callback for WebTransport sessions (RFC 9220 + RFC 9297).
+    # Sessions arrive via Extended CONNECT with :protocol "webtransport".
+    #
+    #   server.on_webtransport do |session|
+    #     session.accept!
+    #     session.on_message { |data| session.send("echo: #{data}") }
+    #     session.on_close { cleanup }
+    #   end
+    #
+    def on_webtransport(&block)
+      @webtransport_callback = block
     end
 
     def start
@@ -316,6 +332,13 @@ module Quicsilver
         @connection_callback&.call(connection)
       when STREAM_EVENT_CONNECTION_CLOSED
         connection = @connections.delete(connection_handle)
+        # Close any WebTransport sessions on this connection
+        @webtransport_sessions.each do |sid, session|
+          if session.connection == connection
+            session.notify_close
+            @webtransport_sessions.delete(sid)
+          end
+        end
         @connection_closed_callback&.call(connection) if connection
         connection&.streams&.clear
         Quicsilver.close_server_connection(connection_handle)
@@ -336,6 +359,9 @@ module Quicsilver
         if connection.critical_stream?(stream_id)
           Quicsilver.logger.error("Critical stream #{stream_id} reset by peer")
           Quicsilver.connection_shutdown(connection_handle, Protocol::H3_CLOSED_CRITICAL_STREAM, false) rescue nil
+        elsif (wt = @webtransport_sessions.delete(stream_id))
+          wt.notify_close
+          connection.remove_stream(stream_id)
         else
           @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
           pending = @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
@@ -375,7 +401,14 @@ module Quicsilver
         @connection_migrated_callback&.call(connection, old_address, new_address)
       when "DATAGRAM_RECEIVED"
         return unless (connection = @connections[connection_handle])
-        @datagram_callback&.call(connection, data)
+        # Route to WebTransport session if one exists on this connection,
+        # otherwise fall through to the generic datagram callback.
+        wt_session = @webtransport_sessions.values.find { |s| s.connection == connection && s.open? }
+        if wt_session
+          wt_session.receive_datagram(data)
+        else
+          @datagram_callback&.call(connection, data)
+        end
       end
     end
 
@@ -529,6 +562,13 @@ module Quicsilver
       return if headers.empty?
 
       method = headers[":method"]
+
+      # WebTransport: intercept before normal request dispatch.
+      # The CONNECT stream stays open (no FIN) — it becomes the session.
+      if method == "CONNECT" && headers[":protocol"] == "webtransport" && @webtransport_callback
+        accept_webtransport(connection, stream_id, data, headers)
+        return
+      end
 
       if @server_configuration.early_data_policy == :reject &&
          early_data && !RequestHandler::SAFE_METHODS.include?(method)
@@ -684,6 +724,27 @@ module Quicsilver
     # Heuristic: check if raw data starts with an HTTP/3 HEADERS frame (type 0x01).
     # QUIC typically delivers complete frames, but if this misidentifies data,
     # the parser will fail safely in dispatch_streaming's rescue handlers.
+    def accept_webtransport(connection, stream_id, data, headers)
+      # We need the stream handle — it arrives with RECEIVE_FIN normally,
+      # but WebTransport CONNECT streams don't FIN. The handle comes from
+      # the RECEIVE event data (first 8 bytes are the stream handle).
+      event = Transport::StreamEvent.new(data, "RECEIVE")
+      stream = Transport::InboundStream.new(stream_id)
+      stream.stream_handle = event.handle
+
+      session = WebTransportSession.new(
+        connection: connection,
+        stream: stream,
+        headers: headers
+      )
+      @webtransport_sessions[stream_id] = session
+      connection.track_client_stream(stream_id)
+
+      @webtransport_callback.call(session)
+    rescue => e
+      Quicsilver.logger.error("WebTransport error: #{e.class} - #{e.message}")
+    end
+
     def contains_headers_frame?(data)
       return false if data.nil? || data.bytesize < 2
       data.getbyte(0) == Protocol::FRAME_HEADERS

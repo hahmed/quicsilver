@@ -262,6 +262,16 @@ module Quicsilver
 
       # Build GOAWAY frame (RFC 9114 Section 7.2.6)
       # stream_id: The last client-initiated bidirectional stream ID the server will process
+      # Build an HTTP/3 frame: varint type + varint length + payload.
+      def build_frame(type, payload)
+        encode_varint(type) + encode_varint(payload.bytesize) + payload
+      end
+
+      # Build a HEADERS frame from key-value pairs via QPACK.
+      def build_headers_frame(pairs, encoder: Qpack::Encoder.new)
+        build_frame(FRAME_HEADERS, encoder.encode(pairs))
+      end
+
       def build_goaway_frame(stream_id)
         frame_type = encode_varint(FRAME_GOAWAY)
         payload = encode_varint(stream_id)
