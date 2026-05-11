@@ -336,12 +336,22 @@ module Quicsilver
     end
 
     def send_control_stream
-      @control_stream = open_unidirectional_stream
-      @control_stream.send(Protocol.build_control_stream)
+      # MsQuic may not be ready for streams immediately after the handshake
+      # completes. On Linux CI (slow VMs), StreamOpen can return
+      # INVALID_STATE (0x7d) during this window. Retry briefly.
+      attempts = 0
+      begin
+        @control_stream = open_unidirectional_stream
+        @control_stream.send(Protocol.build_control_stream)
 
-      [0x02, 0x03].each do |type|
-        stream = open_unidirectional_stream
-        stream.send([type].pack("C"))
+        [0x02, 0x03].each do |type|
+          stream = open_unidirectional_stream
+          stream.send([type].pack("C"))
+        end
+      rescue RuntimeError => e
+        raise unless e.message.include?("0x7d") && (attempts += 1) <= 3
+        sleep 0.05 * attempts
+        retry
       end
     end
 
