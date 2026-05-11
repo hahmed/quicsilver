@@ -346,6 +346,13 @@ class ConnectionTest < Minitest::Test
     assert @connection.critical_stream?(11)
   end
 
+  def test_receive_unidirectional_data_identifies_webtransport_uni
+    # Stream type 0x54 = WebTransport unidirectional stream (2-byte varint)
+    @connection.receive_unidirectional_data(15, "\x40\x54".b)
+    refute @connection.critical_stream?(15)
+    assert_equal :webtransport_uni, @connection.instance_variable_get(:@uni_stream_types)[15]
+  end
+
   def test_receive_unidirectional_data_ignores_unknown_stream_type
     # Stream type 0x21 (unknown/reserved) — must not raise
     @connection.receive_unidirectional_data(15, "\x21".b)

@@ -470,6 +470,9 @@ module Quicsilver
       if (stream_id & 0x02) != 0  # unidirectional
         begin
           connection.receive_unidirectional_data(stream_id, payload)
+          if connection.uni_stream_type(stream_id) == :webtransport_uni
+            route_wt_uni_stream(stream_id, stream_handle, payload, connection)
+          end
         rescue Protocol::FrameError => e
           Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
           Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
@@ -760,6 +763,22 @@ module Quicsilver
 
     def webtransport_stream?(data)
       WebTransportSession.webtransport_stream?(data)
+    end
+
+    def route_wt_uni_stream(stream_id, stream_handle, payload, connection)
+      # After Connection strips the 0x54 stream type, payload is:
+      # [session_id varint][data...]
+      # Reuse the same prefix parser — format is identical minus the type byte.
+      session_id, initial_data = WebTransportSession.parse_uni_stream_data(payload)
+      return unless session_id
+
+      session = @webtransport_sessions[session_id]
+      return unless session
+
+      wt_stream = session.add_uni_stream(stream_handle, stream_id)
+      wt_stream.receive_data(initial_data) if initial_data && !initial_data.empty?
+    rescue => e
+      Quicsilver.logger.error("WebTransport uni stream error: #{e.class} - #{e.message}")
     end
 
     # Accept an incoming WebTransport stream — parse prefix and route to session

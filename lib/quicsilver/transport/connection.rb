@@ -193,6 +193,9 @@ module Quicsilver
             @qpack_decoder_stream_id = stream_id
             @uni_stream_types[stream_id] = :qpack_decoder
             @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
+          when 0x54 # WebTransport unidirectional stream
+            @uni_stream_types[stream_id] = :webtransport_uni
+            @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
           else
             # Unknown unidirectional stream types MUST be ignored (RFC 9114 §6.2)
             @uni_stream_types[stream_id] = :unknown
@@ -284,6 +287,10 @@ module Quicsilver
         Quicsilver.set_stream_priority(handle, quic_priority)
       rescue => e
         Quicsilver.logger.debug("Failed to set stream priority: #{e.message}")
+      end
+
+      def uni_stream_type(stream_id)
+        @uni_stream_types&.dig(stream_id)
       end
 
       def critical_stream?(stream_id)

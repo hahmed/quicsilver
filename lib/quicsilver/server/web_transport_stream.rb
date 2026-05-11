@@ -21,10 +21,11 @@ module Quicsilver
     class WebTransportStream
       attr_reader :stream_id, :session
 
-      def initialize(session:, stream:, stream_id:)
+      def initialize(session:, stream:, stream_id:, direction: :bidi)
         @session = session
         @stream = stream
         @stream_id = stream_id
+        @direction = direction
         @open = true
         @data_callback = nil
         @close_callback = nil
@@ -32,6 +33,7 @@ module Quicsilver
       end
 
       def write(data)
+        raise "Cannot write to a receive-only stream" if @direction == :receive_only
         return unless @open
         frame = Protocol.build_frame(Protocol::FRAME_DATA, data.to_s.b)
         @stream.send(frame)

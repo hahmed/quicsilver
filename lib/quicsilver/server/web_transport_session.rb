@@ -75,6 +75,14 @@ module Quicsilver
         nil
       end
 
+      # Parse uni stream data after Connection strips the 0x54 type byte.
+      # Payload is [session_id varint][data...]
+      def self.parse_uni_stream_data(payload)
+        session_id, sid_len = Protocol.decode_varint_str(payload, 0)
+        return nil if sid_len == 0
+        [session_id, payload.byteslice(sid_len..-1) || "".b]
+      end
+
       def initialize(connection:, stream:, headers:)
         @connection = connection
         @stream = stream
@@ -86,6 +94,7 @@ module Quicsilver
         @open = false
         @datagram_callback = nil
         @stream_callback = nil
+        @uni_stream_callback = nil
         @close_callback = nil
         @streams = {}  # stream_id => WebTransportStream
       end
@@ -126,6 +135,27 @@ module Quicsilver
 
         wt_stream = WebTransportStream.new(
           session: self, stream: stream, stream_id: stream.stream_id
+        )
+        @streams[wt_stream.stream_id] = wt_stream
+        wt_stream
+      end
+
+      # Register a callback for incoming unidirectional streams (client → server, read-only).
+      def on_uni_stream(&block)
+        @uni_stream_callback = block
+      end
+
+      # Open a server-initiated unidirectional stream to the client (write-only).
+      def open_uni_stream
+        raise "Session not accepted" unless @accepted
+        stream = @connection.open_stream(unidirectional: true)
+        prefix = Protocol.encode_varint(WT_STREAM_UNI) +
+                 Protocol.encode_varint(@stream_id)
+        stream.send(prefix)
+
+        wt_stream = WebTransportStream.new(
+          session: self, stream: stream, stream_id: stream.stream_id,
+          direction: :send_only
         )
         @streams[wt_stream.stream_id] = wt_stream
         wt_stream
@@ -180,6 +210,18 @@ module Quicsilver
       # Route data to the right stream.
       def route_stream_data(stream_id, data) # :nodoc:
         @streams[stream_id]&.receive_data(data)
+      end
+
+      # Called by Server when an incoming uni stream arrives.
+      def add_uni_stream(stream_handle, stream_id) # :nodoc:
+        stream = Transport::Stream.new(stream_handle)
+        wt_stream = WebTransportStream.new(
+          session: self, stream: stream, stream_id: stream_id,
+          direction: :receive_only
+        )
+        @streams[stream_id] = wt_stream
+        @uni_stream_callback&.call(wt_stream)
+        wt_stream
       end
 
       # Called when a stream within this session is reset.
