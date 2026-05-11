@@ -28,6 +28,21 @@ module Quicsilver
       def data
         @buffer.string
       end
+
+      def send(data, fin: false)
+        return unless writable?
+        Quicsilver.send_stream(@stream_handle, data, fin)
+      end
+
+      def reset(error_code = Protocol::H3_REQUEST_CANCELLED)
+        return unless writable?
+        Quicsilver.stream_reset(@stream_handle, error_code)
+      end
+
+      def stop_sending(error_code = Protocol::H3_REQUEST_CANCELLED)
+        return unless writable?
+        Quicsilver.stream_stop_sending(@stream_handle, error_code)
+      end
     end
   end
 end

@@ -171,24 +171,15 @@ module Quicsilver
       end
 
       # Build an HTTP/3 HEADERS frame from key-value pairs
-      def build_qpack_frame(pairs)
-        encoded = @qpack_encoder.encode(pairs)
-        Quicsilver::Protocol.encode_varint(Quicsilver::Protocol::FRAME_HEADERS) +
-          Quicsilver::Protocol.encode_varint(encoded.bytesize) +
-          encoded
-      end
-
-      # Build a response HEADERS frame (with :status pseudo-header)
       def build_headers_frame(status, headers)
         pairs = [[":status", status.to_s]]
         headers.each { |name, value| pairs << [name.to_s.downcase, value.to_s] }
-        build_qpack_frame(pairs)
+        Protocol.build_headers_frame(pairs, encoder: @qpack_encoder)
       end
 
-      # Build a trailer HEADERS frame
       def build_trailer_frame(trailers)
         pairs = trailers.map { |name, value| [name.to_s.downcase, value.to_s] }
-        build_qpack_frame(pairs)
+        Protocol.build_headers_frame(pairs, encoder: @qpack_encoder)
       end
     end
   end

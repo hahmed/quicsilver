@@ -264,6 +264,7 @@ module Quicsilver
       # stream_id: The last client-initiated bidirectional stream ID the server will process
       # Build an HTTP/3 frame: varint type + varint length + payload.
       def build_frame(type, payload)
+        payload = payload.to_s.b
         encode_varint(type) + encode_varint(payload.bytesize) + payload
       end
 

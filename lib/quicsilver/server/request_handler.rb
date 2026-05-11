@@ -29,7 +29,7 @@ module Quicsilver
         Quicsilver.connection_shutdown(connection.handle, e.error_code, false) rescue nil
       rescue Protocol::MessageError => e
         Quicsilver.logger.error("Message error: #{e.message} (0x#{e.error_code.to_s(16)})")
-        Quicsilver.stream_reset(stream.stream_handle, e.error_code) if stream.writable?
+        stream.reset(e.error_code) if stream.writable?
       rescue => e
         Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
         Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))

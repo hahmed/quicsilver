@@ -10,11 +10,7 @@ module Quicsilver
 
         pairs = [[":status", status.to_s]]
         headers.each { |name, value| pairs << [name.to_s.downcase, value.to_s] }
-        encoded = encoder.encode(pairs)
-
-        Protocol.encode_varint(FRAME_HEADERS) +
-          Protocol.encode_varint(encoded.bytesize) +
-          encoded
+        Protocol.build_headers_frame(pairs, encoder: encoder)
       end
 
       def initialize(status, headers, body, encoder: Qpack::Encoder.new, head_request: false, trailers: nil)
@@ -87,8 +83,7 @@ module Quicsilver
       end
 
       def build_frame(type, payload)
-        payload = payload.to_s.b
-        Protocol.encode_varint(type) + Protocol.encode_varint(payload.bytesize) + payload
+        Protocol.build_frame(type, payload)
       end
 
 

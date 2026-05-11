@@ -36,7 +36,7 @@ module Quicsilver
         return if @accepted
 
         frame = Protocol.build_headers_frame([[:":status", "200"]])
-        Quicsilver.send_stream(@stream.stream_handle, frame, false)
+        @stream.send(frame, fin: false)
         @accepted = true
         @open = true
       end
@@ -65,7 +65,7 @@ module Quicsilver
       def close
         return unless @open
         @open = false
-        Quicsilver.stream_reset(@stream.stream_handle, Protocol::H3_NO_ERROR) rescue nil
+        @stream.reset(Protocol::H3_NO_ERROR) rescue nil
         notify_close
       end
 

@@ -43,7 +43,7 @@ module Quicsilver
       end
 
       def build_frame(type, payload)
-        Protocol.encode_varint(type) + Protocol.encode_varint(payload.bytesize) + payload
+        Protocol.build_frame(type, payload)
       end
     end
   end

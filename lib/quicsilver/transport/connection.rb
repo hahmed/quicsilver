@@ -128,7 +128,7 @@ module Quicsilver
       # RFC 9114 §4.1: encoded as a HEADERS frame, no FIN.
       def send_informational(stream, status, headers)
         data = Protocol::ResponseEncoder.encode_informational(status, headers)
-        Quicsilver.send_stream(stream.stream_handle, data, false)
+        stream.send(data, fin: false)
       rescue RuntimeError => e
         raise unless e.message.include?(MSQUIC_INVALID_STATE) || e.message.include?("StreamSend failed")
         Quicsilver.logger.debug("Stream send failed (client likely reset): #{e.message}")
@@ -139,10 +139,10 @@ module Quicsilver
         encoder = Protocol::ResponseEncoder.new(status, headers, body, head_request: head_request, trailers: trailers)
 
         if body.respond_to?(:to_ary)
-          Quicsilver.send_stream(stream.stream_handle, encoder.encode, true)
+          stream.send(encoder.encode, fin: true)
         else
           encoder.stream_encode do |frame_data, fin|
-            Quicsilver.send_stream(stream.stream_handle, frame_data, fin) unless frame_data.empty? && !fin
+            stream.send(frame_data, fin: fin) unless frame_data.empty? && !fin
           end
         end
       rescue RuntimeError => e
@@ -154,7 +154,7 @@ module Quicsilver
       def send_error(stream, status, message)
         body = ["#{status} #{message}"]
         encoder = Protocol::ResponseEncoder.new(status, { "content-type" => "text/plain" }, body)
-        Quicsilver.send_stream(stream.stream_handle, encoder.encode, true)
+        stream.send(encoder.encode, fin: true)
       rescue RuntimeError => e
         # Stream may have been reset by client - this is expected
         raise unless e.message.include?(MSQUIC_INVALID_STATE) || e.message.include?("StreamSend failed")
