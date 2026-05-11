@@ -45,6 +45,36 @@ module Quicsilver
         [session_id, payload.byteslice(offset..-1) || "".b]  # [session_id, initial_data]
       end
 
+      # Route an incoming WebTransport stream to the right session.
+      def self.accept_stream(sessions, stream_id, stream_handle, payload)
+        session_id, initial_data = parse_stream_prefix(payload)
+        return unless session_id
+
+        session = sessions[session_id]
+        return unless session
+
+        wt_stream = session.add_stream(stream_handle, stream_id)
+        wt_stream.receive_data(initial_data) if initial_data && !initial_data.empty?
+        wt_stream
+      end
+
+      # Find a stream by ID across all sessions.
+      def self.find_stream(sessions, stream_id)
+        sessions.each_value do |session|
+          stream = session.stream(stream_id)
+          return stream if stream
+        end
+        nil
+      end
+
+      # Find the session that owns a given stream.
+      def self.find_session_for_stream(sessions, stream_id)
+        sessions.each_value do |session|
+          return session if session.stream(stream_id)
+        end
+        nil
+      end
+
       def initialize(connection:, stream:, headers:)
         @connection = connection
         @stream = stream
@@ -108,6 +138,11 @@ module Quicsilver
 
       def open?
         @open
+      end
+
+      # Look up a stream by ID within this session.
+      def stream(stream_id)
+        @streams[stream_id]
       end
 
       # Close the session.

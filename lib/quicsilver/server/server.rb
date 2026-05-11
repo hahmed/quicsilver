@@ -764,33 +764,17 @@ module Quicsilver
 
     # Accept an incoming WebTransport stream — parse prefix and route to session
     def accept_webtransport_stream(connection, stream_id, stream_handle, payload)
-      session_id, initial_data = WebTransportSession.parse_stream_prefix(payload)
-      return unless session_id
-
-      session = @webtransport_sessions[session_id]
-      return unless session
-
-      wt_stream = session.add_stream(stream_handle, stream_id)
-      wt_stream.receive_data(initial_data) if initial_data && !initial_data.empty?
+      WebTransportSession.accept_stream(@webtransport_sessions, stream_id, stream_handle, payload)
     rescue => e
       Quicsilver.logger.error("WebTransport stream error: #{e.class} - #{e.message}")
     end
 
-    # Find a WebTransport stream across all sessions
     def active_wt_stream(stream_id)
-      @webtransport_sessions.each_value do |session|
-        stream = session.instance_variable_get(:@streams)[stream_id]
-        return stream if stream
-      end
-      nil
+      WebTransportSession.find_stream(@webtransport_sessions, stream_id)
     end
 
-    # Find the session that owns a given stream
     def wt_session_for_stream(stream_id)
-      @webtransport_sessions.each_value do |session|
-        return session if session.instance_variable_get(:@streams).key?(stream_id)
-      end
-      nil
+      WebTransportSession.find_session_for_stream(@webtransport_sessions, stream_id)
     end
 
     def contains_headers_frame?(data)
