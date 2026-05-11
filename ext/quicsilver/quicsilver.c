@@ -352,40 +352,20 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                     total_data_len += Event->RECEIVE.Buffers[b].Length;
                 }
 
-                int is_client = !NIL_P(ctx->client_obj);
-
-                if (is_client || has_fin) {
-                    // Client: always prepend [stream_handle(8)] so Ruby can map
-                    // handle→stream_id from any event (needed for GOAWAY).
-                    // Server FIN: also prepends handle (existing behavior).
-                    size_t total_len = sizeof(HQUIC) + total_data_len;
-                    char* combined = (char*)malloc(total_len);
-                    if (combined != NULL) {
-                        memcpy(combined, &Stream, sizeof(HQUIC));
-                        size_t offset = sizeof(HQUIC);
-                        for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
-                            memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
-                            offset += Event->RECEIVE.Buffers[b].Length;
-                        }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_len, has_fin ? ctx->early_data : 0);
-                        free(combined);
+                // Always prepend [stream_handle(8)] so Ruby has the handle
+                // for all events — needed for WebTransport streams, GOAWAY,
+                // and any code that needs to send back on the stream.
+                size_t total_len = sizeof(HQUIC) + total_data_len;
+                char* combined = (char*)malloc(total_len);
+                if (combined != NULL) {
+                    memcpy(combined, &Stream, sizeof(HQUIC));
+                    size_t offset = sizeof(HQUIC);
+                    for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
+                        memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
+                        offset += Event->RECEIVE.Buffers[b].Length;
                     }
-                } else if (Event->RECEIVE.BufferCount == 1) {
-                    // Server non-FIN: raw data without handle prefix
-                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id,
-                        (const char*)Event->RECEIVE.Buffers[0].Buffer, Event->RECEIVE.Buffers[0].Length, 0);
-                } else {
-                    // Server non-FIN with multiple buffers: combine without handle prefix
-                    char* combined = (char*)malloc(total_data_len);
-                    if (combined != NULL) {
-                        size_t offset = 0;
-                        for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
-                            memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
-                            offset += Event->RECEIVE.Buffers[b].Length;
-                        }
-                        dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_data_len, 0);
-                        free(combined);
-                    }
+                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_len, has_fin ? ctx->early_data : 0);
+                    free(combined);
                 }
             }
             break;

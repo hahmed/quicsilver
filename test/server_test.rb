@@ -57,7 +57,9 @@ class ServerTest < Minitest::Test
     server.connections[connection_handle] = connection
 
     # Now test receive - data is buffered in Connection
-    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "test data", false)
+    # RECEIVE data is always [stream_handle(8)][payload] from C
+    fake_handle = "\x00" * 8
+    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, fake_handle + "test data", false)
 
     # Verify buffered data via complete_stream
     assert_equal "test data", connection.complete_stream(stream_id, "")
@@ -74,9 +76,11 @@ class ServerTest < Minitest::Test
     server.connections[connection_handle] = connection
 
     # Send multiple chunks - data is buffered in Connection
-    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk1", false)
-    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk2", false)
-    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, "chunk3", false)
+    # RECEIVE data is always [stream_handle(8)][payload] from C
+    fake_handle = "\x00" * 8
+    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, fake_handle + "chunk1", false)
+    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, fake_handle + "chunk2", false)
+    Quicsilver::Server.handle_stream(connection_data, stream_id, Quicsilver::Server::STREAM_EVENT_RECEIVE, fake_handle + "chunk3", false)
 
     # Verify accumulated data via complete_stream
     assert_equal "chunk1chunk2chunk3", connection.complete_stream(stream_id, "")

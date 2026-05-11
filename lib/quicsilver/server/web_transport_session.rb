@@ -6,17 +6,44 @@ module Quicsilver
     #
     # WebTransport provides two messaging modes on the same session:
     # - Datagrams: unreliable, unordered (live cursors, typing indicators)
-    # - Streams: reliable, ordered (chat messages, RPC) — not yet implemented
+    # - Streams: reliable, ordered (chat messages, RPC)
     #
     # Usage:
     #   server.on_webtransport do |session|
     #     session.accept!
     #     session.on_datagram { |data| session.send_datagram("echo: #{data}") }
+    #     session.on_stream { |stream|
+    #       stream.on_data { |data| stream.write("echo: #{data}") }
+    #       stream.on_close { puts "stream closed" }
+    #     }
     #     session.on_close { puts "session closed" }
     #   end
     #
     class WebTransportSession
       attr_reader :path, :authority, :headers, :connection, :stream_id
+
+      # WebTransport stream frame types (draft-ietf-webtrans-http3)
+      WT_STREAM_BIDI = 0x41
+      WT_STREAM_UNI = 0x54
+
+      def self.webtransport_stream?(data)
+        return false if data.nil? || data.bytesize < 2
+        type, _ = Protocol.decode_varint_str(data, 0)
+        type == WT_STREAM_BIDI || type == WT_STREAM_UNI
+      end
+
+      # Parse the WebTransport stream prefix: [type varint][session_id varint]
+      # Returns [session_id, remainder] or nil if malformed.
+      def self.parse_stream_prefix(payload)
+        offset = 0
+        _type, type_len = Protocol.decode_varint_str(payload, offset)
+        return nil if type_len == 0
+        offset += type_len
+        session_id, sid_len = Protocol.decode_varint_str(payload, offset)
+        return nil if sid_len == 0
+        offset += sid_len
+        [session_id, payload.byteslice(offset..-1) || "".b]  # [session_id, initial_data]
+      end
 
       def initialize(connection:, stream:, headers:)
         @connection = connection
@@ -28,7 +55,9 @@ module Quicsilver
         @accepted = false
         @open = false
         @datagram_callback = nil
+        @stream_callback = nil
         @close_callback = nil
+        @streams = {}  # stream_id => WebTransportStream
       end
 
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
@@ -50,6 +79,26 @@ module Quicsilver
       # Register a callback for datagrams from the client.
       def on_datagram(&block)
         @datagram_callback = block
+      end
+
+      # Register a callback for incoming streams from the client.
+      def on_stream(&block)
+        @stream_callback = block
+      end
+
+      # Open a server-initiated bidirectional stream to the client.
+      def open_stream
+        raise "Session not accepted" unless @accepted
+        stream = @connection.open_stream
+        prefix = Protocol.encode_varint(WT_STREAM_BIDI) +
+                 Protocol.encode_varint(@stream_id)
+        stream.send(prefix)
+
+        wt_stream = WebTransportStream.new(
+          session: self, stream: stream, stream_id: stream.stream_id
+        )
+        @streams[wt_stream.stream_id] = wt_stream
+        wt_stream
       end
 
       # Register a callback for session close.
@@ -77,7 +126,31 @@ module Quicsilver
       # Called by Server when the CONNECT stream is reset/closed.
       def notify_close # :nodoc:
         @open = false
+        @streams.each_value(&:notify_close)
+        @streams.clear
         @close_callback&.call
+      end
+
+      # Called by Server when a new stream with our session ID arrives.
+      def add_stream(stream_handle, stream_id) # :nodoc:
+        stream = Transport::Stream.new(stream_handle)
+        wt_stream = WebTransportStream.new(
+          session: self, stream: stream, stream_id: stream_id
+        )
+        @streams[stream_id] = wt_stream
+        @stream_callback&.call(wt_stream)
+        wt_stream
+      end
+
+      # Route data to the right stream.
+      def route_stream_data(stream_id, data) # :nodoc:
+        @streams[stream_id]&.receive_data(data)
+      end
+
+      # Called when a stream within this session is reset.
+      def remove_stream(stream_id) # :nodoc:
+        stream = @streams.delete(stream_id)
+        stream&.notify_close
       end
     end
   end

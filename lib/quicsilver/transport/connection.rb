@@ -306,12 +306,12 @@ module Quicsilver
         nil
       end
 
-      private
-
       def open_stream(unidirectional: false)
         handle = Quicsilver.open_stream(@data, unidirectional)
         Stream.new(handle)
       end
+
+      private
 
       # Stream may have been reset by client — expected during normal operation.
       def stream_send_error?(error)

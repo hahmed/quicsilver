@@ -3,6 +3,7 @@
 require_relative "scheduler"
 require_relative "schedulers/thread_scheduler"
 require_relative "web_transport_session"
+require_relative "web_transport_stream"
 
 module Quicsilver
   class Server
@@ -362,6 +363,8 @@ module Quicsilver
         elsif (wt = @webtransport_sessions.delete(stream_id))
           wt.notify_close
           connection.remove_stream(stream_id)
+        elsif (wt_session = wt_session_for_stream(stream_id))
+          wt_session.remove_stream(stream_id)
         else
           cancel_stream(connection, stream_id)
         end
@@ -455,32 +458,40 @@ module Quicsilver
 
     attr_reader :work_queue
 
+    # RECEIVE data is always [stream_handle(8)][payload...] from C.
+    HANDLE_SIZE = 8
+
     def handle_receive(connection, connection_handle, stream_id, data, early_data: false)
+      stream_handle = data.byteslice(0, HANDLE_SIZE)&.unpack1("Q<")
+      payload = data.byteslice(HANDLE_SIZE..-1) || "".b
+
       # Unidirectional streams (control, QPACK) must be processed incrementally —
       # they never send FIN, so waiting for RECEIVE_FIN would mean never parsing.
       if (stream_id & 0x02) != 0  # unidirectional
         begin
-          connection.receive_unidirectional_data(stream_id, data)
+          connection.receive_unidirectional_data(stream_id, payload)
         rescue Protocol::FrameError => e
           Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
           Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
         end
       else
-        handle_bidi_receive(connection, connection_handle, stream_id, data, early_data: early_data)
+        handle_bidi_receive(connection, connection_handle, stream_id, stream_handle, payload, early_data: early_data)
       end
     end
 
-    def handle_bidi_receive(connection, connection_handle, stream_id, data, early_data: false)
+    def handle_bidi_receive(connection, connection_handle, stream_id, stream_handle, payload, early_data: false)
       pending = @pending_mutex.synchronize { @pending_streams[stream_id] }
       if pending
-        # Subsequent RECEIVE — append to frame buffer and extract complete DATA payloads.
-        # MsQuic splits data at arbitrary boundaries, so frames may span callbacks.
-        pending.frame_buffer << data
+        pending.frame_buffer << payload
         drain_data_frames(pending)
-      elsif contains_headers_frame?(data)
-        dispatch_streaming(connection, connection_handle, stream_id, data, early_data: early_data)
+      elsif (wt_stream = active_wt_stream(stream_id))
+        wt_stream.receive_data(payload)
+      elsif webtransport_stream?(payload)
+        accept_webtransport_stream(connection, stream_id, stream_handle, payload)
+      elsif contains_headers_frame?(payload)
+        dispatch_streaming(connection, connection_handle, stream_id, payload, early_data: early_data)
       else
-        connection.buffer_data(stream_id, data)
+        connection.buffer_data(stream_id, payload)
       end
     end
 
@@ -745,6 +756,41 @@ module Quicsilver
       @webtransport_callback.call(session)
     rescue => e
       Quicsilver.logger.error("WebTransport error: #{e.class} - #{e.message}")
+    end
+
+    def webtransport_stream?(data)
+      WebTransportSession.webtransport_stream?(data)
+    end
+
+    # Accept an incoming WebTransport stream — parse prefix and route to session
+    def accept_webtransport_stream(connection, stream_id, stream_handle, payload)
+      session_id, initial_data = WebTransportSession.parse_stream_prefix(payload)
+      return unless session_id
+
+      session = @webtransport_sessions[session_id]
+      return unless session
+
+      wt_stream = session.add_stream(stream_handle, stream_id)
+      wt_stream.receive_data(initial_data) if initial_data && !initial_data.empty?
+    rescue => e
+      Quicsilver.logger.error("WebTransport stream error: #{e.class} - #{e.message}")
+    end
+
+    # Find a WebTransport stream across all sessions
+    def active_wt_stream(stream_id)
+      @webtransport_sessions.each_value do |session|
+        stream = session.instance_variable_get(:@streams)[stream_id]
+        return stream if stream
+      end
+      nil
+    end
+
+    # Find the session that owns a given stream
+    def wt_session_for_stream(stream_id)
+      @webtransport_sessions.each_value do |session|
+        return session if session.instance_variable_get(:@streams).key?(stream_id)
+      end
+      nil
     end
 
     def contains_headers_frame?(data)
