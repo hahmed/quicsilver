@@ -305,18 +305,20 @@ module Quicsilver
           return
         end
 
-        connection = Transport::Connection.new(connection_handle, connection_data,
-          max_header_size: @server_configuration.max_header_size)
+        connection = Transport::Connection.new(
+          connection_handle,
+          connection_data,
+          max_header_size: @server_configuration.max_header_size
+        )
+        connection.resolve_remote_address!
         @connections[connection_handle] = connection
         connection.setup_http3_streams
         @connection_callback&.call(connection)
-
       when STREAM_EVENT_CONNECTION_CLOSED
         connection = @connections.delete(connection_handle)
         @connection_closed_callback&.call(connection) if connection
         connection&.streams&.clear
         Quicsilver.close_server_connection(connection_handle)
-
       when STREAM_EVENT_SEND_COMPLETE
         # Buffer cleanup handled in C extension
       when STREAM_EVENT_RECEIVE
@@ -349,18 +351,15 @@ module Quicsilver
         Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
         @request_registry.complete(stream_id)
         connection.remove_stream(stream_id)
-
       when STREAM_EVENT_START_COMPLETE
         # peer_accepted=true: stream is flowing. false: queued at peer's limit.
         # Server-side: this fires for outbound streams (control, QPACK).
         # Frequent false here means the client's stream limit is too low.
         accepted = data.getbyte(8) == 1
         Quicsilver.logger.debug("Stream #{stream_id} start complete (peer_accepted=#{accepted})")
-
       when STREAM_EVENT_PEER_ACCEPTED
         # Queued stream now accepted — client sent MAX_STREAMS.
         Quicsilver.logger.debug("Stream #{stream_id} accepted by peer (MAX_STREAMS raised)")
-
       when "CONNECTION_ERROR"
         return unless (connection = @connections[connection_handle])
         if @connection_error_callback && data.bytesize >= 13
@@ -368,14 +367,12 @@ module Quicsilver
           reason = data.getbyte(12) == 0 ? :transport : :peer
           @connection_error_callback.call(connection, error_code, reason)
         end
-
       when "CONNECTION_MIGRATED"
         return unless (connection = @connections[connection_handle])
         old_address = connection.remote_address
         new_address = data.force_encoding(Encoding::UTF_8)
         connection.instance_variable_set(:@remote_address, new_address)
         @connection_migrated_callback&.call(connection, old_address, new_address)
-
       when "DATAGRAM_RECEIVED"
         return unless (connection = @connections[connection_handle])
         @datagram_callback&.call(connection, data)
@@ -691,7 +688,5 @@ module Quicsilver
       return false if data.nil? || data.bytesize < 2
       data.getbyte(0) == Protocol::FRAME_HEADERS
     end
-
-
   end
 end

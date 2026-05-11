@@ -38,9 +38,16 @@ module Quicsilver
         @peer_goaway_id = nil
         @local_goaway_id = nil
         @stream_priorities = {}
-        @remote_address = @data[2]  # Peer IP from C, populated at QUIC handshake
-        @remote_port = @data[3]&.to_i || 0
-        @session_resumed = @data[4] == true
+        @session_resumed = @data[2] == true
+        @remote_address = nil
+        @remote_port = 0
+      end
+
+      # Resolve peer address from MsQuic. Must be called before the connection closes.
+      def resolve_remote_address!
+        result = Quicsilver.connection_remote_address(@handle)
+        @remote_address = result&.first
+        @remote_port = result&.last&.to_i || 0
       end
 
       # === Setup (called after connection established) ===

@@ -59,9 +59,9 @@ typedef struct {
     QUIC_STATUS error_status;
     uint64_t error_code;
     VALUE client_obj;  // Ruby client object (Qnil for server connections)
-    char remote_address[INET6_ADDRSTRLEN];  // Peer IP, populated on CONNECTED
-    uint16_t remote_port;                     // Peer port, populated on CONNECTED
-    int session_resumed;                      // 0-RTT session resumption on CONNECTED
+    char remote_address[INET6_ADDRSTRLEN];
+    uint16_t remote_port;
+    int session_resumed;
 } ConnectionContext;
 
 // Listener state tracking
@@ -78,6 +78,9 @@ typedef struct {
     HQUIC connection;
     void* connection_ctx;  // ConnectionContext pointer (for building connection_data)
     VALUE client_obj;      // Ruby client object (copied from connection context)
+    char remote_address[INET6_ADDRSTRLEN];
+    uint16_t remote_port;
+    int session_resumed;
     uint64_t stream_id;    // QUIC stream ID, cached once after StreamStart
     int started;
     int shutdown;
@@ -98,6 +101,9 @@ struct dispatch_ruby_args {
     HQUIC connection;
     void* connection_ctx;
     VALUE client_obj;
+    char remote_address[INET6_ADDRSTRLEN];
+    uint16_t remote_port;
+    int session_resumed;
     const char* event_type;
     uint64_t stream_id;
     const char* data;
@@ -114,11 +120,9 @@ dispatch_ruby_body(VALUE arg)
         VALUE server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
         if (rb_class_real(CLASS_OF(server_class)) == rb_cClass) {
             ConnectionContext* conn_ctx = (ConnectionContext*)a->connection_ctx;
-            VALUE connection_data = rb_ary_new2(5);
+            VALUE connection_data = rb_ary_new2(3);
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection));
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection_ctx));
-            rb_ary_push(connection_data, conn_ctx && conn_ctx->remote_address[0] ? rb_str_new_cstr(conn_ctx->remote_address) : Qnil);
-            rb_ary_push(connection_data, conn_ctx ? UINT2NUM(conn_ctx->remote_port) : INT2FIX(0));
             rb_ary_push(connection_data, conn_ctx && conn_ctx->session_resumed ? Qtrue : Qfalse);
             VALUE argv[5] = {
                 connection_data,
@@ -457,63 +461,21 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             ctx->connected = 1;
             ctx->failed = 0;
             ctx->session_resumed = Event->CONNECTED.SessionResumed;
-            // Grab the peer address for server connections only.
-            // Client connections don't need this — they already know the peer.
-            // Running GetParam here delays the CONNECTED callback, which on
-            // Linux can cause StreamOpen to fail with INVALID_STATE (0x7d)
-            // if the client opens streams immediately after connection.
-            if (NIL_P(ctx->client_obj)) {
-                QUIC_ADDR peer_addr;
-                uint32_t addr_size = sizeof(peer_addr);
-                if (QUIC_SUCCEEDED(MsQuic->GetParam(Connection, QUIC_PARAM_CONN_REMOTE_ADDRESS, &addr_size, &peer_addr))) {
-                    if (peer_addr.Ip.sa_family == QUIC_ADDRESS_FAMILY_INET) {
-                        struct sockaddr_in *v4 = (struct sockaddr_in *)&peer_addr;
-                        inet_ntop(AF_INET, &v4->sin_addr, ctx->remote_address, sizeof(ctx->remote_address));
-                        ctx->remote_port = ntohs(v4->sin_port);
-                    } else {
-                        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&peer_addr;
-                        ctx->remote_port = ntohs(v6->sin6_port);
-                        if (IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) {
-                            struct in_addr v4;
-                            memcpy(&v4, &v6->sin6_addr.s6_addr[12], 4);
-                            inet_ntop(AF_INET, &v4, ctx->remote_address, sizeof(ctx->remote_address));
-                        } else {
-                            inet_ntop(AF_INET6, &v6->sin6_addr, ctx->remote_address, sizeof(ctx->remote_address));
-                        }
-                    }
-                }
-            }
+            // Notify Ruby about new connection - pass ctx pointer for building connection_data
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
             break;
-        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT: {
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
             ctx->failed = 1;
             ctx->error_status = Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status;
             ctx->error_code = Event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode;
-            // Pack [error_code(8)][status(4)][reason_byte(1)] = 13 bytes
-            uint8_t buf[13];
-            uint64_t ec = ctx->error_code;
-            uint32_t st = (uint32_t)ctx->error_status;
-            memcpy(buf, &ec, 8);
-            memcpy(buf + 8, &st, 4);
-            buf[12] = 0; // reason: 0 = transport
-            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ERROR", 0, (const char*)buf, 13, 0);
             break;
-        }
-        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
             ctx->connected = 0;
             ctx->failed = 1;
-            ctx->error_status = QUIC_STATUS_SUCCESS;
+            ctx->error_status = QUIC_STATUS_SUCCESS; // Peer initiated, not an error
             ctx->error_code = Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode;
-            uint8_t buf[13];
-            uint64_t ec = ctx->error_code;
-            uint32_t st = 0;
-            memcpy(buf, &ec, 8);
-            memcpy(buf + 8, &st, 4);
-            buf[12] = 1; // reason: 1 = peer
-            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ERROR", 0, (const char*)buf, 13, 0);
             break;
-        }
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             ctx->connected = 0;
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_CLOSED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
@@ -544,27 +506,6 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
                 MsQuic->StreamClose(Stream);
             }
          break; 
-        case QUIC_CONNECTION_EVENT_PEER_ADDRESS_CHANGED: {
-            // Client migrated to a new IP — extract and dispatch to Ruby.
-            const QUIC_ADDR* new_addr = Event->PEER_ADDRESS_CHANGED.Address;
-            char new_ip[INET6_ADDRSTRLEN] = {0};
-            if (new_addr->Ip.sa_family == QUIC_ADDRESS_FAMILY_INET) {
-                inet_ntop(AF_INET, &((struct sockaddr_in*)new_addr)->sin_addr, new_ip, sizeof(new_ip));
-            } else {
-                struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)new_addr;
-                if (IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) {
-                    struct in_addr v4;
-                    memcpy(&v4, &v6->sin6_addr.s6_addr[12], 4);
-                    inet_ntop(AF_INET, &v4, new_ip, sizeof(new_ip));
-                } else {
-                    inet_ntop(AF_INET6, &v6->sin6_addr, new_ip, sizeof(new_ip));
-                }
-            }
-            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_MIGRATED", 0, new_ip, strlen(new_ip), 0);
-            // Update stored address
-            strncpy(ctx->remote_address, new_ip, sizeof(ctx->remote_address) - 1);
-            break;
-        }
         case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "DATAGRAM_RECEIVED", 0,
                 (const char*)Event->DATAGRAM_RECEIVED.Buffer->Buffer,
@@ -1096,6 +1037,46 @@ quicsilver_connection_statistics(VALUE self, VALUE connection_handle_val)
     return result;
 }
 
+// Get the remote address of a QUIC connection. Called lazily from Ruby
+// so we don't block MsQuic's event thread during the CONNECTED callback.
+// Returns [ip_string, port] or nil.
+static VALUE
+quicsilver_connection_remote_address(VALUE self, VALUE connection_handle_val)
+{
+    if (MsQuic == NULL) return Qnil;
+
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle_val);
+    if (Connection == NULL) return Qnil;
+
+    QUIC_ADDR addr;
+    uint32_t addr_size = sizeof(addr);
+    if (QUIC_FAILED(MsQuic->GetParam(Connection, QUIC_PARAM_CONN_REMOTE_ADDRESS, &addr_size, &addr)))
+        return Qnil;
+
+    char ip[INET6_ADDRSTRLEN];
+    uint16_t port = 0;
+    if (addr.Ip.sa_family == QUIC_ADDRESS_FAMILY_INET) {
+        struct sockaddr_in *v4 = (struct sockaddr_in *)&addr;
+        inet_ntop(AF_INET, &v4->sin_addr, ip, sizeof(ip));
+        port = ntohs(v4->sin_port);
+    } else {
+        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&addr;
+        port = ntohs(v6->sin6_port);
+        if (IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) {
+            struct in_addr v4;
+            memcpy(&v4, &v6->sin6_addr.s6_addr[12], 4);
+            inet_ntop(AF_INET, &v4, ip, sizeof(ip));
+        } else {
+            inet_ntop(AF_INET6, &v6->sin6_addr, ip, sizeof(ip));
+        }
+    }
+
+    VALUE result = rb_ary_new2(2);
+    rb_ary_push(result, rb_str_new_cstr(ip));
+    rb_ary_push(result, UINT2NUM(port));
+    return result;
+}
+
 // Close a QUIC connection and free context
 static VALUE
 quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
@@ -1264,16 +1245,15 @@ quicsilver_start_listener(VALUE self, VALUE listener_handle, VALUE address, VALU
     memset(&Address, 0, sizeof(Address));
 
     // Parse address string to determine family.
-    // IMPORTANT: We must set the exact family (INET or INET6), NOT UNSPEC.
-    // On macOS, MsQuic interprets UNSPEC as IPv6 with IPV6_V6ONLY=1,
-    // which creates an IPv6-only socket that silently drops IPv4 packets.
-    // This breaks HTTP/3 Alt-Svc upgrades when browsers connect via IPv4.
+    // "::" or any address with ':' → INET6 (IPv6 only on macOS).
+    // "0.0.0.0" → UNSPEC (dual-stack: accepts both IPv4 and IPv6).
+    // Specific IPv4 (e.g. "127.0.0.1") → INET (IPv4 only).
     const char* addr_str = StringValueCStr(address);
     if (strchr(addr_str, ':') != NULL) {
-        // IPv6 address (contains ':')
         QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_INET6);
+    } else if (strcmp(addr_str, "0.0.0.0") == 0) {
+        QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_UNSPEC);
     } else {
-        // IPv4 address (e.g. "0.0.0.0", "127.0.0.1")
         QuicAddrSetFamily(&Address, QUIC_ADDRESS_FAMILY_INET);
     }
     QuicAddrSetPort(&Address, Port);
@@ -1585,6 +1565,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "wait_for_connection", quicsilver_wait_for_connection, 2);
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "connection_statistics", quicsilver_connection_statistics, 1);
+    rb_define_singleton_method(mQuicsilver, "connection_remote_address", quicsilver_connection_remote_address, 1);
     rb_define_singleton_method(mQuicsilver, "connection_shutdown", quicsilver_connection_shutdown, 3);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
     rb_define_singleton_method(mQuicsilver, "close_server_connection", quicsilver_close_server_connection, 1);
