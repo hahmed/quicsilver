@@ -69,12 +69,26 @@ module Quicsilver
 
       def all_headers
         headers = [[":status", @status.to_s]]
+        has_content_length = false
         @headers.each do |name, value|
           downcased = name.to_s.downcase
           next if downcased.start_with?("rack.")
           next if FORBIDDEN_HEADERS.include?(downcased)
+          has_content_length = true if downcased == "content-length"
           headers << [downcased, value.to_s]
         end
+
+        # RFC 9110 §8.6: Auto-set content-length for known-size bodies when not already present.
+        # Skip for 1xx, 204, 304 (no body) and HEAD responses.
+        if !has_content_length && !@head_request && @status >= 200 && @status != 204 && @status != 304
+          if @body.respond_to?(:to_ary)
+            length = @body.to_ary.sum { |chunk| chunk.to_s.bytesize }
+            headers << ["content-length", length.to_s] if length > 0
+          elsif @body.respond_to?(:length) && @body.length
+            headers << ["content-length", @body.length.to_s]
+          end
+        end
+
         headers
       end
 

@@ -146,11 +146,17 @@ module Quicsilver
         end
       rescue RuntimeError => e
         raise unless stream_send_error?(e)
+      ensure
+        # RFC 9110: Always close the body to release resources (file handles, fibers, etc.)
+        body.close if body.respond_to?(:close)
       end
 
       def send_error(stream, status, message)
         body = ["#{status} #{message}"]
-        encoder = Protocol::ResponseEncoder.new(status, { "content-type" => "text/plain" }, body)
+        headers = { "content-type" => "text/plain" }
+        # RFC 9110 §15.6.4: 503 responses SHOULD include Retry-After
+        headers["retry-after"] = "1" if status == 503
+        encoder = Protocol::ResponseEncoder.new(status, headers, body)
         stream.send(encoder.encode, fin: true)
       rescue RuntimeError => e
         raise unless stream_send_error?(e)
@@ -182,7 +188,8 @@ module Quicsilver
             # Remove the stream type byte from the buffer
             @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
           when 0x01
-            raise Protocol::FrameError, "Client must not send push streams"
+            raise Protocol::FrameError.new("Client must not send push streams",
+              error_code: Protocol::H3_STREAM_CREATION_ERROR)
           when 0x02 # QPACK encoder stream
             raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
             @qpack_encoder_stream_id = stream_id
@@ -244,7 +251,8 @@ module Quicsilver
             raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
           end
         when 0x01
-          raise Protocol::FrameError, "Client must not send push streams"
+          raise Protocol::FrameError.new("Client must not send push streams",
+            error_code: Protocol::H3_STREAM_CREATION_ERROR)
         when 0x02
           raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
           @qpack_encoder_stream_id = stream_id
@@ -331,15 +339,16 @@ module Quicsilver
         @streams.keys.select { |id| (id & 0x02) == 0 }.max || 0
       end
 
-      # Frame types forbidden on the control stream
+      # Frame types forbidden on the control stream (RFC 9114 §7.2.4)
+      # Note: CANCEL_PUSH (0x03) and MAX_PUSH_ID (0x0d) ARE allowed on control stream.
       FORBIDDEN_ON_CONTROL = [
         0x00, # DATA — request streams only
         0x01, # HEADERS — request streams only
-        0x02, # HTTP/2 PRIORITY (reserved)
+        0x02, # HTTP/2 PRIORITY (reserved, §7.2.8)
         0x05, # PUSH_PROMISE — request streams only
-        0x06, # HTTP/2 PING (reserved)
-        0x08, # HTTP/2 WINDOW_UPDATE (reserved)
-        0x09, # HTTP/2 CONTINUATION (reserved)
+        0x06, # HTTP/2 PING (reserved, §7.2.8)
+        0x08, # HTTP/2 WINDOW_UPDATE (reserved, §7.2.8)
+        0x09, # HTTP/2 CONTINUATION (reserved, §7.2.8)
       ].freeze
 
       def on_settings_received(settings)
@@ -348,11 +357,18 @@ module Quicsilver
 
       def handle_control_frame(type, payload)
         if FORBIDDEN_ON_CONTROL.include?(type)
-          raise Protocol::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on control stream"
+          raise Protocol::FrameError.new(
+            "Frame type 0x#{type.to_s(16)} not allowed on control stream",
+            error_code: Protocol::H3_FRAME_UNEXPECTED
+          )
         end
 
-        if type == Protocol::FRAME_PRIORITY_UPDATE
+        case type
+        when Protocol::FRAME_PRIORITY_UPDATE
           parse_priority_update(payload)
+        when Protocol::FRAME_CANCEL_PUSH, Protocol::FRAME_MAX_PUSH_ID
+          # No-op: we don't implement server push (RFC 9114 §7.2.3, §7.2.7).
+          # These are valid on the control stream — accept and ignore.
         end
       end
 
@@ -365,8 +381,12 @@ module Quicsilver
       end
 
       # RFC 9204 §4.1.3: Validate QPACK encoder stream instructions.
-      # We advertise QPACK_MAX_TABLE_CAPACITY = 0, so any Set Dynamic Table Capacity
-      # instruction with value > 0 is an error.
+      # We advertise QPACK_MAX_TABLE_CAPACITY = 0, so:
+      # - Set Dynamic Table Capacity to 0 is valid (RFC 9204 §3.2.2)
+      # - Set Dynamic Table Capacity > 0 is an error
+      # - Insert With Name Reference (1xxxxxxx) is an error (no table to insert into)
+      # - Insert With Literal Name (01xxxxxx) is an error (capacity is 0)
+      # - Duplicate (000xxxxx) is an error (table is empty)
       def validate_qpack_encoder_data(data)
         return if data.empty?
         byte = data.bytes[0]
@@ -375,14 +395,31 @@ module Quicsilver
         if (byte & 0xE0) == 0x20
           capacity, _ = Protocol.decode_varint(data.bytes, 0)
           capacity &= 0x1F  # mask off the instruction prefix
-          # We advertised capacity 0 — setting to 0 is valid (RFC 9204 §3.2.2),
-          # only non-zero exceeds our advertised maximum.
+          # Setting to 0 is valid; non-zero exceeds our advertised maximum.
           if capacity > 0
             raise Protocol::FrameError.new(
               "Dynamic table capacity exceeds advertised maximum",
               error_code: Protocol::QPACK_ENCODER_STREAM_ERROR
             )
           end
+        elsif (byte & 0x80) == 0x80
+          # Insert With Name Reference — cannot insert when capacity=0
+          raise Protocol::FrameError.new(
+            "Insert instruction received but dynamic table capacity is 0",
+            error_code: Protocol::QPACK_ENCODER_STREAM_ERROR
+          )
+        elsif (byte & 0xC0) == 0x40
+          # Insert With Literal Name — cannot insert when capacity=0
+          raise Protocol::FrameError.new(
+            "Insert instruction received but dynamic table capacity is 0",
+            error_code: Protocol::QPACK_ENCODER_STREAM_ERROR
+          )
+        elsif (byte & 0xE0) == 0x00
+          # Duplicate — table is empty, nothing to duplicate
+          raise Protocol::FrameError.new(
+            "Duplicate instruction received but dynamic table is empty",
+            error_code: Protocol::QPACK_ENCODER_STREAM_ERROR
+          )
         end
       end
 

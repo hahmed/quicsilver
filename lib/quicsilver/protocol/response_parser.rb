@@ -7,6 +7,12 @@ module Quicsilver
     class ResponseParser < FrameParser
       attr_reader :status
 
+      # Validate response semantics per RFC 9114 §4.3.2.
+      # Call after parse to check :status is present.
+      def validate_response!
+        raise Protocol::MessageError, "Response missing required :status pseudo-header" unless @status
+      end
+
       def initialize(data, **opts)
         decoder = opts.delete(:decoder) || DEFAULT_DECODER
         super(decoder: decoder, max_body_size: opts[:max_body_size],

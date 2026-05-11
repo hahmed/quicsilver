@@ -38,6 +38,13 @@ module Quicsilver
       DEFAULT_INITIAL_WINDOW_PACKETS = 10        # Matches RFC 9002 recommendation
       DEFAULT_MAX_ACK_DELAY_MS = 25              # Matches RFC 9000 default
 
+      # HTTP/3 parser limits — prevent OOM from malicious clients
+      DEFAULT_MAX_BODY_SIZE = 10 * 1024 * 1024   # 10MB — matches common reverse proxy defaults
+      DEFAULT_MAX_HEADER_SIZE = 65_536           # 64KB — matches Envoy/nginx defaults
+      DEFAULT_MAX_HEADER_COUNT = 100             # Matches nginx default
+      DEFAULT_MAX_FRAME_PAYLOAD_SIZE = 1_048_576 # 1MB — single frame can't exceed this
+
+
       # Connection management defaults
       DEFAULT_KEEP_ALIVE_INTERVAL_MS = 0         # 0 = disabled. Set to 20000 for NAT traversal
       DEFAULT_CONGESTION_CONTROL_ALGORITHM = CONGESTION_CONTROL_CUBIC  # CUBIC (0) or BBR (1)
@@ -79,11 +86,13 @@ module Quicsilver
         @disconnect_timeout_ms = options.fetch(:disconnect_timeout_ms, DEFAULT_DISCONNECT_TIMEOUT_MS)
         @handshake_idle_timeout_ms = options.fetch(:handshake_idle_timeout_ms, DEFAULT_HANDSHAKE_IDLE_TIMEOUT_MS)
 
-        # HTTP/3 parser limits (nil = unlimited)
-        @max_body_size = options[:max_body_size]
-        @max_header_size = options[:max_header_size]
-        @max_header_count = options[:max_header_count]
-        @max_frame_payload_size = options[:max_frame_payload_size]
+        # HTTP/3 parser limits — sensible defaults prevent OOM from malicious clients.
+        # RFC 9114 §4.2.2: SETTINGS_MAX_FIELD_SECTION_SIZE limits header block size.
+        # Override with nil to disable (not recommended in production).
+        @max_body_size = options.fetch(:max_body_size, DEFAULT_MAX_BODY_SIZE)
+        @max_header_size = options.fetch(:max_header_size, DEFAULT_MAX_HEADER_SIZE)
+        @max_header_count = options.fetch(:max_header_count, DEFAULT_MAX_HEADER_COUNT)
+        @max_frame_payload_size = options.fetch(:max_frame_payload_size, DEFAULT_MAX_FRAME_PAYLOAD_SIZE)
 
         # 0-RTT early data policy (RFC 8470)
         # :reject (default) — send 425 Too Early for unsafe methods on 0-RTT

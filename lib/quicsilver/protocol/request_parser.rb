@@ -142,8 +142,13 @@ module Quicsilver
           raise Protocol::MessageError, "Request missing required pseudo-header :scheme" unless @headers[":scheme"]
           raise Protocol::MessageError, "Request missing required pseudo-header :path" unless @headers[":path"]
 
-          # RFC 9114 §4.3.1: schemes with mandatory authority (http/https) require :authority or host
+          # RFC 9114 §4.3.1: :path MUST NOT be empty for http or https URIs
           scheme = @headers[":scheme"]
+          if %w[http https].include?(scheme) && @headers[":path"].empty?
+            raise Protocol::MessageError, ":path must not be empty for #{scheme} requests"
+          end
+
+          # RFC 9114 §4.3.1: schemes with mandatory authority (http/https) require :authority or host
           if %w[http https].include?(scheme) && !@headers[":authority"] && !@headers["host"]
             raise Protocol::MessageError, "Request with #{scheme} scheme must include :authority or host"
           end

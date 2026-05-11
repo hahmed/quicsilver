@@ -115,10 +115,14 @@ module Quicsilver
 
     # Send an unreliable datagram to a connection (RFC 9297 / QUIC RFC 9221).
     # Must fit in a single QUIC packet (~1200 bytes).
+    # Requires peer to have advertised SETTINGS_H3_DATAGRAM=1.
     #
     #   server.datagram_send(connection, "real-time-update")
     #
     def datagram_send(connection, data)
+      unless connection.settings[Protocol::SETTINGS_H3_DATAGRAM]
+        raise Error, "Peer did not advertise SETTINGS_H3_DATAGRAM support"
+      end
       Quicsilver.datagram_send(connection.data, data.to_s.b)
     end
 
@@ -576,6 +580,12 @@ module Quicsilver
 
       headers = parser.headers
       return if headers.empty?
+
+      # RFC 9114 §5.2: Reject requests on streams at or above the GOAWAY stream ID
+      if connection.local_goaway_id && stream_id >= connection.local_goaway_id
+        Quicsilver.logger.debug("Rejecting stream #{stream_id} after GOAWAY (#{connection.local_goaway_id})")
+        return
+      end
 
       method = headers[":method"]
 

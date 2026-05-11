@@ -462,6 +462,7 @@ module Quicsilver
         response_parser = Protocol::ResponseParser.new(full_data, max_body_size: @max_body_size,
           max_header_size: @max_header_size)
         response_parser.parse
+        response_parser.validate_response!
 
         body_str = response_parser.body&.read || ""
         response = Response.new(
