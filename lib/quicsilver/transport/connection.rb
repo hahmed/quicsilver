@@ -130,8 +130,7 @@ module Quicsilver
         data = Protocol::ResponseEncoder.encode_informational(status, headers)
         stream.send(data, fin: false)
       rescue RuntimeError => e
-        raise unless e.message.include?(MSQUIC_INVALID_STATE) || e.message.include?("StreamSend failed")
-        Quicsilver.logger.debug("Stream send failed (client likely reset): #{e.message}")
+        raise unless stream_send_error?(e)
       end
 
       def send_response(stream, status, headers, body, head_request: false, trailers: nil)
@@ -146,9 +145,7 @@ module Quicsilver
           end
         end
       rescue RuntimeError => e
-        # Stream may have been reset by client - this is expected
-        raise unless e.message.include?(MSQUIC_INVALID_STATE) || e.message.include?("StreamSend failed")
-        Quicsilver.logger.debug("Stream send failed (client likely reset): #{e.message}")
+        raise unless stream_send_error?(e)
       end
 
       def send_error(stream, status, message)
@@ -156,9 +153,7 @@ module Quicsilver
         encoder = Protocol::ResponseEncoder.new(status, { "content-type" => "text/plain" }, body)
         stream.send(encoder.encode, fin: true)
       rescue RuntimeError => e
-        # Stream may have been reset by client - this is expected
-        raise unless e.message.include?(MSQUIC_INVALID_STATE) || e.message.include?("StreamSend failed")
-        Quicsilver.logger.debug("Stream send failed (client likely reset): #{e.message}")
+        raise unless stream_send_error?(e)
       end
 
       # === Control Stream Handling ===
@@ -316,6 +311,13 @@ module Quicsilver
       def open_stream(unidirectional: false)
         handle = Quicsilver.open_stream(@data, unidirectional)
         Stream.new(handle)
+      end
+
+      # Stream may have been reset by client — expected during normal operation.
+      def stream_send_error?(error)
+        return false unless error.message.include?(MSQUIC_INVALID_STATE) || error.message.include?("StreamSend failed")
+        Quicsilver.logger.debug("Stream send failed (client likely reset): #{error.message}")
+        true
       end
 
       def last_client_stream_id
