@@ -45,6 +45,20 @@ class WebTransportSessionTest < Minitest::Test
     assert closed
   end
 
+  def test_close_with_error_code_and_reason
+    session = build_session_accepted
+    session.close(code: 42, reason: "maintenance")
+    refute session.open?
+  end
+
+  def test_close_truncates_long_reason
+    session = build_session_accepted
+    long_reason = "x" * 2000
+    # Should not raise — reason gets truncated to 1024 bytes
+    session.close(code: 1, reason: long_reason)
+    refute session.open?
+  end
+
   def test_close_closes_all_streams
     session = build_session_accepted
     closed_count = 0
@@ -216,10 +230,10 @@ class WebTransportSessionTest < Minitest::Test
 
   def build_session_accepted
     session = build_session
-    # Stub the send to avoid real MsQuic call
     stream_mock = session.instance_variable_get(:@stream)
-    stream_mock.expect(:send, true, [String], fin: false)
-    stream_mock.expect(:reset, true, [Integer])
+    stream_mock.expect(:send, true, [String], fin: false)  # accept! headers
+    stream_mock.expect(:send, true, [String], fin: false)  # close capsule
+    stream_mock.expect(:reset, true, [Integer])            # stream reset
     session.accept!
     session
   end

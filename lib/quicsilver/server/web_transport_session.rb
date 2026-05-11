@@ -25,6 +25,8 @@ module Quicsilver
       # WebTransport stream frame types (draft-ietf-webtrans-http3)
       WT_STREAM_BIDI = 0x41
       WT_STREAM_UNI = 0x54
+      WT_CLOSE_SESSION = 0x2843
+      MAX_CLOSE_MESSAGE_LENGTH = 1024
 
       def self.webtransport_stream?(data)
         return false if data.nil? || data.bytesize < 2
@@ -175,10 +177,13 @@ module Quicsilver
         @streams[stream_id]
       end
 
-      # Close the session.
-      def close
+      # Close the session with an optional error code and message.
+      # Sends a WT_CLOSE_SESSION capsule (RFC draft-ietf-webtrans-http3)
+      # on the CONNECT stream before closing.
+      def close(code: 0, reason: "")
         return unless @open
         @open = false
+        write_close_reason(code, reason)
         @stream.reset(Protocol::H3_NO_ERROR) rescue nil
         notify_close
       end
@@ -228,6 +233,20 @@ module Quicsilver
       def remove_stream(stream_id) # :nodoc:
         stream = @streams.delete(stream_id)
         stream&.notify_close
+      end
+
+      private
+
+      def write_close_reason(code, reason)
+        reason = reason.to_s
+        reason = reason.byteslice(0, MAX_CLOSE_MESSAGE_LENGTH) if reason.bytesize > MAX_CLOSE_MESSAGE_LENGTH
+        payload = [code].pack("N") + reason.b
+        capsule = Protocol.encode_varint(WT_CLOSE_SESSION) +
+                  Protocol.encode_varint(payload.bytesize) +
+                  payload
+        @stream.send(capsule, fin: false)
+      rescue
+        # Best-effort — connection may already be gone
       end
     end
   end
