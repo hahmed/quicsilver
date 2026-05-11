@@ -504,6 +504,73 @@ class RequestParserTest < Minitest::Test
     assert_equal Quicsilver::Protocol::FRAME_DATA, parser.frames[1][:type]
   end
 
+  # === Spec compliance regression tests ===
+
+  def test_rejects_empty_path_for_https
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "example.com",
+      ":path" => ""
+    )
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
+    parser.parse
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      parser.validate_headers!
+    end
+  end
+
+  def test_rejects_empty_path_for_http
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "http",
+      ":authority" => "example.com",
+      ":path" => ""
+    )
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
+    parser.parse
+
+    assert_raises(Quicsilver::Protocol::MessageError) do
+      parser.validate_headers!
+    end
+  end
+
+  def test_accepts_slash_path
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "example.com",
+      ":path" => "/"
+    )
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    parser = Quicsilver::Protocol::RequestParser.new(data)
+    parser.parse
+    parser.validate_headers!  # should not raise
+
+    assert_equal "/", parser.headers[":path"]
+  end
+
+  def test_rejects_reserved_http2_frame_on_request_stream
+    headers_payload = build_qpack_headers(
+      ":method" => "GET",
+      ":scheme" => "https",
+      ":authority" => "example.com",
+      ":path" => "/"
+    )
+    # Inject a reserved HTTP/2 PRIORITY frame (0x02) after HEADERS
+    data = build_frame(Quicsilver::Protocol::FRAME_HEADERS, headers_payload)
+    data += build_frame(0x02, "\x00".b)  # HTTP/2 PRIORITY
+
+    parser = Quicsilver::Protocol::RequestParser.new(data)
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      parser.parse
+    end
+    assert_equal Quicsilver::Protocol::H3_FRAME_UNEXPECTED, error.error_code
+  end
+
   private
 
   def build_frame(type, payload)

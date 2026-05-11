@@ -419,4 +419,39 @@ class ResponseEncoderTest < Minitest::Test
     parser = parse_response(data)
     parser.body.read.b
   end
+
+  # === Spec compliance regression tests ===
+
+  def test_auto_content_length_for_array_body
+    body = ["hello", " world"]
+    encoder = Quicsilver::Protocol::ResponseEncoder.new(200, {}, body)
+    data = encoder.encode
+    parser = parse_response(data)
+    assert_equal "11", parser.headers["content-length"]
+  end
+
+  def test_no_auto_content_length_when_already_set
+    body = ["hello"]
+    encoder = Quicsilver::Protocol::ResponseEncoder.new(200, { "content-length" => "5" }, body)
+    data = encoder.encode
+    parser = parse_response(data)
+    assert_equal "5", parser.headers["content-length"]
+  end
+
+  def test_no_auto_content_length_for_204
+    encoder = Quicsilver::Protocol::ResponseEncoder.new(204, {}, [])
+    data = encoder.encode
+    parser = parse_response(data)
+    assert_nil parser.headers["content-length"]
+  end
+
+  def test_no_auto_content_length_for_head_request
+    body = ["hello"]
+    encoder = Quicsilver::Protocol::ResponseEncoder.new(200, {}, body, head_request: true)
+    data = encoder.encode
+    parser = parse_response(data)
+    # HEAD responses should not auto-set content-length from body
+    # (the app should set it explicitly if needed)
+    assert_nil parser.headers["content-length"]
+  end
 end
