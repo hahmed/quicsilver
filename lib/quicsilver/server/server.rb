@@ -363,20 +363,14 @@ module Quicsilver
           wt.notify_close
           connection.remove_stream(stream_id)
         else
-          @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
-          pending = @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
-          pending&.body&.close(RuntimeError.new("Stream #{stream_id} reset by peer"))
-          @request_registry.complete(stream_id)
-          connection.remove_stream(stream_id)
+          cancel_stream(connection, stream_id)
         end
       when STREAM_EVENT_STOP_SENDING
         return unless (connection = @connections[connection_handle])
         event = Transport::StreamEvent.new(data, "STOP_SENDING")
         Quicsilver.logger.debug("Stream #{stream_id} stop sending requested with error code: 0x#{event.error_code.to_s(16)}")
-        @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
         Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
-        @request_registry.complete(stream_id)
-        connection.remove_stream(stream_id)
+        cancel_stream(connection, stream_id)
       when STREAM_EVENT_START_COMPLETE
         # peer_accepted=true: stream is flowing. false: queued at peer's limit.
         # Server-side: this fires for outbound streams (control, QPACK).
@@ -413,6 +407,14 @@ module Quicsilver
     end
 
     private
+
+    def cancel_stream(connection, stream_id)
+      @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
+      pending = @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
+      pending&.body&.close(RuntimeError.new("Stream #{stream_id} cancelled"))
+      @request_registry.complete(stream_id)
+      connection.remove_stream(stream_id)
+    end
 
     # Wrap the user's app for the configured mode.
     # Rack mode: inject rack.early_hints support, then wrap with protocol-rack.
@@ -673,8 +675,8 @@ module Quicsilver
       end
     ensure
       @pending_mutex.synchronize { @pending_streams.delete(pending.stream_id) }
-      @request_registry.complete(pending.stream_id) if @request_registry.include?(pending.stream_id)
       @cancelled_mutex.synchronize { @cancelled_streams.delete(pending.stream_id) }
+      @request_registry.complete(pending.stream_id)
       pending.connection.remove_stream(pending.stream_id)
     end
 
