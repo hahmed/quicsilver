@@ -38,6 +38,7 @@ module Quicsilver
       @control_stream_id = nil
       @uni_stream_types = {}
       @datagram_callback = nil
+      @resumption_ticket = nil  # stored ticket for 0-RTT reconnection
     end
 
     # --- Class-level API (automatic pooling) ---
@@ -73,10 +74,17 @@ module Quicsilver
     end
 
     # Disconnect and close the underlying QUIC connection.
+    # Saves the resumption ticket for 0-RTT on the next connect.
     def disconnect
       return unless @connected
 
       @connected = false
+
+      # Save resumption ticket before closing (for 0-RTT reconnection)
+      if @connection_data
+        ticket = Quicsilver.get_resumption_ticket(@connection_data[1])
+        @resumption_ticket = ticket if ticket
+      end
 
       @mutex.synchronize do
         @inflight.each_value { |entry| entry[:request].fail(0, "Connection closed") }
@@ -293,6 +301,12 @@ module Quicsilver
 
     def start_connection(config)
       connection_handle, context_handle = create_connection
+
+      # Apply saved resumption ticket for 0-RTT reconnection
+      if @resumption_ticket
+        Quicsilver.set_resumption_ticket(connection_handle, @resumption_ticket)
+      end
+
       unless Quicsilver.start_connection(connection_handle, config, @hostname, @port)
         cleanup_failed_connection
         raise ConnectionError, "Failed to start connection"

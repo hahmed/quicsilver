@@ -62,6 +62,9 @@ typedef struct {
     char remote_address[INET6_ADDRSTRLEN];
     uint16_t remote_port;
     int session_resumed;
+    // 0-RTT resumption ticket (client-side)
+    uint8_t* resumption_ticket;
+    uint32_t resumption_ticket_length;
 } ConnectionContext;
 
 // Listener state tracking
@@ -441,8 +444,23 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             ctx->connected = 1;
             ctx->failed = 0;
             ctx->session_resumed = Event->CONNECTED.SessionResumed;
+            // Server: send resumption ticket so client can do 0-RTT on reconnect
+            if (NIL_P(ctx->client_obj)) {
+                MsQuic->ConnectionSendResumptionTicket(Connection, QUIC_SEND_RESUMPTION_FLAG_NONE, 0, NULL);
+            }
             // Notify Ruby about new connection - pass ctx pointer for building connection_data
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "CONNECTION_ESTABLISHED", 0, (const char*)&Connection, sizeof(HQUIC), 0);
+            break;
+        case QUIC_CONNECTION_EVENT_RESUMPTION_TICKET_RECEIVED:
+            // Client-only: store the ticket for future 0-RTT reconnection
+            if (ctx->resumption_ticket) {
+                free(ctx->resumption_ticket);
+            }
+            ctx->resumption_ticket_length = Event->RESUMPTION_TICKET_RECEIVED.ResumptionTicketLength;
+            ctx->resumption_ticket = (uint8_t*)malloc(ctx->resumption_ticket_length);
+            if (ctx->resumption_ticket) {
+                memcpy(ctx->resumption_ticket, Event->RESUMPTION_TICKET_RECEIVED.ResumptionTicket, ctx->resumption_ticket_length);
+            }
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             ctx->connected = 0;
@@ -463,6 +481,10 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
             // Client GC registration must be removed before freeing.
             if (!NIL_P(ctx->client_obj)) {
                 rb_gc_unregister_address(&ctx->client_obj);
+            }
+            if (ctx->resumption_ticket) {
+                free(ctx->resumption_ticket);
+                ctx->resumption_ticket = NULL;
             }
             free(ctx);
             break;
@@ -532,6 +554,8 @@ ListenerCallback(HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event)
                 conn_ctx->remote_address[0] = '\0';
                 conn_ctx->remote_port = 0;
                 conn_ctx->session_resumed = 0;
+                conn_ctx->resumption_ticket = NULL;
+                conn_ctx->resumption_ticket_length = 0;
 
                 // Set the connection callback
                 MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, (void*)ConnectionCallback, conn_ctx);
@@ -840,6 +864,8 @@ quicsilver_create_connection(VALUE self, VALUE client_obj)
     ctx->remote_address[0] = '\0';
     ctx->remote_port = 0;
     ctx->session_resumed = 0;
+    ctx->resumption_ticket = NULL;
+    ctx->resumption_ticket_length = 0;
 
     // Protect from GC if it's a Ruby object
     if (!NIL_P(client_obj)) {
@@ -1019,6 +1045,37 @@ quicsilver_connection_statistics(VALUE self, VALUE connection_handle_val)
 
 // Get the remote address of a QUIC connection. Called lazily from Ruby
 // so we don't block MsQuic's event thread during the CONNECTED callback.
+// Get the resumption ticket from a connection context (for 0-RTT)
+static VALUE
+quicsilver_get_resumption_ticket(VALUE self, VALUE context_handle_val)
+{
+    ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle_val);
+    if (ctx == NULL || ctx->resumption_ticket == NULL || ctx->resumption_ticket_length == 0) {
+        return Qnil;
+    }
+    return rb_str_new((const char*)ctx->resumption_ticket, ctx->resumption_ticket_length);
+}
+
+// Set a resumption ticket on a connection (for 0-RTT reconnection)
+static VALUE
+quicsilver_set_resumption_ticket(VALUE self, VALUE connection_handle_val, VALUE ticket_val)
+{
+    if (MsQuic == NULL) return Qfalse;
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle_val);
+    if (Connection == NULL || NIL_P(ticket_val)) return Qfalse;
+
+    const uint8_t* ticket = (const uint8_t*)RSTRING_PTR(ticket_val);
+    uint32_t ticket_len = (uint32_t)RSTRING_LEN(ticket_val);
+
+    QUIC_STATUS Status = MsQuic->SetParam(
+        Connection,
+        QUIC_PARAM_CONN_RESUMPTION_TICKET,
+        ticket_len,
+        ticket);
+
+    return QUIC_SUCCEEDED(Status) ? Qtrue : Qfalse;
+}
+
 // Returns [ip_string, port] or nil.
 static VALUE
 quicsilver_connection_remote_address(VALUE self, VALUE connection_handle_val)
@@ -1546,6 +1603,8 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "connection_statistics", quicsilver_connection_statistics, 1);
     rb_define_singleton_method(mQuicsilver, "connection_remote_address", quicsilver_connection_remote_address, 1);
+    rb_define_singleton_method(mQuicsilver, "get_resumption_ticket", quicsilver_get_resumption_ticket, 1);
+    rb_define_singleton_method(mQuicsilver, "set_resumption_ticket", quicsilver_set_resumption_ticket, 2);
     rb_define_singleton_method(mQuicsilver, "connection_shutdown", quicsilver_connection_shutdown, 3);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
     rb_define_singleton_method(mQuicsilver, "close_server_connection", quicsilver_close_server_connection, 1);
