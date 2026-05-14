@@ -364,8 +364,8 @@ module Quicsilver
 
             result = encode_uncached(data)
 
-            # Cache short strings (frozen)
-            if data.bytesize <= 128 && HUFF_ENCODE_CACHE.size < CACHE_MAX
+            # Cache encoded results (frozen) — includes large headers like CSP
+            if HUFF_ENCODE_CACHE.size < CACHE_MAX
               HUFF_ENCODE_MUTEX.synchronize do
                 HUFF_ENCODE_CACHE[data.frozen? ? data : data.dup.freeze] = result.freeze if HUFF_ENCODE_CACHE.size < CACHE_MAX
               end
