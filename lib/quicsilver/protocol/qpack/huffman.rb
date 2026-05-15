@@ -410,8 +410,8 @@ module Quicsilver
 
             result = decode_uncached(encoded_data)
 
-            # Cache short encoded data (frozen)
-            if encoded_data.bytesize <= 128 && result && HUFF_DECODE_CACHE.size < CACHE_MAX
+            # Cache decoded results (frozen)
+            if result && HUFF_DECODE_CACHE.size < CACHE_MAX
               HUFF_DECODE_MUTEX.synchronize do
                 key = encoded_data.frozen? ? encoded_data : encoded_data.dup.freeze
                 HUFF_DECODE_CACHE[key] = result.freeze if HUFF_DECODE_CACHE.size < CACHE_MAX
