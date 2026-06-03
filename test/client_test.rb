@@ -19,18 +19,18 @@ class ClientTest < Minitest::Test
   end
 
   def test_initialize_with_options
-    client = Quicsilver::Client.new("test.com", 9999, unsecure: false, connection_timeout: 10000)
+    client = Quicsilver::Client.new("test.com", 9999, unsecure: true, connection_timeout: 10000)
 
     assert_equal "test.com", client.hostname
     assert_equal 9999, client.port
-    assert_equal false, client.unsecure
+    assert_equal true, client.unsecure
     assert_equal 10000, client.connection_timeout
   end
 
   def test_initialize_with_defaults
     client = Quicsilver::Client.new("localhost", 4433)
 
-    assert_equal true, client.unsecure
+    assert_equal false, client.unsecure
     assert_equal 5000, client.connection_timeout
   end
 

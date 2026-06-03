@@ -50,7 +50,7 @@ class QuicsilverTest < Minitest::Test
   def test_client_server_communication
     port = find_available_port
     server = Quicsilver::Server.new(port, server_configuration: default_server_config)
-    client = Quicsilver::Client.new("localhost", port, connection_timeout: 5000)
+    client = Quicsilver::Client.new("localhost", port, unsecure: true, connection_timeout: 5000)
     
     # Start server in a separate thread
     server_thread = Thread.new { server.start }
@@ -86,7 +86,7 @@ class QuicsilverTest < Minitest::Test
     
     # Create multiple clients
     3.times do |i|
-      clients << Quicsilver::Client.new("localhost", port, connection_timeout: 3000)
+      clients << Quicsilver::Client.new("localhost", port, unsecure: true, connection_timeout: 3000)
     end
     
     # Start server in a separate thread
@@ -122,7 +122,7 @@ class QuicsilverTest < Minitest::Test
     port = find_available_port
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, alpn: "not-h3")
     server = Quicsilver::Server.new(port, server_configuration: config)
-    client = Quicsilver::Client.new("localhost", port, connection_timeout: 2000)
+    client = Quicsilver::Client.new("localhost", port, unsecure: true, connection_timeout: 2000)
 
     server_thread = Thread.new { server.start }
     wait_for_server(server)

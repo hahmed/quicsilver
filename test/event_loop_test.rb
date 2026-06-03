@@ -36,7 +36,7 @@ class EventLoopTest < Minitest::Test
     server_thread = Thread.new { server.start }
     wait_for_server(server)
 
-    client = Quicsilver::Client.new("localhost", port, connection_timeout: 5000)
+    client = Quicsilver::Client.new("localhost", port, unsecure: true, connection_timeout: 5000)
 
     begin
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)

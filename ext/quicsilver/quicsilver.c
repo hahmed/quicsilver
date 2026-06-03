@@ -825,7 +825,7 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     
     CredConfig.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     CredConfig.CertificateFile = &CertFile;
-    CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NONE;
     
     if (QUIC_FAILED(Status = MsQuic->ConfigurationLoadCredential(Configuration, &CredConfig))) {
         MsQuic->ConfigurationClose(Configuration);

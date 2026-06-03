@@ -15,7 +15,7 @@ module Quicsilver
     def initialize(hostname, port = 4433, **options)
       @hostname = hostname
       @port = port
-      @unsecure = options.fetch(:unsecure, true)
+      @unsecure = options.fetch(:unsecure, false)
       @connection_timeout = options.fetch(:connection_timeout, DEFAULT_CONNECTION_TIMEOUT)
       @request_timeout = options.fetch(:request_timeout, DEFAULT_REQUEST_TIMEOUT)
       @max_body_size = options[:max_body_size]

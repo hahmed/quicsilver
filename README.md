@@ -59,18 +59,20 @@ server.start
 ```ruby
 require "quicsilver"
 
-# Class-level API with automatic connection pooling
-response = Quicsilver::Client.get("127.0.0.1", 4433, "/")
+# Class-level API with automatic connection pooling.
+# Clients verify TLS certificates by default, so the hostname must match the cert.
+response = Quicsilver::Client.get("localhost", 4433, "/")
 puts response[:status]  # => 200
 puts response[:body]    # => "Hello HTTP/3!"
 
 # POST with body
-response = Quicsilver::Client.post("127.0.0.1", 4433, "/api/users",
+response = Quicsilver::Client.post("localhost", 4433, "/api/users",
   body: '{"name": "alice"}',
   headers: { "content-type" => "application/json" })
 
-# Instance-level for more control
-client = Quicsilver::Client.new("127.0.0.1", 4433, unsecure: true)
+# Instance-level for more control. Use unsecure: true only for
+# local/self-signed test servers.
+client = Quicsilver::Client.new("localhost", 4433, unsecure: true)
 response = client.get("/")
 client.disconnect
 ```
@@ -128,8 +130,15 @@ config = Quicsilver::Transport::Configuration.new(
 ```
 
 Run `bake localhost:install` once to add the localhost CA to your system trust
-store. You can still use `curl -k` for quick local testing without trusting the
-CA.
+store. You can still use `curl -k` or `unsecure: true` for quick local testing
+without trusting the CA.
+
+Quicsilver clients verify certificates by default. Disable verification only
+for local development or tests:
+
+```ruby
+client = Quicsilver::Client.new("localhost", 4433, unsecure: true)
+```
 
 ### Browser Access
 
