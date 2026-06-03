@@ -24,15 +24,39 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal 10_000, config.handshake_idle_timeout_ms
   end
 
-  def test_initialization_with_custom_cert_files_raises_no_error_when_certs_does_not_exist
+  def test_initialization_without_cert_files_raises
+    error = assert_raises(Quicsilver::ServerConfigurationError) do
+      Quicsilver::Transport::Configuration.new
+    end
+
+    assert_equal "cert_file and key_file are required", error.message
+  end
+
+  def test_initialization_with_cert_file_only_raises
+    error = assert_raises(Quicsilver::ServerConfigurationError) do
+      Quicsilver::Transport::Configuration.new(cert_file_path, nil)
+    end
+
+    assert_equal "key_file is required when cert_file is provided", error.message
+  end
+
+  def test_initialization_with_key_file_only_raises
+    error = assert_raises(Quicsilver::ServerConfigurationError) do
+      Quicsilver::Transport::Configuration.new(nil, key_file_path)
+    end
+
+    assert_equal "cert_file is required when key_file is provided", error.message
+  end
+
+  def test_initialization_with_custom_cert_files_raises_when_cert_does_not_exist
     assert_raises(Quicsilver::ServerConfigurationError) do
-      Quicsilver::Transport::Configuration.new("missing.crt", "missing.key")
+      Quicsilver::Transport::Configuration.new("missing.crt", key_file_path)
     end
   end
 
-  def test_initialization_with_custom_cert_files_raises_no_error_when_key_does_not_exist
+  def test_initialization_with_custom_cert_files_raises_when_key_does_not_exist
     assert_raises(Quicsilver::ServerConfigurationError) do
-      Quicsilver::Transport::Configuration.new("certificates/server.crt", "missing.key")
+      Quicsilver::Transport::Configuration.new(cert_file_path, "missing.key")
     end
   end
 

@@ -38,12 +38,19 @@ rake compile
 
 ```ruby
 require "quicsilver"
+require "localhost/authority"
 
 app = ->(env) {
   [200, {"content-type" => "text/plain"}, ["Hello HTTP/3!"]]
 }
 
-server = Quicsilver::Server.new(4433, app: app)
+authority = Localhost::Authority.fetch
+config = Quicsilver::Transport::Configuration.new(
+  authority.certificate_path,
+  authority.key_path
+)
+
+server = Quicsilver::Server.new(4433, app: app, server_configuration: config)
 server.start
 ```
 
@@ -74,11 +81,55 @@ client.disconnect
 rackup -s quicsilver -p 4433
 ```
 
+In development, the Rackup handler can use the `localhost` gem to generate
+local certificates automatically. In production, pass both `cert_file` and
+`key_file` Rackup options explicitly:
+
+```bash
+rackup -s quicsilver -p 4433 \
+  -O cert_file=/path/to/fullchain.pem \
+  -O key_file=/path/to/privkey.pem
+```
+
 ### curl
 
 ```bash
 curl --http3-only -k https://localhost:4433/
 ```
+
+### TLS Certificates
+
+HTTP/3 always runs over TLS. Core server configuration never guesses
+certificate paths: `Quicsilver::Transport::Configuration` requires both a
+certificate file and a private key file.
+
+For production, point Quicsilver at the same publicly-trusted certificate and
+key you use for your TCP HTTPS server:
+
+```ruby
+config = Quicsilver::Transport::Configuration.new(
+  ENV.fetch("TLS_CERT_FILE"),
+  ENV.fetch("TLS_KEY_FILE")
+)
+```
+
+For local development, Quicsilver depends on the
+[localhost](https://github.com/socketry/localhost) gem, which can generate a
+certificate for `localhost` or your local development hostname:
+
+```ruby
+require "localhost/authority"
+
+authority = Localhost::Authority.fetch
+config = Quicsilver::Transport::Configuration.new(
+  authority.certificate_path,
+  authority.key_path
+)
+```
+
+Run `bake localhost:install` once to add the localhost CA to your system trust
+store. You can still use `curl -k` for quick local testing without trusting the
+CA.
 
 ### Browser Access
 
@@ -111,9 +162,8 @@ to HTTP/3 automatically via Alt-Svc — no special configuration needed.
 
 Both your TCP server and quicsilver need a TLS certificate trusted by
 your system. Both servers **must use the same certificate**. The
-[localhost](https://github.com/socketry/localhost) gem can generate
-local certificates — run `bake localhost:install` to add the CA to
-your system trust store.
+`localhost` gem can generate local certificates — run `bake localhost:install`
+to add the CA to your system trust store.
 
 Chrome requires one additional flag for local development because it
 does not allow QUIC connections with locally-trusted certificates:
@@ -125,6 +175,9 @@ chrome --origin-to-force-quic-on=myapp.test:3000 https://myapp.test:3000
 This is not needed in production with publicly-trusted certificates.
 
 ## Configuration
+
+Pass both certificate paths explicitly. Omitting either path raises a
+configuration error.
 
 ```ruby
 config = Quicsilver::Transport::Configuration.new(

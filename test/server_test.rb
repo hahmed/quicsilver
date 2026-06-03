@@ -20,15 +20,23 @@ class ServerTest < Minitest::Test
     assert_equal "127.0.0.1", server.address
   end
 
+  def test_initialize_without_server_configuration_raises
+    error = assert_raises(Quicsilver::ServerConfigurationError) do
+      Quicsilver::Server.new
+    end
+
+    assert_equal "cert_file and key_file are required", error.message
+  end
+
   def test_initialize_with_custom_server_configuration_raises_when_cert_missing
     assert_raises(Quicsilver::ServerConfigurationError) do
-      Quicsilver::Transport::Configuration.new("certificates/missing.pem", "certificates/key.pem")
+      Quicsilver::Transport::Configuration.new("certificates/missing.pem", key_file_path)
     end
   end
 
   def test_initialize_with_custom_server_configuration_raises_when_key_missing
     assert_raises(Quicsilver::ServerConfigurationError) do
-      Quicsilver::Transport::Configuration.new("certificates/server.crt", "certificates/missing_key.pem")
+      Quicsilver::Transport::Configuration.new(cert_file_path, "certificates/missing_key.pem")
     end
   end
 

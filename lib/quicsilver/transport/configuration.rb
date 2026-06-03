@@ -21,8 +21,6 @@ module Quicsilver
       CONGESTION_CONTROL_CUBIC = 0
       CONGESTION_CONTROL_BBR = 1
 
-      DEFAULT_CERT_FILE = "certificates/server.crt"
-      DEFAULT_KEY_FILE = "certificates/server.key"
       DEFAULT_ALPN = "h3"
 
       # Flow control defaults — cross-referenced with quiche, quic-go, lsquic, RFC 9000
@@ -110,8 +108,10 @@ module Quicsilver
           raise ServerConfigurationError, "Invalid mode: #{@mode.inspect} (must be :rack or :falcon)"
         end
 
-        @cert_file = cert_file.nil? ? DEFAULT_CERT_FILE : cert_file
-        @key_file = key_file.nil? ? DEFAULT_KEY_FILE : key_file
+        validate_certificate_paths!(cert_file, key_file)
+
+        @cert_file = cert_file
+        @key_file = key_file
 
         unless File.exist?(@cert_file)
           raise ServerConfigurationError, "Certificate file not found: #{@cert_file}"
@@ -153,6 +153,20 @@ module Quicsilver
           handshake_idle_timeout_ms: @handshake_idle_timeout_ms
         }
       end
+
+      private
+        def validate_certificate_paths!(cert_file, key_file)
+          cert_file_missing = cert_file.to_s.empty?
+          key_file_missing = key_file.to_s.empty?
+
+          if cert_file_missing && key_file_missing
+            raise ServerConfigurationError, "cert_file and key_file are required"
+          elsif cert_file_missing
+            raise ServerConfigurationError, "cert_file is required when key_file is provided"
+          elsif key_file_missing
+            raise ServerConfigurationError, "key_file is required when cert_file is provided"
+          end
+        end
     end
   end
 end
