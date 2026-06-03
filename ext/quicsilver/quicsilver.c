@@ -1043,6 +1043,92 @@ quicsilver_connection_statistics(VALUE self, VALUE connection_handle_val)
     return result;
 }
 
+// Get global QUIC transport counters.
+//
+// These counters are process-wide transport state, not scoped to a single
+// Quicsilver::Server or QUIC connection. They complement QUIC_STATISTICS_V2,
+// which is exposed by quicsilver_connection_statistics for a specific
+// connection handle.
+//
+// MsQuic stores the values as a uint64_t array indexed by QUIC_PERF_COUNTER_*.
+// The public Ruby API uses transport-domain names instead of MsQuic enum names
+// so Server#stats does not leak the native implementation detail.
+static VALUE
+quicsilver_transport_counters(VALUE self)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "QUIC transport not initialized.");
+        return Qnil;
+    }
+
+#ifdef QUIC_PARAM_GLOBAL_PERF_COUNTERS
+    uint64_t counters[QUIC_PERF_COUNTER_MAX] = {0};
+    uint32_t counters_size = sizeof(counters);
+
+    QUIC_STATUS status = MsQuic->GetParam(
+        NULL,
+        QUIC_PARAM_GLOBAL_PERF_COUNTERS,
+        &counters_size,
+        counters);
+
+    if (QUIC_FAILED(status)) {
+        return Qnil;
+    }
+
+    VALUE result = rb_hash_new();
+
+#define ADD_COUNTER(key, counter) \
+    rb_hash_aset(result, rb_str_new_cstr(key), ULL2NUM(counters[counter]))
+
+    // Connection lifecycle counters.
+    ADD_COUNTER("connections_created", QUIC_PERF_COUNTER_CONN_CREATED);
+    ADD_COUNTER("connections_handshake_failed", QUIC_PERF_COUNTER_CONN_HANDSHAKE_FAIL);
+    ADD_COUNTER("connections_app_rejected", QUIC_PERF_COUNTER_CONN_APP_REJECT);
+    ADD_COUNTER("connections_resumed", QUIC_PERF_COUNTER_CONN_RESUMED);
+    ADD_COUNTER("connections_active", QUIC_PERF_COUNTER_CONN_ACTIVE);
+    ADD_COUNTER("connections_connected", QUIC_PERF_COUNTER_CONN_CONNECTED);
+    ADD_COUNTER("connections_protocol_errors", QUIC_PERF_COUNTER_CONN_PROTOCOL_ERRORS);
+    ADD_COUNTER("connections_no_alpn", QUIC_PERF_COUNTER_CONN_NO_ALPN);
+    ADD_COUNTER("connections_load_rejected", QUIC_PERF_COUNTER_CONN_LOAD_REJECT);
+
+    // Stream, packet, UDP, and application byte counters.
+    ADD_COUNTER("streams_active", QUIC_PERF_COUNTER_STRM_ACTIVE);
+    ADD_COUNTER("packets_suspected_lost", QUIC_PERF_COUNTER_PKTS_SUSPECTED_LOST);
+    ADD_COUNTER("packets_dropped", QUIC_PERF_COUNTER_PKTS_DROPPED);
+    ADD_COUNTER("packets_decryption_failed", QUIC_PERF_COUNTER_PKTS_DECRYPTION_FAIL);
+    ADD_COUNTER("udp_datagrams_received", QUIC_PERF_COUNTER_UDP_RECV);
+    ADD_COUNTER("udp_datagrams_sent", QUIC_PERF_COUNTER_UDP_SEND);
+    ADD_COUNTER("udp_bytes_received", QUIC_PERF_COUNTER_UDP_RECV_BYTES);
+    ADD_COUNTER("udp_bytes_sent", QUIC_PERF_COUNTER_UDP_SEND_BYTES);
+    ADD_COUNTER("udp_receive_events", QUIC_PERF_COUNTER_UDP_RECV_EVENTS);
+    ADD_COUNTER("udp_send_calls", QUIC_PERF_COUNTER_UDP_SEND_CALLS);
+    ADD_COUNTER("app_bytes_sent", QUIC_PERF_COUNTER_APP_SEND_BYTES);
+    ADD_COUNTER("app_bytes_received", QUIC_PERF_COUNTER_APP_RECV_BYTES);
+
+    // Queue/worker pressure counters. These are useful for distinguishing
+    // transport saturation from Ruby scheduler saturation in Server#stats.
+    ADD_COUNTER("connection_queue_depth", QUIC_PERF_COUNTER_CONN_QUEUE_DEPTH);
+    ADD_COUNTER("connection_operations_queue_depth", QUIC_PERF_COUNTER_CONN_OPER_QUEUE_DEPTH);
+    ADD_COUNTER("connection_operations_queued", QUIC_PERF_COUNTER_CONN_OPER_QUEUED);
+    ADD_COUNTER("connection_operations_completed", QUIC_PERF_COUNTER_CONN_OPER_COMPLETED);
+    ADD_COUNTER("worker_operations_queue_depth", QUIC_PERF_COUNTER_WORK_OPER_QUEUE_DEPTH);
+    ADD_COUNTER("worker_operations_queued", QUIC_PERF_COUNTER_WORK_OPER_QUEUED);
+    ADD_COUNTER("worker_operations_completed", QUIC_PERF_COUNTER_WORK_OPER_COMPLETED);
+
+    // Path validation and stateless response counters.
+    ADD_COUNTER("paths_validated", QUIC_PERF_COUNTER_PATH_VALIDATED);
+    ADD_COUNTER("paths_failed", QUIC_PERF_COUNTER_PATH_FAILURE);
+    ADD_COUNTER("stateless_resets_sent", QUIC_PERF_COUNTER_SEND_STATELESS_RESET);
+    ADD_COUNTER("stateless_retries_sent", QUIC_PERF_COUNTER_SEND_STATELESS_RETRY);
+
+#undef ADD_COUNTER
+
+    return result;
+#else
+    return Qnil;
+#endif
+}
+
 // Get the remote address of a QUIC connection. Called lazily from Ruby
 // so we don't block MsQuic's event thread during the CONNECTED callback.
 // Get the resumption ticket from a connection context (for 0-RTT)
@@ -1602,6 +1688,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "wait_for_connection", quicsilver_wait_for_connection, 2);
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "connection_statistics", quicsilver_connection_statistics, 1);
+    rb_define_singleton_method(mQuicsilver, "transport_counters", quicsilver_transport_counters, 0);
     rb_define_singleton_method(mQuicsilver, "connection_remote_address", quicsilver_connection_remote_address, 1);
     rb_define_singleton_method(mQuicsilver, "get_resumption_ticket", quicsilver_get_resumption_ticket, 1);
     rb_define_singleton_method(mQuicsilver, "set_resumption_ticket", quicsilver_set_resumption_ticket, 2);

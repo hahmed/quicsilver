@@ -261,6 +261,33 @@ module Quicsilver
       @running
     end
 
+    # Return a point-in-time snapshot of app-server and transport state.
+    #
+    # The top-level server values are Quicsilver-owned facts: listener state,
+    # Ruby connection/request counts, and scheduler queue pressure. The
+    # "transport" entry exposes process-wide QUIC transport counters, so it may
+    # include activity from other Quicsilver servers/clients in the same process.
+    def stats
+      {
+        "running" => @running,
+        "shutting_down" => @shutting_down,
+        "connections" => {
+          "active" => @connections.size,
+          "max" => @max_connections
+        },
+        "requests" => {
+          "active" => @request_registry.active_count
+        },
+        "scheduler" => {
+          "threads" => @thread_pool_size,
+          "pending" => @scheduler.pending,
+          "max_queue_size" => @max_queue_size,
+          "full" => @scheduler.full?
+        },
+        "transport" => transport_counters
+      }
+    end
+
     def cancelled_stream?(stream_id)
       @cancelled_mutex.synchronize { @cancelled_streams.include?(stream_id) }
     end
@@ -298,7 +325,8 @@ module Quicsilver
 
       # Log any requests that didn't complete
       unless @request_registry.empty?
-        @request_registry.active_requests.each do |stream_id, req|
+        @request_registry.active_requests.each do |request_id, req|
+          stream_id = req[:stream_id] || request_id
           elapsed = Time.now - req[:started_at]
           Quicsilver.logger.warn("Force-closing request: #{req[:method]} #{req[:path]} (stream: #{stream_id}, elapsed: #{elapsed.round(2)}s)")
         end
@@ -415,11 +443,19 @@ module Quicsilver
 
     private
 
+    def transport_counters
+      Quicsilver.transport_counters
+    rescue RuntimeError => error
+      raise unless error.message.include?("QUIC transport not initialized")
+
+      nil
+    end
+
     def cancel_stream(connection, stream_id)
       @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
       pending = @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
       pending&.body&.close(RuntimeError.new("Stream #{stream_id} cancelled"))
-      @request_registry.complete(stream_id)
+      @request_registry.complete(stream_id, connection.handle)
       connection.remove_stream(stream_id)
     end
 
@@ -689,7 +725,7 @@ module Quicsilver
       pending.connection.apply_stream_priority(stream, pending.priority)
       pending.connection.send_response(stream, response.status, response_headers, response.body,
         head_request: pending.request.method == "HEAD", trailers: trailers)
-      @request_registry.complete(pending.stream_id)
+      @request_registry.complete(pending.stream_id, pending.connection.handle)
     rescue => e
       Quicsilver.logger.error("Streaming request error: #{e.class} - #{e.message}")
       if pending.stream_handle
@@ -700,7 +736,7 @@ module Quicsilver
     ensure
       @pending_mutex.synchronize { @pending_streams.delete(pending.stream_id) }
       @cancelled_mutex.synchronize { @cancelled_streams.delete(pending.stream_id) }
-      @request_registry.complete(pending.stream_id)
+      @request_registry.complete(pending.stream_id, pending.connection.handle)
       pending.connection.remove_stream(pending.stream_id)
     end
 

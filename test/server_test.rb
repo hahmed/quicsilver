@@ -124,6 +124,34 @@ class ServerTest < Minitest::Test
     end
   end
 
+  def test_request_registry_tracks_same_stream_id_on_different_connections_separately
+    registry = Quicsilver::Server::RequestRegistry.new
+
+    registry.track(0, 111, path: "/one", method: "GET")
+    registry.track(0, 222, path: "/two", method: "GET")
+
+    assert_equal 2, registry.active_count
+    assert registry.include?(0, 111)
+    assert registry.include?(0, 222)
+
+    registry.complete(0, 111)
+
+    assert_equal 1, registry.active_count
+    refute registry.include?(0, 111)
+    assert registry.include?(0, 222)
+  end
+
+  def test_request_registry_complete_without_connection_handle_removes_all_matching_stream_ids
+    registry = Quicsilver::Server::RequestRegistry.new
+
+    registry.track(0, 111, path: "/one", method: "GET")
+    registry.track(0, 222, path: "/two", method: "GET")
+
+    registry.complete(0)
+
+    assert registry.empty?
+  end
+
   # STOP_SENDING compliance: server must mark stream as cancelled and reset it
   def test_stop_sending_cancels_stream
     server = create_server(4433, app: ->(env) { [200, {}, ["OK"]] })
