@@ -18,17 +18,19 @@ def key_file_path
   Localhost::Authority.fetch.key_path
 end
 
-# Find an available port by binding to port 0 (OS assigns a free one).
-# Uses UDP since QUIC is UDP-based — ensures the port is actually free.
-# Keeps the socket open until the port is recorded to prevent races.
+# Find an available UDP port for a Quicsilver server.
+#
+# Quicsilver servers bind to 0.0.0.0 by default, so probe the same wildcard
+# address. Binding only 127.0.0.1 can report a port as free even when a wildcard
+# server bind would still fail on another local interface.
 PORT_MUTEX = Mutex.new
 ALLOCATED_PORTS = Set.new
 
 def find_available_port
   PORT_MUTEX.synchronize do
-    10.times do
+    50.times do
       socket = UDPSocket.new
-      socket.bind("127.0.0.1", 0)
+      socket.bind("0.0.0.0", 0)
       port = socket.addr[1]
       socket.close
       unless ALLOCATED_PORTS.include?(port)
@@ -36,7 +38,7 @@ def find_available_port
         return port
       end
     end
-    raise "Could not find an available port after 10 attempts"
+    raise "Could not find an available port after 50 attempts"
   end
 end
 
