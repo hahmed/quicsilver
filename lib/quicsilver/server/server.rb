@@ -261,6 +261,14 @@ module Quicsilver
       @running
     end
 
+    def draining?
+      @shutting_down
+    end
+
+    def ready?
+      @running && !draining? && !@scheduler.full?
+    end
+
     # Return a point-in-time snapshot of app-server and transport state.
     #
     # The top-level server values are Quicsilver-owned facts: listener state,
