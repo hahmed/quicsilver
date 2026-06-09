@@ -16,12 +16,11 @@ module Quicsilver
       attr_reader :peer_goaway_id, :local_goaway_id
       attr_reader :stream_priorities
       attr_reader :remote_address, :remote_port, :session_resumed
-      def initialize(handle, data, max_header_size: nil, connection_id: nil, cibir_id: nil)
+      def initialize(handle, data, max_header_size: nil, connection_id: nil)
         @handle = handle
         @data = data
         @max_header_size = max_header_size
         @connection_id = hex_string(connection_id)
-        @cibir_id = hex_string(cibir_id)
         @streams = {}
         @response_buffers = {}
         @mutex = Mutex.new
@@ -53,11 +52,6 @@ module Quicsilver
 
       # QUIC original destination connection ID observed by MsQuic.
       attr_reader :connection_id
-
-      # CIBIR (Connection ID Based Implicit Routing) bytes if MsQuic exposes
-      # them for the connection. Quicsilver does not assign application meaning
-      # to these bytes.
-      attr_reader :cibir_id
 
       def active_streams
         @streams.size
@@ -373,7 +367,6 @@ module Quicsilver
       def connection_metadata
         metadata = {}
         metadata["connection_id"] = connection_id if connection_id
-        metadata["cibir_id"] = cibir_id if cibir_id
         metadata
       end
 

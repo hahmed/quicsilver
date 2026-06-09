@@ -362,12 +362,12 @@ module Quicsilver
         end
 
         quic_connection_ids = Quicsilver.connection_ids(connection_handle)
+        connection_id = quic_connection_ids["original_destination_connection_id"]
         connection = Transport::Connection.new(
           connection_handle,
           connection_data,
           max_header_size: @server_configuration.max_header_size,
-          connection_id: quic_connection_ids["original_destination_connection_id"],
-          cibir_id: quic_connection_ids["cibir_id"]
+          connection_id: connection_id
         )
         connection.resolve_remote_address!
         @connections[connection_handle] = connection
@@ -464,8 +464,7 @@ module Quicsilver
       if @server_configuration.cibir_id
         Quicsilver.configure_listener_cibir(
           @listener_data.listener_handle,
-          @server_configuration.cibir_bytes,
-          @server_configuration.cibir_offset
+          @server_configuration.cibir_bytes
         )
       end
     end
@@ -483,7 +482,7 @@ module Quicsilver
       if @server_configuration.cibir_id
         {
           "id" => @server_configuration.cibir_id,
-          "offset" => @server_configuration.cibir_offset
+          "offset" => 0
         }
       end
     end

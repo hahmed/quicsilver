@@ -21,6 +21,10 @@ module Quicsilver
       @max_body_size = options[:max_body_size]
       @max_header_size = options[:max_header_size]
 
+      # MsQuic CIBIR bytes for connecting to a CIBIR-configured listener.
+      # Must be set before ConnectionStart; MsQuic currently supports offset 0 only.
+      @transport_cibir_id = normalize_transport_cibir_id(options[:transport_cibir_id])
+
       @connection_data = nil
       @connected = false
       @connection_start_time = nil
@@ -302,6 +306,8 @@ module Quicsilver
     def start_connection(config)
       connection_handle, context_handle = create_connection
 
+      configure_cibir(connection_handle)
+
       # Apply saved resumption ticket for 0-RTT reconnection
       if @resumption_ticket
         Quicsilver.set_resumption_ticket(connection_handle, @resumption_ticket)
@@ -321,6 +327,23 @@ module Quicsilver
       raise ConnectionError, "Failed to create connection" if @connection_data.nil?
 
       @connection_data
+    end
+
+    def configure_cibir(connection_handle)
+      return unless @transport_cibir_id
+
+      Quicsilver.configure_connection_cibir(connection_handle, [@transport_cibir_id].pack("H*"))
+    end
+
+    def normalize_transport_cibir_id(value)
+      return if value.nil?
+
+      cibir_id = value.to_s
+      unless cibir_id.match?(/\A[[:xdigit:]]+\z/) && cibir_id.bytesize.even? && cibir_id.bytesize.between?(2, 12)
+        raise ArgumentError, "transport_cibir_id must be 1..6 bytes encoded as an even-length hex string"
+      end
+
+      cibir_id.downcase
     end
 
     def cleanup_failed_connection

@@ -23,7 +23,6 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal 16_000, config.disconnect_timeout_ms
     assert_equal 10_000, config.handshake_idle_timeout_ms
     assert_nil config.cibir_id
-    assert_nil config.cibir_offset
   end
 
   def test_initialization_without_cert_files_raises
@@ -218,7 +217,7 @@ class ServerConfigurationTest < Minitest::Test
       pacing_enabled send_buffering_enabled initial_rtt_ms
       initial_window_packets max_ack_delay_ms
       keep_alive_interval_ms congestion_control_algorithm migration_enabled
-      disconnect_timeout_ms handshake_idle_timeout_ms cibir_id cibir_offset
+      disconnect_timeout_ms handshake_idle_timeout_ms cibir_id
     ]
 
     expected_attrs.each { |a| assert_respond_to config, a, "Missing attr_reader: #{a}" }
@@ -249,15 +248,13 @@ class ServerConfigurationTest < Minitest::Test
     config = fetch_server_configuration_with_certs(cibir_id: "00010203")
 
     assert_equal "00010203", config.cibir_id
-    assert_equal 0, config.cibir_offset
     assert_equal "\x00\x01\x02\x03".b, config.cibir_bytes
   end
 
   def test_cibir_id_normalizes_hex_case
-    config = fetch_server_configuration_with_certs(cibir_id: "0A", cibir_offset: 2)
+    config = fetch_server_configuration_with_certs(cibir_id: "0A")
 
     assert_equal "0a", config.cibir_id
-    assert_equal 2, config.cibir_offset
     assert_equal "\x0a".b, config.cibir_bytes
   end
 
@@ -267,14 +264,6 @@ class ServerConfigurationTest < Minitest::Test
     end
 
     assert_equal "cibir_id must be 1..6 bytes encoded as an even-length hex string", error.message
-  end
-
-  def test_cibir_offset_rejects_invalid_value
-    error = assert_raises(Quicsilver::ServerConfigurationError) do
-      fetch_server_configuration_with_certs(cibir_id: "01", cibir_offset: 256)
-    end
-
-    assert_equal "cibir_offset must be between 0 and 255", error.message
   end
 
   private

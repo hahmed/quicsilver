@@ -10,7 +10,7 @@ module Quicsilver
         :disconnect_timeout_ms, :handshake_idle_timeout_ms,
         :max_body_size, :max_header_size, :max_header_count, :max_frame_payload_size,
         :early_data_policy,
-        :cibir_id, :cibir_offset,
+        :cibir_id,
         :mode
 
       QUIC_SERVER_RESUME_AND_ZERORTT = 1
@@ -103,8 +103,8 @@ module Quicsilver
 
         # MsQuic CIBIR (Connection ID Based Implicit Routing). Applications own
         # the meaning of these bytes; Quicsilver validates and passes them to MsQuic.
+        # MsQuic currently supports CIBIR at offset 0 only, so offset is not configurable.
         @cibir_id = normalize_cibir_id(options[:cibir_id])
-        @cibir_offset = @cibir_id ? normalize_cibir_offset(options.fetch(:cibir_offset, 0)) : nil
 
         # Application interface mode:
         # :rack (default) — app is a Rack app, auto-wrapped with Protocol::Rack::Adapter
@@ -176,16 +176,6 @@ module Quicsilver
           end
 
           cibir_id.downcase
-        end
-
-        def normalize_cibir_offset(value)
-          Integer(value).tap do |offset|
-            unless offset.between?(0, 255)
-              raise ServerConfigurationError, "cibir_offset must be between 0 and 255"
-            end
-          end
-        rescue ArgumentError, TypeError
-          raise ServerConfigurationError, "cibir_offset must be an integer"
         end
 
         def validate_certificate_paths!(cert_file, key_file)

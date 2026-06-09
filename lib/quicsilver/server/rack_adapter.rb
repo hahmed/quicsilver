@@ -50,10 +50,6 @@ module Quicsilver
           env["quicsilver.connection_id"] = connection_id
         end
 
-        if cibir_id = connection["cibir_id"]
-          env["quicsilver.cibir_id"] = cibir_id
-        end
-
         if stream_id = connection["stream_id"]
           env["quicsilver.stream_id"] = stream_id.to_s
         end

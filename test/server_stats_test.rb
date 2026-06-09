@@ -110,13 +110,12 @@ class ServerStatsTest < Minitest::Test
     stop_server(server, server_thread)
   end
 
-  def test_connection_snapshots_include_connection_id_and_cibir_id
+  def test_connection_snapshots_include_connection_id
     server = build_server
     connection = Quicsilver::Transport::Connection.new(
       123,
       [123, 0, false],
-      connection_id: "\xab\xcd".b,
-      cibir_id: "\x01".b
+      connection_id: "\xab\xcd".b
     )
     server.connections[connection.handle] = connection
 
@@ -124,13 +123,12 @@ class ServerStatsTest < Minitest::Test
       snapshot = server.connection_snapshots.first
 
       assert_equal "abcd", snapshot["connection_id"]
-      assert_equal "01", snapshot["cibir_id"]
       assert_equal 0, snapshot.dig("transport", :rtt)
     end
   end
 
   def test_stats_exposes_configured_cibir
-    server = build_server(cibir_id: "00010203", cibir_offset: 0)
+    server = build_server(cibir_id: "00010203")
 
     assert_equal({ "id" => "00010203", "offset" => 0 }, server.stats["cibir"])
   end
@@ -142,6 +140,19 @@ class ServerStatsTest < Minitest::Test
     assert server.running?
     assert_equal({ "id" => "01", "offset" => 0 }, server.stats["cibir"])
   ensure
+    stop_server(server, server_thread)
+  end
+
+  def test_configured_cibir_accepts_matching_client_cibir
+    server = build_server(cibir_id: "0a")
+    server_thread = start_server(server)
+    client = Quicsilver::Client.new("127.0.0.1", server.port, unsecure: true, transport_cibir_id: "0a")
+
+    response = client.get("/")
+
+    assert_equal 200, response.status
+  ensure
+    client&.disconnect
     stop_server(server, server_thread)
   end
 
@@ -190,10 +201,9 @@ class ServerStatsTest < Minitest::Test
     }
   end
 
-  def build_server(cibir_id: nil, cibir_offset: nil, **options)
+  def build_server(cibir_id: nil, **options)
     config_options = {}
     config_options[:cibir_id] = cibir_id if cibir_id
-    config_options[:cibir_offset] = cibir_offset unless cibir_offset.nil?
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, config_options)
     Quicsilver::Server.new(find_available_port, server_configuration: config, **options)
   end
