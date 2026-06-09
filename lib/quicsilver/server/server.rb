@@ -9,6 +9,9 @@ module Quicsilver
   class Server
     attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size, :max_connections, :scheduler
 
+    DEFAULT_THREAD_POOL_SIZE = 5
+    DEFAULT_QUEUE_MULTIPLIER = 4
+    DEFAULT_MAX_CONNECTIONS = 100
     STREAM_EVENT_RECEIVE = "RECEIVE"
     STREAM_EVENT_RECEIVE_FIN = "RECEIVE_FIN"
     STREAM_EVENT_CONNECTION_ESTABLISHED = "CONNECTION_ESTABLISHED"
@@ -52,10 +55,6 @@ module Quicsilver
         instance&.handle_stream_event(connection_data, stream_id, event, data, early_data)
       end
     end
-
-    DEFAULT_THREAD_POOL_SIZE = 5
-    DEFAULT_QUEUE_MULTIPLIER = 4
-    DEFAULT_MAX_CONNECTIONS = 100
 
     # Default bind address is 0.0.0.0 (IPv4).
     #
@@ -196,16 +195,9 @@ module Quicsilver
       @config_handle = Quicsilver.create_server_configuration(@server_configuration.to_h)
       raise ServerConfigurationError, "Failed to create server configuration" unless @config_handle
 
-      result = Quicsilver.create_listener(@config_handle)
-      @listener_data = ListenerData.new(result[0], result[1])
-      raise ServerListenerError, "Failed to create listener #{@address}:#{@port}"  unless @listener_data
-
-      unless Quicsilver.start_listener(@listener_data.listener_handle, @address, @port, @server_configuration.alpn)
-        Quicsilver.close_configuration(@config_handle)
-        @config_handle = nil
-        cleanup_failed_server
-        raise ServerListenerError, "Failed to start listener on #{@address}:#{@port}"
-      end
+      create_listener
+      configure_listener
+      start_listener
 
       @running = true
 
@@ -277,7 +269,10 @@ module Quicsilver
     # include activity from other Quicsilver servers/clients in the same process.
     def stats
       {
+        "cibir" => configured_cibir,
         "running" => @running,
+        "ready" => ready?,
+        "draining" => draining?,
         "shutting_down" => @shutting_down,
         "connections" => {
           "active" => @connections.size,
@@ -294,6 +289,10 @@ module Quicsilver
         },
         "transport" => transport_counters
       }
+    end
+
+    def connection_snapshots
+      @connections.values.map(&:to_h)
     end
 
     def cancelled_stream?(stream_id)
@@ -362,10 +361,13 @@ module Quicsilver
           return
         end
 
+        quic_connection_ids = Quicsilver.connection_ids(connection_handle)
         connection = Transport::Connection.new(
           connection_handle,
           connection_data,
-          max_header_size: @server_configuration.max_header_size
+          max_header_size: @server_configuration.max_header_size,
+          connection_id: quic_connection_ids["original_destination_connection_id"],
+          cibir_id: quic_connection_ids["cibir_id"]
         )
         connection.resolve_remote_address!
         @connections[connection_handle] = connection
@@ -451,6 +453,41 @@ module Quicsilver
 
     private
 
+    def create_listener
+      result = Quicsilver.create_listener(@config_handle)
+      @listener_data = ListenerData.new(result[0], result[1])
+      raise ServerListenerError, "Failed to create listener #{@address}:#{@port}" unless @listener_data
+    end
+
+    # Configure listener-level CIBIR routing bytes before starting the listener.
+    def configure_listener
+      if @server_configuration.cibir_id
+        Quicsilver.configure_listener_cibir(
+          @listener_data.listener_handle,
+          @server_configuration.cibir_bytes,
+          @server_configuration.cibir_offset
+        )
+      end
+    end
+
+    def start_listener
+      return if Quicsilver.start_listener(@listener_data.listener_handle, @address, @port, @server_configuration.alpn)
+
+      Quicsilver.close_configuration(@config_handle)
+      @config_handle = nil
+      cleanup_failed_server
+      raise ServerListenerError, "Failed to start listener on #{@address}:#{@port}"
+    end
+
+    def configured_cibir
+      if @server_configuration.cibir_id
+        {
+          "id" => @server_configuration.cibir_id,
+          "offset" => @server_configuration.cibir_offset
+        }
+      end
+    end
+
     def transport_counters
       Quicsilver.transport_counters
     rescue RuntimeError => error
@@ -515,7 +552,7 @@ module Quicsilver
 
       # Unidirectional streams (control, QPACK) must be processed incrementally —
       # they never send FIN, so waiting for RECEIVE_FIN would mean never parsing.
-      if (stream_id & 0x02) != 0  # unidirectional
+      if Transport::StreamId.unidirectional?(stream_id)
         begin
           connection.receive_unidirectional_data(stream_id, payload)
           if connection.uni_stream_type(stream_id) == :webtransport_uni
@@ -646,7 +683,12 @@ module Quicsilver
         return
       end
 
-      request, body = @request_handler.adapter.build_request(headers, remote_address: connection.remote_address, remote_port: connection.remote_port)
+      request, body = @request_handler.adapter.build_request(
+        headers,
+        remote_address: connection.remote_address,
+        remote_port: connection.remote_port,
+        transport_context: connection.request_context(stream_id: stream_id)
+      )
       request.headers.add("quicsilver-early-data", early_data.to_s)
 
       # Feed body data from the first RECEIVE.

@@ -485,18 +485,29 @@ class ConnectionTest < Minitest::Test
     refute priority.incremental
   end
 
+  # === Stream accounting ===
+
+  def test_active_request_streams_counts_client_bidirectional_streams
+    [0, 1, 2, 3, 4, 8].each { |stream_id| @connection.track_client_stream(stream_id) }
+
+    assert_equal 6, @connection.active_streams
+    assert_equal 3, @connection.active_request_streams
+  end
+
   # === GOAWAY stream ID ===
 
-  def test_last_client_stream_id_tracks_bidi_streams
+  def test_last_request_stream_id_tracks_request_streams
     @connection.track_client_stream(4)
+    @connection.track_client_stream(5)
+    @connection.track_client_stream(6)
     @connection.track_client_stream(8)
     @connection.track_client_stream(12)
 
-    assert_equal 12, @connection.send(:last_client_stream_id)
+    assert_equal 12, @connection.send(:last_request_stream_id)
   end
 
-  def test_last_client_stream_id_returns_zero_when_no_streams
-    assert_equal 0, @connection.send(:last_client_stream_id)
+  def test_last_request_stream_id_returns_zero_when_no_streams
+    assert_equal 0, @connection.send(:last_request_stream_id)
   end
 
   # === Two-phase GOAWAY (RFC 9114 §5.2) ===

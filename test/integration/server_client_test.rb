@@ -739,7 +739,7 @@ class ServerClientIntegrationTest < Minitest::Test
     seen_ids = []
     original = client.method(:handle_stream_event)
     client.define_singleton_method(:handle_stream_event) do |stream_id, event, data, early_data|
-      seen_ids << stream_id if event == "RECEIVE_FIN" && (stream_id & 0x02) == 0
+      seen_ids << stream_id if event == "RECEIVE_FIN" && Quicsilver::Transport::StreamId.request?(stream_id)
       original.call(stream_id, event, data, early_data)
     end
 

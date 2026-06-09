@@ -1162,6 +1162,26 @@ quicsilver_set_resumption_ticket(VALUE self, VALUE connection_handle_val, VALUE 
     return QUIC_SUCCEEDED(Status) ? Qtrue : Qfalse;
 }
 
+static VALUE
+connection_param_bytes(VALUE connection_handle_val, uint32_t param)
+{
+    if (MsQuic == NULL) return Qnil;
+
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle_val);
+    if (Connection == NULL) return Qnil;
+
+    uint8_t buffer[256];
+    uint32_t buffer_size = sizeof(buffer);
+    memset(buffer, 0, sizeof(buffer));
+
+    QUIC_STATUS status = MsQuic->GetParam(Connection, param, &buffer_size, buffer);
+    if (QUIC_FAILED(status) || buffer_size == 0) {
+        return Qnil;
+    }
+
+    return rb_str_new((const char*)buffer, buffer_size);
+}
+
 // Returns [ip_string, port] or nil.
 static VALUE
 quicsilver_connection_remote_address(VALUE self, VALUE connection_handle_val)
@@ -1197,6 +1217,26 @@ quicsilver_connection_remote_address(VALUE self, VALUE connection_handle_val)
     VALUE result = rb_ary_new2(2);
     rb_ary_push(result, rb_str_new_cstr(ip));
     rb_ary_push(result, UINT2NUM(port));
+    return result;
+}
+
+// QUIC connection IDs and routing bytes for server-side routing/debugging.
+// Batches multiple QUIC GetParam calls into one Ruby/native boundary crossing.
+static VALUE
+quicsilver_connection_ids(VALUE self, VALUE connection_handle_val)
+{
+    VALUE result = rb_hash_new();
+
+    VALUE odcid = connection_param_bytes(connection_handle_val, QUIC_PARAM_CONN_ORIG_DEST_CID);
+    if (!NIL_P(odcid)) {
+        rb_hash_aset(result, rb_str_new_cstr("original_destination_connection_id"), odcid);
+    }
+
+    VALUE cibir = connection_param_bytes(connection_handle_val, QUIC_PARAM_CONN_CIBIR_ID);
+    if (!NIL_P(cibir)) {
+        rb_hash_aset(result, rb_str_new_cstr("cibir_id"), cibir);
+    }
+
     return result;
 }
 
@@ -1348,6 +1388,41 @@ quicsilver_create_listener(VALUE self, VALUE config_handle)
     rb_ary_push(result, ULL2NUM((uintptr_t)Listener));
     rb_ary_push(result, ULL2NUM((uintptr_t)ctx));
     return result;
+}
+
+// Configure listener-level CIBIR (Connection ID Based Implicit Routing) bytes.
+static VALUE
+quicsilver_configure_listener_cibir(VALUE self, VALUE listener_handle, VALUE cibir_bytes_val, VALUE offset_val)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qfalse;
+    }
+
+    StringValue(cibir_bytes_val);
+    long cibir_len = RSTRING_LEN(cibir_bytes_val);
+    if (cibir_len == 0 || cibir_len > 6) {
+        rb_raise(rb_eArgError, "cibir bytes must be 1..6 bytes");
+        return Qfalse;
+    }
+
+    uint8_t buffer[7];
+    buffer[0] = (uint8_t)NUM2UINT(offset_val);
+    memcpy(buffer + 1, RSTRING_PTR(cibir_bytes_val), cibir_len);
+
+    HQUIC Listener = (HQUIC)(uintptr_t)NUM2ULL(listener_handle);
+    QUIC_STATUS Status = MsQuic->SetParam(
+        Listener,
+        QUIC_PARAM_LISTENER_CIBIR_ID,
+        (uint32_t)(1 + cibir_len),
+        buffer);
+
+    if (QUIC_FAILED(Status)) {
+        rb_raise(rb_eRuntimeError, "Listener CIBIR configuration failed, 0x%x!", Status);
+        return Qfalse;
+    }
+
+    return Qtrue;
 }
 
 // Start listener on specific address and port
@@ -1690,6 +1765,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "connection_statistics", quicsilver_connection_statistics, 1);
     rb_define_singleton_method(mQuicsilver, "transport_counters", quicsilver_transport_counters, 0);
     rb_define_singleton_method(mQuicsilver, "connection_remote_address", quicsilver_connection_remote_address, 1);
+    rb_define_singleton_method(mQuicsilver, "connection_ids", quicsilver_connection_ids, 1);
     rb_define_singleton_method(mQuicsilver, "get_resumption_ticket", quicsilver_get_resumption_ticket, 1);
     rb_define_singleton_method(mQuicsilver, "set_resumption_ticket", quicsilver_set_resumption_ticket, 2);
     rb_define_singleton_method(mQuicsilver, "connection_shutdown", quicsilver_connection_shutdown, 3);
@@ -1698,6 +1774,7 @@ Init_quicsilver(void)
     
     // Listener management
     rb_define_singleton_method(mQuicsilver, "create_listener", quicsilver_create_listener, 1);
+    rb_define_singleton_method(mQuicsilver, "configure_listener_cibir", quicsilver_configure_listener_cibir, 3);
     rb_define_singleton_method(mQuicsilver, "start_listener", quicsilver_start_listener, 4);
     rb_define_singleton_method(mQuicsilver, "stop_listener", quicsilver_stop_listener, 1);
     rb_define_singleton_method(mQuicsilver, "close_listener", quicsilver_close_listener, 1);

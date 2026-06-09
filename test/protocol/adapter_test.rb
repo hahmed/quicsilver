@@ -260,6 +260,18 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
     assert_equal "192.168.1.42", request.peer.ip_address
   end
 
+  def test_build_request_sets_transport_context
+    headers = {
+      ":method" => "GET", ":scheme" => "https",
+      ":authority" => "example.com", ":path" => "/"
+    }
+    context = {"connection" => {"connection_id" => "abcd"}}
+
+    request, _ = @adapter.build_request(headers, transport_context: context)
+
+    assert_same context, request.transport_context
+  end
+
   def test_build_request_peer_nil_without_remote_address
     headers = {
       ":method" => "GET", ":scheme" => "https",

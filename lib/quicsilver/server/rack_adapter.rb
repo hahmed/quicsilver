@@ -14,6 +14,7 @@ module Quicsilver
     class RackAdapter < ::Protocol::Rack::Adapter::Rack31
       def call(request)
         env = self.make_environment(request)
+        add_transport_context(env, request)
 
         # Wire rack.early_hints for 103 Early Hints
         if request.respond_to?(:interim_response) && request.interim_response
@@ -35,6 +36,27 @@ module Quicsilver
         ::Protocol::Rack::Response.wrap(env, status, headers, meta, body, request)
       rescue => error
         self.handle_error(env, status, headers, body, error)
+      end
+
+      private
+
+      def add_transport_context(env, request)
+        return unless request.respond_to?(:transport_context)
+        return unless (context = request.transport_context)
+
+        connection = context["connection"] || {}
+
+        if connection_id = connection["connection_id"]
+          env["quicsilver.connection_id"] = connection_id
+        end
+
+        if cibir_id = connection["cibir_id"]
+          env["quicsilver.cibir_id"] = cibir_id
+        end
+
+        if stream_id = connection["stream_id"]
+          env["quicsilver.stream_id"] = stream_id.to_s
+        end
       end
     end
   end

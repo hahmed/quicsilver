@@ -16,11 +16,12 @@ module Quicsilver
       attr_reader :peer_goaway_id, :local_goaway_id
       attr_reader :stream_priorities
       attr_reader :remote_address, :remote_port, :session_resumed
-
-      def initialize(handle, data, max_header_size: nil)
+      def initialize(handle, data, max_header_size: nil, connection_id: nil, cibir_id: nil)
         @handle = handle
         @data = data
         @max_header_size = max_header_size
+        @connection_id = hex_string(connection_id)
+        @cibir_id = hex_string(cibir_id)
         @streams = {}
         @response_buffers = {}
         @mutex = Mutex.new
@@ -48,6 +49,45 @@ module Quicsilver
         result = Quicsilver.connection_remote_address(@handle)
         @remote_address = result&.first
         @remote_port = result&.last&.to_i || 0
+      end
+
+      # QUIC original destination connection ID observed by MsQuic.
+      attr_reader :connection_id
+
+      # CIBIR (Connection ID Based Implicit Routing) bytes if MsQuic exposes
+      # them for the connection. Quicsilver does not assign application meaning
+      # to these bytes.
+      attr_reader :cibir_id
+
+      def active_streams
+        @streams.size
+      end
+
+      # HTTP/3 request streams are client-initiated bidirectional QUIC streams.
+      def active_request_streams
+        @streams.keys.count { |stream_id| StreamId.request?(stream_id) }
+      end
+
+      def request_context(stream_id: nil)
+        connection = connection_metadata
+        connection["stream_id"] = stream_id if stream_id
+
+        {
+          "connection" => connection
+        }
+      end
+
+      def to_h
+        connection_metadata.merge(
+          "remote_address" => @remote_address,
+          "remote_port" => @remote_port,
+          "session_resumed" => @session_resumed,
+          "streams" => {
+            "active" => active_streams,
+            "active_requests" => active_request_streams
+          },
+          "transport" => stats.to_h
+        )
       end
 
       # === Setup (called after connection established) ===
@@ -106,7 +146,7 @@ module Quicsilver
       def send_goaway(stream_id = nil)
         return unless @server_control_stream
 
-        stream_id ||= last_client_stream_id
+        stream_id ||= last_request_stream_id
         validate_goaway_id!(stream_id)
 
         @server_control_stream.send(Protocol.build_goaway_frame(stream_id))
@@ -317,8 +357,6 @@ module Quicsilver
       # Returns QUIC transport statistics for this connection.
       def stats
         ConnectionStats.from_hash(Quicsilver.connection_statistics(@handle))
-      rescue
-        nil
       end
 
       def open_stream(unidirectional: false)
@@ -328,6 +366,17 @@ module Quicsilver
 
       private
 
+      def hex_string(value)
+        value.unpack1("H*") if value
+      end
+
+      def connection_metadata
+        metadata = {}
+        metadata["connection_id"] = connection_id if connection_id
+        metadata["cibir_id"] = cibir_id if cibir_id
+        metadata
+      end
+
       # Stream may have been reset by client — expected during normal operation.
       def stream_send_error?(error)
         return false unless error.message.include?(MSQUIC_INVALID_STATE) || error.message.include?("StreamSend failed")
@@ -335,8 +384,8 @@ module Quicsilver
         true
       end
 
-      def last_client_stream_id
-        @streams.keys.select { |id| (id & 0x02) == 0 }.max || 0
+      def last_request_stream_id
+        @streams.keys.select { |stream_id| StreamId.request?(stream_id) }.max || 0
       end
 
       # Frame types forbidden on the control stream (RFC 9114 §7.2.4)

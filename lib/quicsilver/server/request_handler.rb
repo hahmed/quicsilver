@@ -67,7 +67,12 @@ module Quicsilver
           return
         end
 
-        request, body = @adapter.build_request(headers, remote_address: connection.remote_address, remote_port: connection.remote_port)
+        request, body = @adapter.build_request(
+          headers,
+          remote_address: connection.remote_address,
+          remote_port: connection.remote_port,
+          transport_context: connection.request_context(stream_id: stream.stream_id)
+        )
         request.headers.add("quicsilver-early-data", early_data.to_s)
 
         # Wire interim_response so apps can send 103 Early Hints.

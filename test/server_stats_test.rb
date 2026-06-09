@@ -54,7 +54,10 @@ class ServerStatsTest < Minitest::Test
     Quicsilver.stub(:transport_counters, transport_counters) do
       stats = server.stats
 
+      assert_nil stats["cibir"]
       refute stats["running"]
+      refute stats["ready"]
+      refute stats["draining"]
       refute stats["shutting_down"]
       assert_equal({"active" => 0, "max" => 11}, stats["connections"])
       assert_equal({"active" => 1}, stats["requests"])
@@ -107,6 +110,41 @@ class ServerStatsTest < Minitest::Test
     stop_server(server, server_thread)
   end
 
+  def test_connection_snapshots_include_connection_id_and_cibir_id
+    server = build_server
+    connection = Quicsilver::Transport::Connection.new(
+      123,
+      [123, 0, false],
+      connection_id: "\xab\xcd".b,
+      cibir_id: "\x01".b
+    )
+    server.connections[connection.handle] = connection
+
+    Quicsilver.stub(:connection_statistics, connection_statistics) do
+      snapshot = server.connection_snapshots.first
+
+      assert_equal "abcd", snapshot["connection_id"]
+      assert_equal "01", snapshot["cibir_id"]
+      assert_equal 0, snapshot.dig("transport", :rtt)
+    end
+  end
+
+  def test_stats_exposes_configured_cibir
+    server = build_server(cibir_id: "00010203", cibir_offset: 0)
+
+    assert_equal({ "id" => "00010203", "offset" => 0 }, server.stats["cibir"])
+  end
+
+  def test_server_starts_with_configured_cibir
+    server = build_server(cibir_id: "01")
+    server_thread = start_server(server)
+
+    assert server.running?
+    assert_equal({ "id" => "01", "offset" => 0 }, server.stats["cibir"])
+  ensure
+    stop_server(server, server_thread)
+  end
+
   def test_stats_returns_nil_transport_counters_before_native_initialization
     server = build_server
 
@@ -123,8 +161,40 @@ class ServerStatsTest < Minitest::Test
 
   private
 
-  def build_server(**options)
-    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
+  def connection_statistics
+    {
+      "rtt" => 0,
+      "min_rtt" => 0,
+      "max_rtt" => 0,
+      "resumption_attempted" => false,
+      "resumption_succeeded" => false,
+      "send_path_mtu" => 0,
+      "send_total_packets" => 0,
+      "send_retransmittable_packets" => 0,
+      "send_suspected_lost_packets" => 0,
+      "send_spurious_lost_packets" => 0,
+      "send_total_bytes" => 0,
+      "send_total_stream_bytes" => 0,
+      "send_congestion_count" => 0,
+      "send_persistent_congestion_count" => 0,
+      "send_congestion_window" => 0,
+      "recv_total_packets" => 0,
+      "recv_reordered_packets" => 0,
+      "recv_dropped_packets" => 0,
+      "recv_duplicate_packets" => 0,
+      "recv_total_bytes" => 0,
+      "recv_total_stream_bytes" => 0,
+      "recv_decryption_failures" => 0,
+      "recv_valid_ack_frames" => 0,
+      "key_update_count" => 0
+    }
+  end
+
+  def build_server(cibir_id: nil, cibir_offset: nil, **options)
+    config_options = {}
+    config_options[:cibir_id] = cibir_id if cibir_id
+    config_options[:cibir_offset] = cibir_offset unless cibir_offset.nil?
+    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path, config_options)
     Quicsilver::Server.new(find_available_port, server_configuration: config, **options)
   end
 

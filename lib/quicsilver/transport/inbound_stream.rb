@@ -14,7 +14,7 @@ module Quicsilver
       end
 
       def bidirectional?
-        (stream_id & 0x02) == 0
+        StreamId.bidirectional?(stream_id)
       end
 
       def writable?

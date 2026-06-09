@@ -20,6 +20,7 @@ require_relative "quicsilver/protocol/control_stream_parser"
 require "protocol/rack"
 
 # Transport layer
+require_relative "quicsilver/transport/stream_id"
 require_relative "quicsilver/transport/stream"
 require_relative "quicsilver/transport/stream_event"
 require_relative "quicsilver/transport/inbound_stream"

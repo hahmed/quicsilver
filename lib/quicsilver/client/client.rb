@@ -221,7 +221,7 @@ module Quicsilver
       return unless FINISHED_EVENTS.include?(event)
 
       # Server unidirectional streams (control, QPACK) — process incrementally
-      if (stream_id & 0x02) != 0 && (event == "RECEIVE" || event == "RECEIVE_FIN")
+      if Transport::StreamId.unidirectional?(stream_id) && (event == "RECEIVE" || event == "RECEIVE_FIN")
         begin
           receive_control_data(stream_id, data)
         rescue Protocol::FrameError => e
