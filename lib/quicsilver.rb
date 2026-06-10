@@ -55,13 +55,37 @@ require_relative "rackup/handler/quicsilver"
 
 module Quicsilver
   class << self
+    attr_reader :transport_server_id
     attr_writer :logger
 
     def logger
       @logger ||= default_logger
     end
 
+    # Configure the fixed Server ID bytes MsQuic places in generated QUIC
+    # connection IDs. This is process-global MsQuic state and must be set before
+    # any Quicsilver server/client opens MsQuic.
+    def configure_transport_server_id(server_id)
+      normalized_server_id = normalize_transport_server_id(server_id)
+
+      apply_msquic_server_id([normalized_server_id].pack("H*"))
+
+      @transport_server_id = normalized_server_id
+    rescue RuntimeError => e
+      raise TransportError.new(e.message, status: TransportError.parse_status(e.message))
+    end
+
     private
+
+    TRANSPORT_SERVER_ID = /\A[[:xdigit:]]{8}\z/
+
+    def normalize_transport_server_id(value)
+      unless value.is_a?(String) && value.match?(TRANSPORT_SERVER_ID)
+        raise ServerConfigurationError, "transport_server_id must be exactly 4 bytes encoded as an 8-character hex string"
+      end
+
+      value.downcase
+    end
 
     def default_logger
       Logger.new($stdout, level: Logger::INFO).tap do |log|

@@ -591,12 +591,12 @@ quicsilver_open(VALUE self)
     QUIC_STATUS Status;
     
     // Check if already initialized
-    if (MsQuic != NULL) {
+    if (MsQuic != NULL && Registration != NULL) {
         return Qtrue;
     }
     
     // Open a handle to the library and get the API function table
-    if (QUIC_FAILED(Status = MsQuicOpenVersion(2, (const void**)&MsQuic))) {
+    if (MsQuic == NULL && QUIC_FAILED(Status = MsQuicOpenVersion(2, (const void**)&MsQuic))) {
         rb_raise(rb_eRuntimeError, "MsQuicOpenVersion failed, 0x%x!", Status);
         return Qfalse;
     }
@@ -1399,6 +1399,51 @@ cibir_param_buffer(VALUE cibir_bytes_val, uint8_t* buffer)
     return (uint32_t)(1 + cibir_len);
 }
 
+// Configure the fixed Server ID bytes MsQuic places in generated QUIC
+// connection IDs. Must run before RegistrationOpen, because MsQuic only applies
+// this process-global setting safely before the library is in use.
+static VALUE
+quicsilver_apply_msquic_server_id(VALUE self, VALUE server_id_bytes_val)
+{
+    QUIC_STATUS Status;
+
+    if (Registration != NULL || ExecContext != NULL) {
+        rb_raise(rb_eRuntimeError, "MsQuic Server ID must be configured before Quicsilver is opened");
+        return Qfalse;
+    }
+
+    if (MsQuic == NULL && QUIC_FAILED(Status = MsQuicOpenVersion(2, (const void**)&MsQuic))) {
+        rb_raise(rb_eRuntimeError, "MsQuicOpenVersion failed, 0x%x!", Status);
+        return Qfalse;
+    }
+
+    QUIC_GLOBAL_SETTINGS Settings;
+    memset(&Settings, 0, sizeof(Settings));
+
+    StringValue(server_id_bytes_val);
+    if (RSTRING_LEN(server_id_bytes_val) != sizeof(Settings.FixedServerID)) {
+        rb_raise(rb_eArgError, "Server ID must be exactly 4 bytes");
+        return Qfalse;
+    }
+    Settings.IsSet.LoadBalancingMode = TRUE;
+    Settings.LoadBalancingMode = QUIC_LOAD_BALANCING_SERVER_ID_FIXED;
+    Settings.IsSet.FixedServerID = TRUE;
+    memcpy(&Settings.FixedServerID, RSTRING_PTR(server_id_bytes_val), sizeof(Settings.FixedServerID));
+
+    Status = MsQuic->SetParam(
+        NULL,
+        QUIC_PARAM_GLOBAL_GLOBAL_SETTINGS,
+        sizeof(Settings),
+        &Settings);
+
+    if (QUIC_FAILED(Status)) {
+        rb_raise(rb_eRuntimeError, "MsQuic Server ID configuration failed, 0x%x!", Status);
+        return Qfalse;
+    }
+
+    return Qtrue;
+}
+
 // Configure listener-level CIBIR (Connection ID Based Implicit Routing) bytes.
 static VALUE
 quicsilver_configure_listener_cibir(VALUE self, VALUE listener_handle, VALUE cibir_bytes_val)
@@ -1811,6 +1856,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "close_server_connection", quicsilver_close_server_connection, 1);
     
     // Listener management
+    rb_define_singleton_method(mQuicsilver, "apply_msquic_server_id", quicsilver_apply_msquic_server_id, 1);
     rb_define_singleton_method(mQuicsilver, "create_listener", quicsilver_create_listener, 1);
     rb_define_singleton_method(mQuicsilver, "configure_listener_cibir", quicsilver_configure_listener_cibir, 2);
     rb_define_singleton_method(mQuicsilver, "configure_connection_cibir", quicsilver_configure_connection_cibir, 2);
