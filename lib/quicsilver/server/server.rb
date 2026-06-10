@@ -191,6 +191,7 @@ module Quicsilver
     def start
       raise ServerIsRunningError, "Server is already running" if @running
 
+      configure_transport_server_id
       Quicsilver.open_connection
       @config_handle = Quicsilver.create_server_configuration(@server_configuration.to_h)
       raise ServerConfigurationError, "Failed to create server configuration" unless @config_handle
@@ -367,7 +368,8 @@ module Quicsilver
           connection_handle,
           connection_data,
           max_header_size: @server_configuration.max_header_size,
-          connection_id: connection_id
+          connection_id: connection_id,
+          transport_server_id: @server_configuration.transport_server_id
         )
         connection.resolve_remote_address!
         @connections[connection_handle] = connection
@@ -452,6 +454,14 @@ module Quicsilver
     end
 
     private
+
+    def configure_transport_server_id
+      return unless @server_configuration.transport_server_id
+
+      Quicsilver.apply_msquic_server_id([@server_configuration.transport_server_id].pack("H*"))
+    rescue RuntimeError => e
+      raise TransportError.new(e.message, status: TransportError.parse_status(e.message))
+    end
 
     def create_listener
       result = Quicsilver.create_listener(@config_handle)

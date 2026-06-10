@@ -217,7 +217,7 @@ class ServerConfigurationTest < Minitest::Test
       pacing_enabled send_buffering_enabled initial_rtt_ms
       initial_window_packets max_ack_delay_ms
       keep_alive_interval_ms congestion_control_algorithm migration_enabled
-      disconnect_timeout_ms handshake_idle_timeout_ms cibir_id
+      disconnect_timeout_ms handshake_idle_timeout_ms cibir_id transport_server_id
     ]
 
     expected_attrs.each { |a| assert_respond_to config, a, "Missing attr_reader: #{a}" }
@@ -264,6 +264,20 @@ class ServerConfigurationTest < Minitest::Test
     end
 
     assert_equal "cibir_id must be 1..6 bytes encoded as an even-length hex string", error.message
+  end
+
+  def test_transport_server_id_accepts_four_byte_hex_string
+    config = fetch_server_configuration_with_certs(transport_server_id: "0102030A")
+
+    assert_equal "0102030a", config.transport_server_id
+  end
+
+  def test_transport_server_id_rejects_invalid_values
+    error = assert_raises(Quicsilver::ServerConfigurationError) do
+      fetch_server_configuration_with_certs(transport_server_id: "xyz")
+    end
+
+    assert_equal "transport_server_id must be exactly 4 bytes encoded as an 8-character hex string", error.message
   end
 
   private

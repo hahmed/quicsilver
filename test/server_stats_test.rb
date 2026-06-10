@@ -55,6 +55,7 @@ class ServerStatsTest < Minitest::Test
       stats = server.stats
 
       assert_nil stats["cibir"]
+      refute stats.key?("transport_server_id")
       refute stats["running"]
       refute stats["ready"]
       refute stats["draining"]
@@ -123,6 +124,7 @@ class ServerStatsTest < Minitest::Test
       snapshot = server.connection_snapshots.first
 
       assert_equal "abcd", snapshot["connection_id"]
+      refute snapshot.key?("original_destination_connection_id")
       assert_equal 0, snapshot.dig("transport", :rtt)
     end
   end

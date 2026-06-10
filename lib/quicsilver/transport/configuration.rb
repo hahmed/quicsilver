@@ -10,7 +10,7 @@ module Quicsilver
         :disconnect_timeout_ms, :handshake_idle_timeout_ms,
         :max_body_size, :max_header_size, :max_header_count, :max_frame_payload_size,
         :early_data_policy,
-        :cibir_id,
+        :cibir_id, :transport_server_id,
         :mode
 
       QUIC_SERVER_RESUME_AND_ZERORTT = 1
@@ -106,6 +106,10 @@ module Quicsilver
         # MsQuic currently supports CIBIR at offset 0 only, so offset is not configurable.
         @cibir_id = normalize_cibir_id(options[:cibir_id])
 
+        # MsQuic fixed Server ID for QUIC-aware load balancers. This is
+        # process-global MsQuic state; Server applies it before opening MsQuic.
+        @transport_server_id = normalize_transport_server_id(options[:transport_server_id])
+
         # Application interface mode:
         # :rack (default) — app is a Rack app, auto-wrapped with Protocol::Rack::Adapter
         # :falcon — app is a native protocol-http app, used directly
@@ -166,6 +170,7 @@ module Quicsilver
 
       private
         HEX = /\A[[:xdigit:]]+\z/
+        TRANSPORT_SERVER_ID = /\A[[:xdigit:]]{8}\z/
 
         def normalize_cibir_id(value)
           return if value.nil?
@@ -176,6 +181,16 @@ module Quicsilver
           end
 
           cibir_id.downcase
+        end
+
+        def normalize_transport_server_id(value)
+          return if value.nil?
+
+          unless value.is_a?(String) && value.match?(TRANSPORT_SERVER_ID)
+            raise ServerConfigurationError, "transport_server_id must be exactly 4 bytes encoded as an 8-character hex string"
+          end
+
+          value.downcase
         end
 
         def validate_certificate_paths!(cert_file, key_file)

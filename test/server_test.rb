@@ -47,6 +47,33 @@ class ServerTest < Minitest::Test
     assert_instance_of Quicsilver::Server, server
   end
 
+  def test_configured_transport_server_id_is_applied_as_msquic_bytes
+    config = Quicsilver::Transport::Configuration.new(
+      cert_file_path,
+      key_file_path,
+      transport_server_id: "0000002a"
+    )
+    server = create_server(4433, { server_configuration: config })
+    applied_bytes = nil
+
+    Quicsilver.stub(:apply_msquic_server_id, ->(bytes) { applied_bytes = bytes }) do
+      server.send(:configure_transport_server_id)
+    end
+
+    assert_equal "\x00\x00\x00\x2a".b, applied_bytes
+  end
+
+  def test_transport_server_id_is_skipped_when_unconfigured
+    server = create_server
+    applied = false
+
+    Quicsilver.stub(:apply_msquic_server_id, ->(_bytes) { applied = true }) do
+      server.send(:configure_transport_server_id)
+    end
+
+    refute applied
+  end
+
   def test_stop_when_not_running
     server = create_server
 

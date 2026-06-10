@@ -8,6 +8,29 @@ class ConnectionTest < Minitest::Test
     @connection = Quicsilver::Transport::Connection.new(12345, [12345, 67890])
   end
 
+  def test_request_context_includes_stable_request_identity
+    conn = Quicsilver::Transport::Connection.new(12345, [12345, 67890], connection_id: "\xab\xcd".b)
+
+    context = conn.request_context(stream_id: 8)
+    connection = context["connection"]
+
+    assert_equal "abcd", connection["connection_id"]
+    refute connection.key?("original_destination_connection_id")
+    assert_equal 8, connection["stream_id"]
+    assert_equal "abcd:8", connection["request_id"]
+  end
+
+  def test_request_context_prefixes_request_identity_with_transport_server_id
+    conn = Quicsilver::Transport::Connection.new(
+      12345,
+      [12345, 67890],
+      connection_id: "\xab\xcd".b,
+      transport_server_id: "01020304"
+    )
+
+    assert_equal "01020304:abcd:8", conn.request_context(stream_id: 8).dig("connection", "request_id")
+  end
+
   # === Binary encoding ===
 
   def test_buffer_data_handles_invalid_utf8

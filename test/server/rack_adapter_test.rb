@@ -14,6 +14,7 @@ class RackAdapterTest < Minitest::Test
     transport_context = {
       "connection" => {
         "connection_id" => "abcd",
+        "request_id" => "01020304:abcd:8",
         "stream_id" => 8
       }
     }
@@ -25,6 +26,9 @@ class RackAdapterTest < Minitest::Test
     rack_adapter.call(request)
 
     assert_equal "abcd", captured_env["quicsilver.connection_id"]
+    assert_nil captured_env["quicsilver.original_destination_connection_id"]
+    assert_nil captured_env["quicsilver.transport_server_id"]
+    assert_equal "01020304:abcd:8", captured_env["quicsilver.request_id"]
     assert_equal "8", captured_env["quicsilver.stream_id"]
   end
 end

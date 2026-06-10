@@ -16,11 +16,12 @@ module Quicsilver
       attr_reader :peer_goaway_id, :local_goaway_id
       attr_reader :stream_priorities
       attr_reader :remote_address, :remote_port, :session_resumed
-      def initialize(handle, data, max_header_size: nil, connection_id: nil)
+      def initialize(handle, data, max_header_size: nil, connection_id: nil, transport_server_id: nil)
         @handle = handle
         @data = data
         @max_header_size = max_header_size
         @connection_id = hex_string(connection_id)
+        @transport_server_id = transport_server_id
         @streams = {}
         @response_buffers = {}
         @mutex = Mutex.new
@@ -50,7 +51,9 @@ module Quicsilver
         @remote_port = result&.last&.to_i || 0
       end
 
-      # QUIC original destination connection ID observed by MsQuic.
+      # Stable opaque connection identifier exposed to apps. The current MsQuic
+      # backing value is the original destination CID; consumers must not parse
+      # it as the server-generated routing CID.
       attr_reader :connection_id
 
       def active_streams
@@ -64,7 +67,10 @@ module Quicsilver
 
       def request_context(stream_id: nil)
         connection = connection_metadata
-        connection["stream_id"] = stream_id if stream_id
+        if stream_id
+          connection["stream_id"] = stream_id
+          connection["request_id"] = request_id_for(stream_id)
+        end
 
         {
           "connection" => connection
@@ -368,6 +374,10 @@ module Quicsilver
         metadata = {}
         metadata["connection_id"] = connection_id if connection_id
         metadata
+      end
+
+      def request_id_for(stream_id)
+        [@transport_server_id, connection_id, stream_id].compact.join(":")
       end
 
       # Stream may have been reset by client — expected during normal operation.
