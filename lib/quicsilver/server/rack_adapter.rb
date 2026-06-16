@@ -15,6 +15,7 @@ module Quicsilver
       def call(request)
         env = self.make_environment(request)
         add_transport_context(env, request)
+        yield env if block_given?
 
         # Wire rack.early_hints for 103 Early Hints
         if request.respond_to?(:interim_response) && request.interim_response
@@ -55,8 +56,13 @@ module Quicsilver
         end
 
         if stream_id = connection["stream_id"]
-          env["quicsilver.stream_id"] = stream_id.to_s
+          env["quicsilver.stream_id"] = stream_id
         end
+
+        env["quicsilver.context"] ||= ::Quicsilver::Rack::Context.new(
+          stream_id: connection["stream_id"],
+          metadata: context
+        )
       end
     end
   end

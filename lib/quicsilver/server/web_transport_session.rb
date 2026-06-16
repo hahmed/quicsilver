@@ -168,8 +168,22 @@ module Quicsilver
         @close_callback = block
       end
 
+      def accepted?
+        @accepted
+      end
+
       def open?
         @open
+      end
+
+      def reject!(status = 403, headers = {})
+        return if @accepted || @rejected
+        @rejected = true
+
+        response_headers = [[":status", status.to_i.to_s]]
+        headers.each { |name, value| response_headers << [name.to_s.downcase, value.to_s] }
+        @stream.send(Protocol.build_headers_frame(response_headers), fin: true)
+        @open = false
       end
 
       # Look up a stream by ID within this session.

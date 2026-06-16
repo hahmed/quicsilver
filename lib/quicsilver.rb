@@ -19,6 +19,9 @@ require_relative "quicsilver/protocol/adapter"
 require_relative "quicsilver/protocol/control_stream_parser"
 require "protocol/rack"
 
+# Rack integration
+require_relative "quicsilver/rack/context"
+
 # Transport layer
 require_relative "quicsilver/transport/stream_id"
 require_relative "quicsilver/transport/stream"

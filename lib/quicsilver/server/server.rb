@@ -681,8 +681,8 @@ module Quicsilver
 
       # WebTransport: intercept before normal request dispatch.
       # The CONNECT stream stays open (no FIN) — it becomes the session.
-      if method == "CONNECT" && headers[":protocol"] == "webtransport" && @webtransport_callback
-        accept_webtransport(connection, stream_id, data, headers)
+      if method == "CONNECT" && headers[":protocol"] == "webtransport"
+        accept_webtransport(connection, stream_id, data, headers, early_data: early_data)
         return
       end
 
@@ -845,7 +845,7 @@ module Quicsilver
     # Heuristic: check if raw data starts with an HTTP/3 HEADERS frame (type 0x01).
     # QUIC typically delivers complete frames, but if this misidentifies data,
     # the parser will fail safely in dispatch_streaming's rescue handlers.
-    def accept_webtransport(connection, stream_id, data, headers)
+    def accept_webtransport(connection, stream_id, data, headers, early_data: false)
       # We need the stream handle — it arrives with RECEIVE_FIN normally,
       # but WebTransport CONNECT streams don't FIN. The handle comes from
       # the RECEIVE event data (first 8 bytes are the stream handle).
@@ -858,12 +858,42 @@ module Quicsilver
         stream: stream,
         headers: headers
       )
-      @webtransport_sessions[stream_id] = session
-      connection.track_client_stream(stream_id)
 
-      @webtransport_callback.call(session)
+      if @webtransport_callback
+        @webtransport_sessions[stream_id] = session
+        connection.track_client_stream(stream_id)
+        @webtransport_callback.call(session)
+      else
+        dispatch_webtransport_to_rack(connection, stream_id, headers, session, early_data: early_data)
+      end
     rescue => e
       Quicsilver.logger.error("WebTransport error: #{e.class} - #{e.message}")
+    end
+
+    def dispatch_webtransport_to_rack(connection, stream_id, headers, session, early_data: false)
+      request, _body = @request_handler.adapter.build_request(
+        headers,
+        remote_address: connection.remote_address,
+        remote_port: connection.remote_port,
+        transport_context: connection.request_context(stream_id: stream_id)
+      )
+
+      response = @request_handler.adapter.call(request) do |env|
+        env["quicsilver.context"] = Rack::Context.new(
+          stream_id: stream_id,
+          early_data: early_data,
+          webtransport: session,
+          metadata: connection.request_context(stream_id: stream_id)
+        )
+        env["quicsilver.webtransport"] = session
+      end
+
+      if session.accepted?
+        @webtransport_sessions[stream_id] = session
+        connection.track_client_stream(stream_id)
+      else
+        session.reject!(response.status)
+      end
     end
 
     def webtransport_stream?(data)
