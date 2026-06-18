@@ -34,6 +34,10 @@ module Quicsilver
         Quicsilver.send_stream(@stream_handle, data, fin)
       end
 
+      def close_write
+        send("".b, fin: true)
+      end
+
       def reset(error_code = Protocol::H3_REQUEST_CANCELLED)
         return unless writable?
         Quicsilver.stream_reset(@stream_handle, error_code)

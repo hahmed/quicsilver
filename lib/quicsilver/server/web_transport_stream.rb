@@ -8,9 +8,8 @@ module Quicsilver
     # and ordered — unlike datagrams, nothing is dropped.
     #
     # Usage:
-    #   session.on_stream do |stream|
-    #     stream.on_data { |data| stream.write("echo: #{data}") }
-    #     stream.on_close { cleanup }
+    #   while data = stream.read
+    #     stream.write("echo: #{data}")
     #   end
     #
     #   # Server-initiated:
@@ -27,8 +26,11 @@ module Quicsilver
         @stream_id = stream_id
         @direction = direction
         @open = true
-        @data_callback = nil
-        @close_callback = nil
+        @closed = false
+        # Receive-side queue backing stream.read. The write side sends directly
+        # to the underlying QUIC stream; this queue only buffers DATA payloads
+        # received from the peer.
+        @input = Transport::BlockingQueue.new
         @buffer = "".b
       end
 
@@ -40,18 +42,16 @@ module Quicsilver
       end
 
       def close
-        return unless @open
-        @open = false
-        @stream.send("".b, fin: true) rescue nil
-        @close_callback&.call
+        return if @closed
+        @stream.close_write rescue nil
+        notify_close
       end
 
-      def on_data(&block)
-        @data_callback = block
-      end
-
-      def on_close(&block)
-        @close_callback = block
+      # Read the next DATA payload from this WebTransport stream. Blocks until
+      # data arrives or the stream closes. Returns nil when closed. This is
+      # currently chunk-oriented: each call returns one received DATA payload.
+      def read
+        @input.pop
       end
 
       def open?
@@ -78,7 +78,7 @@ module Quicsilver
 
           if type == Protocol::FRAME_DATA
             payload = @buffer.byteslice(header_len, length)
-            @data_callback&.call(payload)
+            @input.push(payload) if @open
           end
 
           @buffer = @buffer.byteslice(header_len + length..-1) || "".b
@@ -87,8 +87,10 @@ module Quicsilver
 
       # Called by Server when the stream is reset or closed. :nodoc:
       def notify_close
+        return if @closed
+        @closed = true
         @open = false
-        @close_callback&.call
+        @input.close
       end
     end
   end

@@ -6,35 +6,29 @@ class WebTransportStreamTest < Minitest::Test
 
   # === Receiving data ===
 
-  def test_receives_single_data_frame
+  def test_read_receives_single_data_frame
     stream = build_stream
-    received = nil
-    stream.on_data { |data| received = data }
-
     stream.receive_data(data_frame("hello"))
-    assert_equal "hello", received
+    assert_equal "hello", stream.read
   end
 
-  def test_receives_multiple_frames
+  def test_read_receives_multiple_frames
     stream = build_stream
-    chunks = []
-    stream.on_data { |data| chunks << data }
-
     stream.receive_data(data_frame("one") + data_frame("two"))
-    assert_equal %w[one two], chunks
+    assert_equal "one", stream.read
+    assert_equal "two", stream.read
   end
 
-  def test_handles_partial_frame_across_receives
+  def test_read_handles_partial_frame_across_receives
     stream = build_stream
-    chunks = []
-    stream.on_data { |data| chunks << data }
-
     frame = data_frame("complete")
+    reader = Thread.new { stream.read }
+
     stream.receive_data(frame.byteslice(0, 3))
-    assert_empty chunks
+    refute reader.join(0.01)
 
     stream.receive_data(frame.byteslice(3..-1))
-    assert_equal ["complete"], chunks
+    assert_equal "complete", reader.value
   end
 
   # === Lifecycle ===
@@ -49,20 +43,16 @@ class WebTransportStreamTest < Minitest::Test
     refute stream.open?
   end
 
-  def test_close_fires_on_close_callback
+  def test_close_unblocks_read_with_nil
     stream = build_stream(:closeable)
-    closed = false
-    stream.on_close { closed = true }
     stream.close
-    assert closed
+    assert_nil stream.read
   end
 
-  def test_notify_close_fires_callback_and_closes
+  def test_notify_close_unblocks_read_with_nil
     stream = build_stream
-    closed = false
-    stream.on_close { closed = true }
     stream.notify_close
-    assert closed
+    assert_nil stream.read
     refute stream.open?
   end
 
@@ -77,10 +67,8 @@ class WebTransportStreamTest < Minitest::Test
 
   def test_bidi_stream_allows_write_and_data
     stream = build_stream
-    received = nil
-    stream.on_data { |data| received = data }
     stream.receive_data(data_frame("hello"))
-    assert_equal "hello", received
+    assert_equal "hello", stream.read
   end
 
   def test_receive_only_stream_raises_on_write
@@ -90,10 +78,8 @@ class WebTransportStreamTest < Minitest::Test
 
   def test_receive_only_stream_receives_data
     stream = build_stream(:receive_only)
-    received = nil
-    stream.on_data { |data| received = data }
     stream.receive_data(data_frame("from client"))
-    assert_equal "from client", received
+    assert_equal "from client", stream.read
   end
 
   private
@@ -108,7 +94,7 @@ class WebTransportStreamTest < Minitest::Test
 
     case variant
     when :closeable
-      stream.expect(:send, true, [String], fin: true)
+      stream.expect(:close_write, true)
     when :receive_only
       return Quicsilver::Server::WebTransportStream.new(
         session: session, stream: stream, stream_id: 4, direction: :receive_only

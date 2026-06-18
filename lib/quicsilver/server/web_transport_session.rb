@@ -11,7 +11,9 @@ module Quicsilver
     # Usage from Rack:
     #   session = env["quicsilver.context"].webtransport
     #   session.accept!
-    #   session.on_datagram { |data| session.send_datagram("echo: #{data}") }
+    #   while data = session.read_datagram
+    #     session.send_datagram("echo: #{data}")
+    #   end
     #
     class WebTransportSession
       attr_reader :path, :authority, :headers, :connection, :stream_id
@@ -88,15 +90,19 @@ module Quicsilver
         @headers = headers
         @accepted = false
         @open = false
-        @datagram_callback = nil
-        @stream_callback = nil
-        @uni_stream_callback = nil
-        @close_callback = nil
+        @closed = false
+        # Receive-side queues backing the IO-shaped API. Streams opened by
+        # this endpoint are returned directly from open_stream/open_uni_stream;
+        # streams opened by the peer are accepted through these queues.
+        @datagram_queue = Transport::DatagramQueue.new
+        @stream_accept_queue = Transport::BlockingQueue.new
+        @uni_stream_accept_queue = Transport::BlockingQueue.new
         @streams = {}  # stream_id => WebTransportStream
       end
 
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
       def accept!
+        raise "Session closed" if @closed
         return if @accepted
 
         frame = Protocol.build_headers_frame([[:":status", "200"]])
@@ -111,14 +117,23 @@ module Quicsilver
         Quicsilver.datagram_send(@connection.data, data.to_s.b)
       end
 
-      # Register a callback for datagrams from the client.
-      def on_datagram(&block)
-        @datagram_callback = block
+      # Read the next datagram from the peer. Blocks until a datagram arrives
+      # or the session closes. Returns nil when closed. Datagrams are unreliable
+      # and backed by a bounded queue; excess datagrams are dropped.
+      def read_datagram
+        @datagram_queue.pop
       end
 
-      # Register a callback for incoming streams from the client.
-      def on_stream(&block)
-        @stream_callback = block
+      # Accept the next peer-initiated bidirectional stream. Blocks until a
+      # stream arrives or the session closes. Returns nil when closed.
+      def accept_stream
+        @stream_accept_queue.pop
+      end
+
+      # Accept the next peer-initiated unidirectional stream. Blocks until a
+      # stream arrives or the session closes. Returns nil when closed.
+      def accept_uni_stream
+        @uni_stream_accept_queue.pop
       end
 
       # Open a server-initiated bidirectional stream to the client.
@@ -136,11 +151,6 @@ module Quicsilver
         wt_stream
       end
 
-      # Register a callback for incoming unidirectional streams (client → server, read-only).
-      def on_uni_stream(&block)
-        @uni_stream_callback = block
-      end
-
       # Open a server-initiated unidirectional stream to the client (write-only).
       def open_uni_stream
         raise "Session not accepted" unless @accepted
@@ -155,11 +165,6 @@ module Quicsilver
         )
         @streams[wt_stream.stream_id] = wt_stream
         wt_stream
-      end
-
-      # Register a callback for session close.
-      def on_close(&block)
-        @close_callback = block
       end
 
       def accepted?
@@ -189,24 +194,34 @@ module Quicsilver
       # Sends a WT_CLOSE_SESSION capsule (RFC draft-ietf-webtrans-http3)
       # on the CONNECT stream before closing.
       def close(code: 0, reason: "")
-        return unless @open
-        @open = false
-        write_close_reason(code, reason)
-        @stream.reset(Protocol::H3_NO_ERROR) rescue nil
+        return if @closed
+        if @open
+          write_close_reason(code, reason)
+          @stream.reset(Protocol::H3_NO_ERROR) rescue nil
+        end
         notify_close
       end
 
       # Called by Server when a datagram arrives for this session.
       def receive_datagram(data) # :nodoc:
-        @datagram_callback&.call(data)
+        @datagram_queue.push(data) if @open
+      end
+
+      # Number of inbound datagrams dropped because the receive queue was full.
+      def datagrams_dropped
+        @datagram_queue.dropped
       end
 
       # Called by Server when the CONNECT stream is reset/closed.
       def notify_close # :nodoc:
+        return if @closed
+        @closed = true
         @open = false
+        @datagram_queue.close
+        @stream_accept_queue.close
+        @uni_stream_accept_queue.close
         @streams.each_value(&:notify_close)
         @streams.clear
-        @close_callback&.call
       end
 
       # Called by Server when a new stream with our session ID arrives.
@@ -216,7 +231,7 @@ module Quicsilver
           session: self, stream: stream, stream_id: stream_id
         )
         @streams[stream_id] = wt_stream
-        @stream_callback&.call(wt_stream)
+        @stream_accept_queue.push(wt_stream)
         wt_stream
       end
 
@@ -233,7 +248,7 @@ module Quicsilver
           direction: :receive_only
         )
         @streams[stream_id] = wt_stream
-        @uni_stream_callback&.call(wt_stream)
+        @uni_stream_accept_queue.push(wt_stream)
         wt_stream
       end
 

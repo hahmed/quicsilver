@@ -37,14 +37,6 @@ class WebTransportSessionTest < Minitest::Test
     refute session.open?
   end
 
-  def test_close_fires_on_close_callback
-    session = build_session_accepted
-    closed = false
-    session.on_close { closed = true }
-    session.close
-    assert closed
-  end
-
   def test_close_with_error_code_and_reason
     session = build_session_accepted
     session.close(code: 42, reason: "maintenance")
@@ -61,33 +53,54 @@ class WebTransportSessionTest < Minitest::Test
 
   def test_close_closes_all_streams
     session = build_session_accepted
-    closed_count = 0
-    session.on_stream { |s| s.on_close { closed_count += 1 } }
-    session.add_stream(99999, 4)
-    session.add_stream(99999, 8)
+    stream1 = session.add_stream(99999, 4)
+    stream2 = session.add_stream(99999, 8)
 
     session.close
-    assert_equal 2, closed_count
+    refute stream1.open?
+    refute stream2.open?
   end
 
   # === Datagrams ===
 
-  def test_on_datagram_receives_data
-    session = build_session
-    received = nil
-    session.on_datagram { |data| received = data }
+  def test_read_datagram_receives_data
+    session = build_session_accepted
     session.receive_datagram("hello")
-    assert_equal "hello", received
+    assert_equal "hello", session.read_datagram
+  end
+
+  def test_read_datagram_returns_nil_when_session_closes
+    session = build_session_accepted
+    session.close
+    assert_nil session.read_datagram
+  end
+
+  def test_datagrams_dropped_tracks_full_datagram_queue
+    session = build_session_accepted
+    queue = Quicsilver::Transport::DatagramQueue.new(max_length: 1)
+    session.instance_variable_set(:@datagram_queue, queue)
+
+    session.receive_datagram("first")
+    session.receive_datagram("second")
+
+    assert_equal 1, session.datagrams_dropped
+    assert_equal "first", session.read_datagram
   end
 
   # === Bidi streams ===
 
-  def test_on_stream_fires_when_bidi_stream_added
+  def test_accept_stream_receives_bidi_stream
     session = build_session
-    received = nil
-    session.on_stream { |s| received = s }
-    session.add_stream(99999, 4)
-    assert_kind_of Quicsilver::Server::WebTransportStream, received
+    added = session.add_stream(99999, 4)
+    accepted = session.accept_stream
+    assert_same added, accepted
+    assert_kind_of Quicsilver::Server::WebTransportStream, accepted
+  end
+
+  def test_accept_stream_returns_nil_when_session_closes
+    session = build_session_accepted
+    session.close
+    assert_nil session.accept_stream
   end
 
   def test_stream_accessor_returns_stream_by_id
@@ -99,28 +112,31 @@ class WebTransportSessionTest < Minitest::Test
 
   def test_remove_stream_closes_and_removes
     session = build_session
-    closed = false
-    session.on_stream { |s| s.on_close { closed = true } }
-    session.add_stream(99999, 4)
+    stream = session.add_stream(99999, 4)
 
     session.remove_stream(4)
-    assert closed
+    refute stream.open?
     assert_nil session.stream(4)
   end
 
   # === Uni streams ===
 
-  def test_on_uni_stream_fires_when_uni_stream_added
+  def test_accept_uni_stream_receives_uni_stream
     session = build_session
-    received = nil
-    session.on_uni_stream { |s| received = s }
-    session.add_uni_stream(99999, 12)
-    assert_kind_of Quicsilver::Server::WebTransportStream, received
+    added = session.add_uni_stream(99999, 12)
+    accepted = session.accept_uni_stream
+    assert_same added, accepted
+    assert_kind_of Quicsilver::Server::WebTransportStream, accepted
+  end
+
+  def test_accept_uni_stream_returns_nil_when_session_closes
+    session = build_session_accepted
+    session.close
+    assert_nil session.accept_uni_stream
   end
 
   def test_incoming_uni_stream_is_receive_only
     session = build_session
-    session.on_uni_stream { |_s| }
     wt_stream = session.add_uni_stream(99999, 12)
 
     assert_raises(RuntimeError) { wt_stream.write("nope") }
@@ -167,14 +183,12 @@ class WebTransportSessionTest < Minitest::Test
   def test_accept_stream_routes_to_correct_session
     session = build_session
     sessions = { 0 => session }
-    received = nil
-    session.on_stream { |s| received = s }
-
     prefix = Quicsilver::Protocol.encode_varint(0x41) +
              Quicsilver::Protocol.encode_varint(0)
 
-    Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
-    assert_kind_of Quicsilver::Server::WebTransportStream, received
+    routed = Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
+    assert_kind_of Quicsilver::Server::WebTransportStream, routed
+    assert_same routed, session.accept_stream
   end
 
   def test_accept_stream_ignores_unknown_session
