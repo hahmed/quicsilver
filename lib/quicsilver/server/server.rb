@@ -96,7 +96,6 @@ module Quicsilver
       @connection_closed_callback = nil
       @connection_migrated_callback = nil
       @connection_error_callback = nil
-      @webtransport_callback = nil
       @webtransport_sessions = {}  # stream_id => WebTransportSession
 
       protocol_app = wrap_app(@app, @server_configuration.mode)
@@ -173,19 +172,6 @@ module Quicsilver
     #
     def on_connection_error(&block)
       @connection_error_callback = block
-    end
-
-    # Register a callback for WebTransport sessions (RFC 9220 + RFC 9297).
-    # Sessions arrive via Extended CONNECT with :protocol "webtransport".
-    #
-    #   server.on_webtransport do |session|
-    #     session.accept!
-    #     session.on_message { |data| session.send("echo: #{data}") }
-    #     session.on_close { cleanup }
-    #   end
-    #
-    def on_webtransport(&block)
-      @webtransport_callback = block
     end
 
     def start
@@ -859,13 +845,7 @@ module Quicsilver
         headers: headers
       )
 
-      if @webtransport_callback
-        @webtransport_sessions[stream_id] = session
-        connection.track_client_stream(stream_id)
-        @webtransport_callback.call(session)
-      else
-        dispatch_webtransport_to_rack(connection, stream_id, headers, session, early_data: early_data)
-      end
+      dispatch_webtransport_to_rack(connection, stream_id, headers, session, early_data: early_data)
     rescue => e
       Quicsilver.logger.error("WebTransport error: #{e.class} - #{e.message}")
     end

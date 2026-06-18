@@ -8,16 +8,10 @@ module Quicsilver
     # - Datagrams: unreliable, unordered (live cursors, typing indicators)
     # - Streams: reliable, ordered (chat messages, RPC)
     #
-    # Usage:
-    #   server.on_webtransport do |session|
-    #     session.accept!
-    #     session.on_datagram { |data| session.send_datagram("echo: #{data}") }
-    #     session.on_stream { |stream|
-    #       stream.on_data { |data| stream.write("echo: #{data}") }
-    #       stream.on_close { puts "stream closed" }
-    #     }
-    #     session.on_close { puts "session closed" }
-    #   end
+    # Usage from Rack:
+    #   session = env["quicsilver.context"].webtransport
+    #   session.accept!
+    #   session.on_datagram { |data| session.send_datagram("echo: #{data}") }
     #
     class WebTransportSession
       attr_reader :path, :authority, :headers, :connection, :stream_id
