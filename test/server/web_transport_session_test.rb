@@ -87,6 +87,19 @@ class WebTransportSessionTest < Minitest::Test
     assert_equal "first", session.read_datagram
   end
 
+  def test_each_datagram_yields_until_session_closes
+    session = build_session_accepted
+    session.receive_datagram("one")
+    session.receive_datagram("two")
+    session.close
+
+    assert_equal ["one", "two"], session.each_datagram.to_a
+  end
+
+  def test_each_datagram_enumerator_has_unknown_size
+    assert_nil build_session.each_datagram.size
+  end
+
   # === Bidi streams ===
 
   def test_accept_stream_receives_bidi_stream
@@ -108,6 +121,19 @@ class WebTransportSessionTest < Minitest::Test
     session.add_stream(99999, 4)
     assert_equal 4, session.stream(4).stream_id
     assert_nil session.stream(999)
+  end
+
+  def test_each_stream_yields_until_session_closes
+    session = build_session_accepted
+    first = session.add_stream(99999, 4)
+    second = session.add_stream(99999, 8)
+    session.close
+
+    assert_equal [first, second], session.each_stream.to_a
+  end
+
+  def test_each_stream_enumerator_has_unknown_size
+    assert_nil build_session.each_stream.size
   end
 
   def test_remove_stream_closes_and_removes
@@ -140,6 +166,19 @@ class WebTransportSessionTest < Minitest::Test
     wt_stream = session.add_uni_stream(99999, 12)
 
     assert_raises(RuntimeError) { wt_stream.write("nope") }
+  end
+
+  def test_each_uni_stream_yields_until_session_closes
+    session = build_session_accepted
+    first = session.add_uni_stream(99999, 12)
+    second = session.add_uni_stream(99999, 16)
+    session.close
+
+    assert_equal [first, second], session.each_uni_stream.to_a
+  end
+
+  def test_each_uni_stream_enumerator_has_unknown_size
+    assert_nil build_session.each_uni_stream.size
   end
 
   # === Protocol detection ===

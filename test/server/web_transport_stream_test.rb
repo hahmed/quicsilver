@@ -31,6 +31,18 @@ class WebTransportStreamTest < Minitest::Test
     assert_equal "complete", reader.value
   end
 
+  def test_each_yields_until_stream_closes
+    stream = build_stream
+    stream.receive_data(data_frame("one") + data_frame("two"))
+    stream.notify_close
+
+    assert_equal ["one", "two"], stream.each.to_a
+  end
+
+  def test_each_enumerator_has_unknown_size
+    assert_nil build_stream.each.size
+  end
+
   # === Lifecycle ===
 
   def test_open_by_default

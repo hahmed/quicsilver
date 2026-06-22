@@ -54,6 +54,17 @@ module Quicsilver
         @input.pop
       end
 
+      # Iterate over received DATA payloads until the stream closes. The
+      # returned Enumerator has unknown size because this is a live transport
+      # source.
+      def each
+        return enum_for(:each) unless block_given?
+
+        while (data = read)
+          yield data
+        end
+      end
+
       def open?
         @open
       end

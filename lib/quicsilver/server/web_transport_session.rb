@@ -124,16 +124,48 @@ module Quicsilver
         @datagram_queue.pop
       end
 
+      # Iterate over received datagrams until the session closes. The returned
+      # Enumerator has unknown size because this is a live transport source.
+      def each_datagram
+        return enum_for(:each_datagram) unless block_given?
+
+        while (datagram = read_datagram)
+          yield datagram
+        end
+      end
+
       # Accept the next peer-initiated bidirectional stream. Blocks until a
       # stream arrives or the session closes. Returns nil when closed.
       def accept_stream
         @stream_accept_queue.pop
       end
 
+      # Iterate over peer-initiated bidirectional streams until the session
+      # closes. The returned Enumerator has unknown size because this is a live
+      # transport source.
+      def each_stream
+        return enum_for(:each_stream) unless block_given?
+
+        while (stream = accept_stream)
+          yield stream
+        end
+      end
+
       # Accept the next peer-initiated unidirectional stream. Blocks until a
       # stream arrives or the session closes. Returns nil when closed.
       def accept_uni_stream
         @uni_stream_accept_queue.pop
+      end
+
+      # Iterate over peer-initiated unidirectional streams until the session
+      # closes. The returned Enumerator has unknown size because this is a live
+      # transport source.
+      def each_uni_stream
+        return enum_for(:each_uni_stream) unless block_given?
+
+        while (stream = accept_uni_stream)
+          yield stream
+        end
       end
 
       # Open a server-initiated bidirectional stream to the client.
