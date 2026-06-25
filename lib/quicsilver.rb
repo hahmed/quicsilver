@@ -23,7 +23,6 @@ require "protocol/rack"
 require_relative "quicsilver/rack/context"
 
 # Transport layer
-require_relative "quicsilver/transport/blocking_queue"
 require_relative "quicsilver/transport/datagram_queue"
 require_relative "quicsilver/transport/stream_id"
 require_relative "quicsilver/transport/stream"

@@ -96,7 +96,9 @@ module Quicsilver
       @connection_closed_callback = nil
       @connection_migrated_callback = nil
       @connection_error_callback = nil
-      @webtransport_sessions = {}  # stream_id => WebTransportSession
+      @webtransport_sessions = {}  # CONNECT stream_id/session_id => WebTransportSession
+      @webtransport_streams = {}   # child stream_id => WebTransportStream
+      @webtransport_stream_sessions = {} # child stream_id => WebTransportSession
 
       protocol_app = wrap_app(@app, @server_configuration.mode)
 
@@ -366,8 +368,7 @@ module Quicsilver
         # Close any WebTransport sessions on this connection
         @webtransport_sessions.each do |sid, session|
           if session.connection == connection
-            session.notify_close
-            @webtransport_sessions.delete(sid)
+            unregister_wt_session(sid)&.notify_close
           end
         end
         @connection_closed_callback&.call(connection) if connection
@@ -390,10 +391,11 @@ module Quicsilver
         if connection.critical_stream?(stream_id)
           Quicsilver.logger.error("Critical stream #{stream_id} reset by peer")
           Quicsilver.connection_shutdown(connection_handle, Protocol::H3_CLOSED_CRITICAL_STREAM, false) rescue nil
-        elsif (wt = @webtransport_sessions.delete(stream_id))
+        elsif (wt = unregister_wt_session(stream_id))
           wt.notify_close
           connection.remove_stream(stream_id)
         elsif (wt_session = wt_session_for_stream(stream_id))
+          unregister_wt_stream(stream_id)
           wt_session.remove_stream(stream_id)
         else
           cancel_stream(connection, stream_id)
@@ -869,7 +871,7 @@ module Quicsilver
       end
 
       if session.accepted?
-        @webtransport_sessions[stream_id] = session
+        register_wt_session(session)
         connection.track_client_stream(stream_id)
       else
         session.reject!(response.status)
@@ -891,6 +893,7 @@ module Quicsilver
       return unless session
 
       wt_stream = session.add_uni_stream(stream_handle, stream_id)
+      register_wt_stream(wt_stream)
       wt_stream.receive_data(initial_data) if initial_data && !initial_data.empty?
     rescue => e
       Quicsilver.logger.error("WebTransport uni stream error: #{e.class} - #{e.message}")
@@ -898,17 +901,42 @@ module Quicsilver
 
     # Accept an incoming WebTransport stream — parse prefix and route to session
     def accept_webtransport_stream(connection, stream_id, stream_handle, payload)
-      WebTransportSession.accept_stream(@webtransport_sessions, stream_id, stream_handle, payload)
+      wt_stream = WebTransportSession.accept_stream(@webtransport_sessions, stream_id, stream_handle, payload)
+      register_wt_stream(wt_stream) if wt_stream
+      wt_stream
     rescue => e
       Quicsilver.logger.error("WebTransport stream error: #{e.class} - #{e.message}")
     end
 
+    def register_wt_session(session)
+      @webtransport_sessions[session.stream_id] = session
+    end
+
+    def unregister_wt_session(session_id)
+      session = @webtransport_sessions.delete(session_id)
+      return unless session
+
+      session.stream_ids.each { |stream_id| unregister_wt_stream(stream_id) }
+      session
+    end
+
+    def register_wt_stream(stream)
+      @webtransport_streams[stream.stream_id] = stream
+      @webtransport_stream_sessions[stream.stream_id] = stream.session
+      stream
+    end
+
+    def unregister_wt_stream(stream_id)
+      @webtransport_streams.delete(stream_id)
+      @webtransport_stream_sessions.delete(stream_id)
+    end
+
     def active_wt_stream(stream_id)
-      WebTransportSession.find_stream(@webtransport_sessions, stream_id)
+      @webtransport_streams[stream_id]
     end
 
     def wt_session_for_stream(stream_id)
-      WebTransportSession.find_session_for_stream(@webtransport_sessions, stream_id)
+      @webtransport_stream_sessions[stream_id]
     end
 
     def contains_headers_frame?(data)

@@ -56,23 +56,6 @@ module Quicsilver
         wt_stream
       end
 
-      # Find a stream by ID across all sessions.
-      def self.find_stream(sessions, stream_id)
-        sessions.each_value do |session|
-          stream = session.stream(stream_id)
-          return stream if stream
-        end
-        nil
-      end
-
-      # Find the session that owns a given stream.
-      def self.find_session_for_stream(sessions, stream_id)
-        sessions.each_value do |session|
-          return session if session.stream(stream_id)
-        end
-        nil
-      end
-
       # Parse uni stream data after Connection strips the 0x54 type byte.
       # Payload is [session_id varint][data...]
       def self.parse_uni_stream_data(payload)
@@ -91,12 +74,14 @@ module Quicsilver
         @accepted = false
         @open = false
         @closed = false
-        # Receive-side queues backing the IO-shaped API. Streams opened by
+        # Receive-side buffers backing the IO-shaped API. Streams opened by
         # this endpoint are returned directly from open_stream/open_uni_stream;
-        # streams opened by the peer are accepted through these queues.
+        # streams opened by the peer are accepted through these queues. Plain
+        # Ruby Queue is enough here; if Falcon/Async needs a fiber-aware wait
+        # primitive later, this is the seam to revisit.
         @datagram_queue = Transport::DatagramQueue.new
-        @stream_accept_queue = Transport::BlockingQueue.new
-        @uni_stream_accept_queue = Transport::BlockingQueue.new
+        @stream_accept_queue = build_receive_queue
+        @uni_stream_accept_queue = build_receive_queue
         @streams = {}  # stream_id => WebTransportStream
       end
 
@@ -176,9 +161,7 @@ module Quicsilver
                  Protocol.encode_varint(@stream_id)
         stream.send(prefix)
 
-        wt_stream = WebTransportStream.new(
-          session: self, stream: stream, stream_id: stream.stream_id
-        )
+        wt_stream = build_stream(stream: stream, stream_id: stream.stream_id)
         @streams[wt_stream.stream_id] = wt_stream
         wt_stream
       end
@@ -191,9 +174,8 @@ module Quicsilver
                  Protocol.encode_varint(@stream_id)
         stream.send(prefix)
 
-        wt_stream = WebTransportStream.new(
-          session: self, stream: stream, stream_id: stream.stream_id,
-          direction: :send_only
+        wt_stream = build_stream(
+          stream: stream, stream_id: stream.stream_id, direction: :send_only
         )
         @streams[wt_stream.stream_id] = wt_stream
         wt_stream
@@ -220,6 +202,11 @@ module Quicsilver
       # Look up a stream by ID within this session.
       def stream(stream_id)
         @streams[stream_id]
+      end
+
+      # Stream IDs currently owned by this session.
+      def stream_ids
+        @streams.keys
       end
 
       # Close the session with an optional error code and message.
@@ -259,11 +246,9 @@ module Quicsilver
       # Called by Server when a new stream with our session ID arrives.
       def add_stream(stream_handle, stream_id) # :nodoc:
         stream = Transport::Stream.new(stream_handle)
-        wt_stream = WebTransportStream.new(
-          session: self, stream: stream, stream_id: stream_id
-        )
+        wt_stream = build_stream(stream: stream, stream_id: stream_id)
         @streams[stream_id] = wt_stream
-        @stream_accept_queue.push(wt_stream)
+        @stream_accept_queue << wt_stream
         wt_stream
       end
 
@@ -275,12 +260,11 @@ module Quicsilver
       # Called by Server when an incoming uni stream arrives.
       def add_uni_stream(stream_handle, stream_id) # :nodoc:
         stream = Transport::Stream.new(stream_handle)
-        wt_stream = WebTransportStream.new(
-          session: self, stream: stream, stream_id: stream_id,
-          direction: :receive_only
+        wt_stream = build_stream(
+          stream: stream, stream_id: stream_id, direction: :receive_only
         )
         @streams[stream_id] = wt_stream
-        @uni_stream_accept_queue.push(wt_stream)
+        @uni_stream_accept_queue << wt_stream
         wt_stream
       end
 
@@ -291,6 +275,19 @@ module Quicsilver
       end
 
       private
+
+      def build_receive_queue
+        Queue.new
+      end
+
+      def build_stream(stream:, stream_id:, direction: :bidi)
+        WebTransportStream.new(
+          session: self,
+          stream: stream,
+          stream_id: stream_id,
+          direction: direction
+        )
+      end
 
       def write_close_reason(code, reason)
         reason = reason.to_s

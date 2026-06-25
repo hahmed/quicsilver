@@ -29,8 +29,10 @@ module Quicsilver
         @closed = false
         # Receive-side queue backing stream.read. The write side sends directly
         # to the underlying QUIC stream; this queue only buffers DATA payloads
-        # received from the peer.
-        @input = Transport::BlockingQueue.new
+        # received from the peer. Plain Ruby Queue is enough here; if
+        # Falcon/Async needs a fiber-aware wait primitive later, this is the
+        # seam to revisit.
+        @input = build_receive_queue
         @buffer = "".b
       end
 
@@ -102,6 +104,12 @@ module Quicsilver
         @closed = true
         @open = false
         @input.close
+      end
+
+      private
+
+      def build_receive_queue
+        Queue.new
       end
     end
   end

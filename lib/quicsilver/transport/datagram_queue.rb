@@ -7,7 +7,6 @@ module Quicsilver
     # Unlike stream data, datagrams are allowed to drop. Mature QUIC stacks bound
     # datagram queues; this queue drops new datagrams when full and tracks drops.
     class DatagramQueue
-      CLOSED = Object.new.freeze
       DEFAULT_MAX_LENGTH = 128
 
       attr_reader :dropped
@@ -18,7 +17,6 @@ module Quicsilver
         @length = 0
         @byte_size = 0
         @dropped = 0
-        @closed = false
         @mutex = Mutex.new
       end
 
@@ -26,7 +24,7 @@ module Quicsilver
         data = data.to_s.b
 
         @mutex.synchronize do
-          return false if @closed
+          return false if @queue.closed?
 
           if @length >= @max_length
             @dropped += 1
@@ -42,7 +40,7 @@ module Quicsilver
 
       def pop
         item = @queue.pop
-        return nil if item.equal?(CLOSED)
+        return nil unless item
 
         @mutex.synchronize do
           @length -= 1
@@ -53,16 +51,14 @@ module Quicsilver
       end
 
       def close
-        @mutex.synchronize do
-          return false if @closed
-          @closed = true
-          @queue << CLOSED
-          true
-        end
+        return false if @queue.closed?
+
+        @queue.close
+        true
       end
 
       def closed?
-        @closed
+        @queue.closed?
       end
 
       def length
