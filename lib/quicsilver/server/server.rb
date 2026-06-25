@@ -841,7 +841,7 @@ module Quicsilver
       stream = Transport::InboundStream.new(stream_id)
       stream.stream_handle = event.handle
 
-      session = WebTransportSession.new(
+      session = webtransport_session_class.new(
         connection: connection,
         stream: stream,
         headers: headers
@@ -900,6 +900,10 @@ module Quicsilver
     end
 
     # Accept an incoming WebTransport stream — parse prefix and route to session
+    def webtransport_session_class
+      WebTransportSession
+    end
+
     def accept_webtransport_stream(connection, stream_id, stream_handle, payload)
       wt_stream = WebTransportSession.accept_stream(@webtransport_sessions, stream_id, stream_handle, payload)
       register_wt_stream(wt_stream) if wt_stream
