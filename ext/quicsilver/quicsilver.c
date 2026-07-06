@@ -378,8 +378,12 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             if (Event->SEND_COMPLETE.ClientContext != NULL) {
                 free(Event->SEND_COMPLETE.ClientContext);
             }
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                "SEND_COMPLETE", ctx->stream_id, (const char*)&Stream, sizeof(HQUIC), 0);
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+            dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                "STREAM_SHUTDOWN_COMPLETE", ctx->stream_id, (const char*)&Stream, sizeof(HQUIC), 0);
             ctx->shutdown = 1;
             MsQuic->SetCallbackHandler(Stream, (void*)StreamCallback, NULL);
             free(ctx);

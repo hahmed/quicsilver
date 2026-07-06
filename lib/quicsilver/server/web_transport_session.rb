@@ -16,29 +16,23 @@ module Quicsilver
     class WebTransportSession
       attr_reader :path, :authority, :headers, :connection, :stream_id
 
-      # WebTransport stream frame types (draft-ietf-webtrans-http3)
+      # WebTransport stream types (draft-ietf-webtrans-http3), matching aioquic/Chrome.
       WT_STREAM_BIDI = 0x41
       WT_STREAM_UNI = 0x54
       WT_CLOSE_SESSION = 0x2843
       MAX_CLOSE_MESSAGE_LENGTH = 1024
 
-      def self.webtransport_stream?(data)
-        return false if data.nil? || data.bytesize < 2
-        type, _ = Protocol.decode_varint_str(data, 0)
-        type == WT_STREAM_BIDI || type == WT_STREAM_UNI
-      end
-
-      # Parse the WebTransport stream prefix: [type varint][session_id varint]
+      # Parse a bidirectional WebTransport stream prefix:
+      # [type=0x41 varint][session_id varint][data...]
       # Returns [session_id, remainder] or nil if malformed.
       def self.parse_stream_prefix(payload)
-        offset = 0
-        _type, type_len = Protocol.decode_varint_str(payload, offset)
-        return nil if type_len == 0
-        offset += type_len
-        session_id, sid_len = Protocol.decode_varint_str(payload, offset)
+        type, type_len = Protocol.decode_varint_str(payload, 0)
+        return nil unless type == WT_STREAM_BIDI && type_len > 0
+
+        session_id, sid_len = Protocol.decode_varint_str(payload, type_len)
         return nil if sid_len == 0
-        offset += sid_len
-        [session_id, payload.byteslice(offset..-1) || "".b]  # [session_id, initial_data]
+
+        [session_id, payload.byteslice((type_len + sid_len)..-1) || "".b]
       end
 
       # Route an incoming WebTransport stream to the right session.
@@ -93,6 +87,7 @@ module Quicsilver
         @uni_stream_callback = nil
         @close_callback = nil
         @streams = {}  # stream_id => WebTransportStream
+        @connect_buffer = "".b
       end
 
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
@@ -189,11 +184,35 @@ module Quicsilver
       # Sends a WT_CLOSE_SESSION capsule (RFC draft-ietf-webtrans-http3)
       # on the CONNECT stream before closing.
       def close(code: 0, reason: "")
-        return unless @open
+        was_open = @open
         @open = false
-        write_close_reason(code, reason)
-        @stream.reset(Protocol::H3_NO_ERROR) rescue nil
+
+        if was_open
+          write_close_reason(code, reason)
+          @stream.reset(Protocol::H3_NO_ERROR) rescue nil
+        end
+
         notify_close
+      end
+
+      # Called by Server when data arrives on the CONNECT/session stream. :nodoc:
+      def receive_connect_data(data)
+        @connect_buffer << data if data && !data.empty?
+
+        loop do
+          type, type_len = Protocol.decode_varint_str(@connect_buffer, 0)
+          return if type_len == 0
+
+          length, length_len = Protocol.decode_varint_str(@connect_buffer, type_len)
+          return if length_len == 0
+
+          header_len = type_len + length_len
+          return if @connect_buffer.bytesize < header_len + length
+
+          payload = @connect_buffer.byteslice(header_len, length) || "".b
+          handle_capsule(type, payload)
+          @connect_buffer = @connect_buffer.byteslice(header_len + length..-1) || "".b
+        end
       end
 
       # Called by Server when a datagram arrives for this session.
@@ -203,6 +222,7 @@ module Quicsilver
 
       # Called by Server when the CONNECT stream is reset/closed.
       def notify_close # :nodoc:
+        Quicsilver.logger.debug("WebTransport session #{@stream_id} notify_close")
         @open = false
         @streams.each_value(&:notify_close)
         @streams.clear
@@ -244,6 +264,18 @@ module Quicsilver
       end
 
       private
+
+      def handle_capsule(type, payload)
+        case type
+        when WT_CLOSE_SESSION
+          code = payload.bytesize >= 4 ? payload.byteslice(0, 4).unpack1("N") : 0
+          reason = payload.bytesize > 4 ? payload.byteslice(4..-1).to_s : ""
+          Quicsilver.logger.debug("WebTransport session #{@stream_id} received close capsule code=#{code} reason=#{reason.inspect}")
+          notify_close
+        else
+          # Unknown capsules are ignored, matching HTTP Capsule extensibility.
+        end
+      end
 
       def write_close_reason(code, reason)
         reason = reason.to_s

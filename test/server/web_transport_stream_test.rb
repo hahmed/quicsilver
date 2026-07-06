@@ -6,35 +6,46 @@ class WebTransportStreamTest < Minitest::Test
 
   # === Receiving data ===
 
-  def test_receives_single_data_frame
+  def test_receive_data_invokes_callback_with_raw_bytes
     stream = build_stream
-    received = nil
-    stream.on_data { |data| received = data }
+    received = []
 
-    stream.receive_data(data_frame("hello"))
-    assert_equal "hello", received
+    stream.on_data { |data| received << data }
+    stream.receive_data("hello")
+
+    assert_equal ["hello"], received
   end
 
-  def test_receives_multiple_frames
+  def test_receive_data_ignores_empty_chunks
     stream = build_stream
-    chunks = []
-    stream.on_data { |data| chunks << data }
+    received = []
 
-    stream.receive_data(data_frame("one") + data_frame("two"))
-    assert_equal %w[one two], chunks
+    stream.on_data { |data| received << data }
+    stream.receive_data("")
+
+    assert_empty received
   end
 
-  def test_handles_partial_frame_across_receives
+  def test_receive_data_can_deliver_multiple_raw_chunks
     stream = build_stream
-    chunks = []
-    stream.on_data { |data| chunks << data }
+    received = []
 
-    frame = data_frame("complete")
-    stream.receive_data(frame.byteslice(0, 3))
-    assert_empty chunks
+    stream.on_data { |data| received << data }
+    stream.receive_data("one")
+    stream.receive_data("two")
 
-    stream.receive_data(frame.byteslice(3..-1))
-    assert_equal ["complete"], chunks
+    assert_equal ["one", "two"], received
+  end
+
+  def test_notify_read_close_invokes_close_callback_without_closing_write_side
+    stream = build_stream
+    closed = false
+
+    stream.on_close { closed = true }
+    stream.notify_read_close
+
+    assert closed
+    assert stream.open?, "peer FIN should not close local write side"
   end
 
   # === Lifecycle ===
@@ -49,28 +60,38 @@ class WebTransportStreamTest < Minitest::Test
     refute stream.open?
   end
 
-  def test_close_fires_on_close_callback
-    stream = build_stream(:closeable)
-    closed = false
-    stream.on_close { closed = true }
-    stream.close
-    assert closed
+  def test_notify_close_closes
+    stream = build_stream
+    stream.notify_close
+    refute stream.open?
   end
 
-  def test_notify_close_fires_callback_and_closes
+  def test_notify_close_invokes_close_callback
     stream = build_stream
     closed = false
+
     stream.on_close { closed = true }
     stream.notify_close
+
     assert closed
-    refute stream.open?
   end
 
   def test_write_on_closed_stream_does_nothing
     stream = build_stream(:closeable)
     stream.close
-    # No error, just returns
-    stream.write("ignored") rescue nil
+    stream.write("ignored")
+  end
+
+  def test_write_sends_raw_bytes
+    raw = Minitest::Mock.new
+    raw.expect(:send, true, ["hello"])
+
+    stream = Quicsilver::Server::WebTransportStream.new(
+      session: Minitest::Mock.new, stream: raw, stream_id: 4
+    )
+    stream.write("hello")
+
+    raw.verify
   end
 
   # === Direction enforcement ===
@@ -78,8 +99,10 @@ class WebTransportStreamTest < Minitest::Test
   def test_bidi_stream_allows_write_and_data
     stream = build_stream
     received = nil
+
     stream.on_data { |data| received = data }
-    stream.receive_data(data_frame("hello"))
+    stream.receive_data("hello")
+
     assert_equal "hello", received
   end
 
@@ -91,16 +114,14 @@ class WebTransportStreamTest < Minitest::Test
   def test_receive_only_stream_receives_data
     stream = build_stream(:receive_only)
     received = nil
+
     stream.on_data { |data| received = data }
-    stream.receive_data(data_frame("from client"))
+    stream.receive_data("from client")
+
     assert_equal "from client", received
   end
 
   private
-
-  def data_frame(payload)
-    Quicsilver::Protocol.build_frame(Quicsilver::Protocol::FRAME_DATA, payload)
-  end
 
   def build_stream(variant = :bidi)
     session = Minitest::Mock.new
@@ -108,7 +129,7 @@ class WebTransportStreamTest < Minitest::Test
 
     case variant
     when :closeable
-      stream.expect(:send, true, [String], fin: true)
+      stream.expect(:send, true, ["".b], fin: true)
     when :receive_only
       return Quicsilver::Server::WebTransportStream.new(
         session: session, stream: stream, stream_id: 4, direction: :receive_only
