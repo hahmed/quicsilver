@@ -39,7 +39,7 @@ class RackAdapterTest < Minitest::Test
     assert_equal transport_context["connection"], context["connection"]
   end
 
-  def test_call_allows_env_injection
+  def test_call_exposes_request_rack_context
     captured_env = nil
     app = ->(env) {
       captured_env = env
@@ -47,15 +47,15 @@ class RackAdapterTest < Minitest::Test
     }
     rack_adapter = Quicsilver::Server::RackAdapter.new(app)
     protocol_adapter = Quicsilver::Protocol::Adapter.new(->(_request) {})
+    rack_context = Quicsilver::Rack::Context.new(stream_id: 12, early_data: true)
     request, = protocol_adapter.build_request(
-      {":method" => "GET", ":scheme" => "https", ":authority" => "example.com", ":path" => "/"}
+      {":method" => "GET", ":scheme" => "https", ":authority" => "example.com", ":path" => "/"},
+      rack_context: rack_context
     )
 
-    rack_adapter.call(request) do |env|
-      env["quicsilver.context"] = Quicsilver::Rack::Context.new(stream_id: 12, early_data: true)
-    end
+    rack_adapter.call(request)
 
-    assert_kind_of Quicsilver::Rack::Context, captured_env["quicsilver.context"]
+    assert_same rack_context, captured_env["quicsilver.context"]
     assert_equal 12, captured_env["quicsilver.context"].stream_id
     assert captured_env["quicsilver.context"].early_data?
   end

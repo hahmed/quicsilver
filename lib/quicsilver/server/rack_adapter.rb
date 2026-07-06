@@ -15,7 +15,7 @@ module Quicsilver
       def call(request)
         env = self.make_environment(request)
         add_transport_context(env, request)
-        yield env if block_given?
+        add_rack_context(env, request.rack_context) if request.respond_to?(:rack_context) && request.rack_context
 
         # Wire rack.early_hints for 103 Early Hints
         if request.respond_to?(:interim_response) && request.interim_response
@@ -40,6 +40,14 @@ module Quicsilver
       end
 
       private
+
+      def add_rack_context(env, rack_context)
+        env["quicsilver.context"] = rack_context
+
+        if rack_context.respond_to?(:webtransport) && rack_context.webtransport
+          env["quicsilver.webtransport"] = rack_context.webtransport
+        end
+      end
 
       def add_transport_context(env, request)
         return unless request.respond_to?(:transport_context)

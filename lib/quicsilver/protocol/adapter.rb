@@ -11,12 +11,13 @@ module Quicsilver
   module Protocol
     # HTTP/3 request with peer address from the QUIC connection.
     class Request < ::Protocol::HTTP::Request
-      attr_reader :peer, :transport_context
+      attr_reader :peer, :transport_context, :rack_context
 
-      def initialize(*args, peer: nil, transport_context: nil, **kwargs)
+      def initialize(*args, peer: nil, transport_context: nil, rack_context: nil, **kwargs)
         super(*args, **kwargs)
         @peer = peer
         @transport_context = transport_context
+        @rack_context = rack_context
       end
     end
   end
@@ -54,7 +55,7 @@ module Quicsilver
       # @param remote_address [String, nil] Peer IP from the QUIC connection (e.g. "127.0.0.1").
       # @param remote_port [Integer] Peer port from the QUIC connection.
       # @param transport_context [Hash, nil] Quicsilver transport metadata for request debugging/log tags.
-      def build_request(headers, remote_address: nil, remote_port: 0, transport_context: nil)
+      def build_request(headers, remote_address: nil, remote_port: 0, transport_context: nil, rack_context: nil)
         method = headers[":method"]
         scheme = headers[":scheme"] || "https"
         authority = headers[":authority"]
@@ -78,7 +79,10 @@ module Quicsilver
 
         request = Request.new(
           scheme, authority, method, path, VERSION,
-          protocol_headers, body, protocol, peer: peer, transport_context: transport_context
+          protocol_headers, body, protocol,
+          peer: peer,
+          transport_context: transport_context,
+          rack_context: rack_context
         )
 
         [request, body]
