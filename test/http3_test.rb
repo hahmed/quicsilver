@@ -163,6 +163,18 @@ class HTTP3Test < Minitest::Test
     assert_equal 1, settings[0x33], "SETTINGS_H3_DATAGRAM must be 1"
   end
 
+  def test_control_stream_advertises_webtransport
+    stream = Quicsilver::Protocol.build_control_stream
+    bytes = stream.bytes
+
+    _, type_len = Quicsilver::Protocol.decode_varint(bytes, 1)
+    frame_length, length_len = Quicsilver::Protocol.decode_varint(bytes, 1 + type_len)
+    settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
+
+    assert_equal 1, settings[0x2b603742], "SETTINGS_ENABLE_WEBTRANSPORT must be 1"
+    assert_equal 100, settings[0x14e9cd29], "SETTINGS_WT_MAX_SESSIONS must be advertised"
+  end
+
   # === GREASE (RFC 9114) ===
 
   def test_control_stream_settings_contain_a_grease_id

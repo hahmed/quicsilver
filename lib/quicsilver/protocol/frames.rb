@@ -17,6 +17,12 @@ module Quicsilver
     SETTINGS_QPACK_BLOCKED_STREAMS = 0x07
     SETTINGS_ENABLE_CONNECT_PROTOCOL = 0x08  # RFC 9220
     SETTINGS_H3_DATAGRAM = 0x33              # RFC 9297
+    SETTINGS_ENABLE_WEBTRANSPORT = 0x2b603742 # WebTransport draft-06
+    SETTINGS_WT_ENABLED = 0x2c7cf000          # WebTransport over HTTP/3
+    SETTINGS_WT_MAX_SESSIONS = 0x14e9cd29    # WebTransport over HTTP/3
+    SETTINGS_WT_INITIAL_MAX_DATA = 0x2b61
+    SETTINGS_WT_INITIAL_MAX_STREAMS_UNI = 0x2b64
+    SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI = 0x2b65
     SETTINGS_MAX_FIELD_SECTION_SIZE = 0x06   # RFC 9114 §7.2.4.1
 
     # Frame types forbidden on request streams (RFC 9114 Section 7.2.4, 7.2.6, 7.2.7)
@@ -253,6 +259,12 @@ module Quicsilver
           SETTINGS_QPACK_BLOCKED_STREAMS => 0,
           SETTINGS_ENABLE_CONNECT_PROTOCOL => 1,
           SETTINGS_H3_DATAGRAM => 1,
+          SETTINGS_ENABLE_WEBTRANSPORT => 1,
+          SETTINGS_WT_ENABLED => 1,
+          SETTINGS_WT_MAX_SESSIONS => 100,
+          SETTINGS_WT_INITIAL_MAX_DATA => 1_048_576,
+          SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => 100,
+          SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => 100,
         }
         settings_hash[SETTINGS_MAX_FIELD_SECTION_SIZE] = max_field_section_size if max_field_section_size
         settings_hash[grease_id] = grease_id  # GREASE setting (RFC 9114 §7.2.4.1)
