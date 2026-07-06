@@ -254,31 +254,6 @@ class WebTransportSessionTest < Minitest::Test
     assert_nil result
   end
 
-  def test_find_stream_across_sessions
-    s1 = build_session
-    s2 = build_session
-    s2.add_stream(99999, 8)
-    sessions = { 0 => s1, 4 => s2 }
-
-    found = Quicsilver::Server::WebTransportSession.find_stream(sessions, 8)
-    assert_equal 8, found.stream_id
-  end
-
-  def test_find_stream_returns_nil_when_not_found
-    sessions = { 0 => build_session }
-    assert_nil Quicsilver::Server::WebTransportSession.find_stream(sessions, 999)
-  end
-
-  def test_find_session_for_stream
-    s1 = build_session
-    s2 = build_session
-    s2.add_stream(99999, 8)
-    sessions = { 0 => s1, 4 => s2 }
-
-    found = Quicsilver::Server::WebTransportSession.find_session_for_stream(sessions, 8)
-    assert_equal s2, found
-  end
-
   private
 
   def close_session_capsule(code:, reason:)

@@ -48,23 +48,6 @@ module Quicsilver
         wt_stream
       end
 
-      # Find a stream by ID across all sessions.
-      def self.find_stream(sessions, stream_id)
-        sessions.each_value do |session|
-          stream = session.stream(stream_id)
-          return stream if stream
-        end
-        nil
-      end
-
-      # Find the session that owns a given stream.
-      def self.find_session_for_stream(sessions, stream_id)
-        sessions.each_value do |session|
-          return session if session.stream(stream_id)
-        end
-        nil
-      end
-
       # Parse uni stream data after Connection strips the 0x54 type byte.
       # Payload is [session_id varint][data...]
       def self.parse_uni_stream_data(payload)

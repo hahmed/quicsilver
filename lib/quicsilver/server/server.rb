@@ -97,8 +97,7 @@ module Quicsilver
       @connection_closed_callback = nil
       @connection_migrated_callback = nil
       @connection_error_callback = nil
-      @webtransport_sessions = {}  # stream_id => WebTransportSession
-      @pending_webtransport_streams = {} # stream_id => { handle:, buffer: }
+      @webtransport = WebTransportManager.new
 
       protocol_app = wrap_app(@app, @server_configuration.mode)
 
@@ -366,11 +365,9 @@ module Quicsilver
       when STREAM_EVENT_CONNECTION_CLOSED
         connection = @connections.delete(connection_handle)
         # Close any WebTransport sessions on this connection
-        @webtransport_sessions.each do |sid, session|
-          if session.connection == connection
-            session.notify_close
-            @webtransport_sessions.delete(sid)
-          end
+        @webtransport.sessions_for_connection(connection).each do |sid, session|
+          session.notify_close
+          @webtransport.unregister(sid)
         end
         @connection_closed_callback&.call(connection) if connection
         connection&.streams&.clear
@@ -378,8 +375,7 @@ module Quicsilver
       when STREAM_EVENT_SEND_COMPLETE
         # Buffer cleanup handled in C extension
       when STREAM_EVENT_SHUTDOWN_COMPLETE
-        if (wt_session = wt_session_for_stream(stream_id))
-          wt_session.remove_stream(stream_id)
+        if @webtransport.shutdown_stream(stream_id)
           connection.remove_stream(stream_id) if connection
         end
       when STREAM_EVENT_RECEIVE
@@ -397,10 +393,10 @@ module Quicsilver
         if connection.critical_stream?(stream_id)
           Quicsilver.logger.error("Critical stream #{stream_id} reset by peer")
           Quicsilver.connection_shutdown(connection_handle, Protocol::H3_CLOSED_CRITICAL_STREAM, false) rescue nil
-        elsif (wt = @webtransport_sessions.delete(stream_id))
+        elsif (wt = @webtransport.unregister(stream_id))
           wt.notify_close
           connection.remove_stream(stream_id)
-        elsif (wt_session = wt_session_for_stream(stream_id))
+        elsif (wt_session = @webtransport.session_for_stream(stream_id))
           wt_session.remove_stream(stream_id)
         else
           cancel_stream(connection, stream_id)
@@ -437,7 +433,7 @@ module Quicsilver
         return unless (connection = @connections[connection_handle])
         # Route to WebTransport session if one exists on this connection,
         # otherwise fall through to the generic datagram callback.
-        wt_session = @webtransport_sessions.values.find { |s| s.connection == connection && s.open? }
+        wt_session = @webtransport.open_session_for_connection(connection)
         if wt_session
           wt_session.receive_datagram(data)
         else
@@ -558,7 +554,7 @@ module Quicsilver
         begin
           connection.receive_unidirectional_data(stream_id, payload)
           if connection.uni_stream_type(stream_id) == :webtransport_uni
-            route_wt_uni_stream(stream_id, stream_handle, payload, connection)
+            route_wt_uni_stream(stream_id, stream_handle, payload)
           end
         rescue Protocol::FrameError => e
           Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
@@ -571,17 +567,17 @@ module Quicsilver
 
     def handle_bidi_receive(connection, connection_handle, stream_id, stream_handle, payload, early_data: false)
       pending = @pending_mutex.synchronize { @pending_streams[stream_id] }
-      if (wt_payload = pending_webtransport_payload(stream_id, stream_handle, payload))
+      if (wt_payload = @webtransport.pending_payload(stream_id, stream_handle, payload))
         accept_webtransport_stream(connection, stream_id, stream_handle, wt_payload)
-      elsif pending_webtransport_stream?(stream_id)
+      elsif @webtransport.pending_stream?(stream_id)
       elsif pending
         pending.frame_buffer << payload
         drain_data_frames(pending)
-      elsif (wt_stream = active_wt_stream(stream_id))
+      elsif (wt_stream = @webtransport.active_stream(stream_id))
         wt_stream.receive_data(payload)
-      elsif (wt_session = @webtransport_sessions[stream_id])
+      elsif (wt_session = @webtransport.session(stream_id))
         wt_session.receive_connect_data(payload)
-      elsif webtransport_bidi_stream?(payload)
+      elsif @webtransport.bidi_stream?(payload)
         accept_webtransport_stream(connection, stream_id, stream_handle, payload)
       elsif contains_headers_frame?(payload)
         dispatch_streaming(connection, connection_handle, stream_id, payload, stream_handle: stream_handle, early_data: early_data)
@@ -593,13 +589,13 @@ module Quicsilver
     def handle_receive_fin(connection, connection_handle, stream_id, data, early_data: false)
       event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
 
-      if (wt_session = @webtransport_sessions[stream_id])
+      if (wt_session = @webtransport.session(stream_id))
         wt_session.receive_connect_data(event.data) if event.data && !event.data.empty?
         wt_session.notify_close
         return
       end
 
-      if (wt_session = wt_session_for_stream(stream_id))
+      if (wt_session = @webtransport.session_for_stream(stream_id))
         if (wt_stream = wt_session.stream(stream_id))
           wt_stream.replace_stream_handle(event.handle) if event.handle
           wt_stream.receive_data(event.data) if event.data && !event.data.empty?
@@ -906,7 +902,7 @@ module Quicsilver
         "method=#{request.method.inspect} path=#{request.path.inspect} early_data=#{early_data.inspect}"
       )
 
-      @webtransport_sessions[stream_id] = session
+      @webtransport.register(session)
       response = @request_handler.adapter.call(request)
 
       Quicsilver.logger.debug(
@@ -917,91 +913,25 @@ module Quicsilver
       if session.accepted?
         connection.track_client_stream(stream_id)
       else
-        @webtransport_sessions.delete(stream_id)
+        @webtransport.unregister(stream_id)
         session.reject!(response.status)
       end
     end
 
-    def pending_webtransport_payload(stream_id, stream_handle, payload)
-      pending = @pending_webtransport_streams[stream_id]
-      if pending
-        pending[:buffer] << payload
-        payload = pending[:buffer]
-        stream_handle = pending[:handle]
-      end
-
-      case webtransport_bidi_prefix_state(payload)
-      when :matched
-        @pending_webtransport_streams.delete(stream_id)
-        payload
-      when :incomplete
-        @pending_webtransport_streams[stream_id] ||= { handle: stream_handle, buffer: "".b }
-        @pending_webtransport_streams[stream_id][:buffer] << payload unless pending
-        nil
-      else
-        @pending_webtransport_streams.delete(stream_id)
-        nil
-      end
-    end
-
-    def pending_webtransport_stream?(stream_id)
-      @pending_webtransport_streams.key?(stream_id)
-    end
-
-    def webtransport_bidi_stream?(data)
-      webtransport_bidi_prefix_state(data) == :matched
-    end
-
-    def webtransport_bidi_prefix_state(data)
-      type, type_len = Protocol.decode_varint_str(data, 0)
-      return :incomplete if type_len == 0 && incomplete_varint?(data, 0)
-      return :no_match unless type == WebTransportSession::WT_STREAM_BIDI && type_len > 0
-
-      session_id, sid_len = Protocol.decode_varint_str(data, type_len)
-      return :incomplete if sid_len == 0 && incomplete_varint?(data, type_len)
-
-      sid_len > 0 && @webtransport_sessions[session_id]&.open? ? :matched : :no_match
-    rescue
-      :no_match
-    end
-
-    def incomplete_varint?(data, offset)
-      first = data.getbyte(offset)
-      return false unless first
-
-      length = 1 << ((first & 0xC0) >> 6)
-      data.bytesize - offset < length
-    end
-
-    def route_wt_uni_stream(stream_id, stream_handle, payload, connection)
+    def route_wt_uni_stream(stream_id, stream_handle, payload)
       # After Connection strips the 0x54 stream type, payload is:
       # [session_id varint][data...]
       # Reuse the same prefix parser — format is identical minus the type byte.
-      session_id, initial_data = WebTransportSession.parse_uni_stream_data(payload)
-      return unless session_id
-
-      session = @webtransport_sessions[session_id]
-      return unless session
-
-      wt_stream = session.add_uni_stream(stream_handle, stream_id)
-      wt_stream.receive_data(initial_data) if initial_data && !initial_data.empty?
+      @webtransport.accept_uni_stream(stream_id, stream_handle, payload)
     rescue => e
       Quicsilver.logger.error("WebTransport uni stream error: #{e.class} - #{e.message}")
     end
 
     # Accept an incoming WebTransport stream — parse prefix and route to session
     def accept_webtransport_stream(connection, stream_id, stream_handle, payload)
-      WebTransportSession.accept_stream(@webtransport_sessions, stream_id, stream_handle, payload)
+      @webtransport.accept_bidi_stream(stream_id, stream_handle, payload)
     rescue => e
       Quicsilver.logger.error("WebTransport stream error: #{e.class} - #{e.message}")
-    end
-
-    def active_wt_stream(stream_id)
-      WebTransportSession.find_stream(@webtransport_sessions, stream_id)
-    end
-
-    def wt_session_for_stream(stream_id)
-      WebTransportSession.find_session_for_stream(@webtransport_sessions, stream_id)
     end
 
     def contains_headers_frame?(data)
