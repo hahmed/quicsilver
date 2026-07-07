@@ -431,12 +431,7 @@ module Quicsilver
         @connection_migrated_callback&.call(connection, old_address, new_address)
       when "DATAGRAM_RECEIVED"
         return unless (connection = @connections[connection_handle])
-        # Route to WebTransport session if one exists on this connection,
-        # otherwise fall through to the generic datagram callback.
-        wt_session = @webtransport.open_session_for_connection(connection)
-        if wt_session
-          wt_session.receive_datagram(data)
-        else
+        unless @webtransport.receive_datagram(data)
           @datagram_callback&.call(connection, data)
         end
       end

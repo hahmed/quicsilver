@@ -86,7 +86,9 @@ module Quicsilver
       # Send a datagram to the client (unreliable, no retransmission).
       def send_datagram(data)
         raise "Session not accepted" unless @accepted
-        Quicsilver.datagram_send(@connection.data, data.to_s.b)
+        raise "Session not open" unless @open
+
+        Quicsilver.datagram_send(@connection.data, Protocol::Datagram.encode(@stream_id, data))
       end
 
       # Register a callback for datagrams from the client.

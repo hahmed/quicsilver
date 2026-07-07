@@ -100,6 +100,21 @@ module Quicsilver
         stream
       end
 
+      def receive_datagram(datagram)
+        stream_id, payload = Protocol::Datagram.decode(datagram)
+        return false unless (session = @sessions[stream_id])
+        return false unless session.open?
+
+        session.receive_datagram(payload)
+        true
+      rescue
+        false
+      end
+
+      def build_datagram(session, payload)
+        Protocol::Datagram.encode(session.stream_id, payload)
+      end
+
       private
 
       def bidi_prefix_state(data)

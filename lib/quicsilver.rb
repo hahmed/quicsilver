@@ -7,6 +7,7 @@ require_relative "quicsilver/response"
 
 # Protocol layer
 require_relative "quicsilver/protocol/frames"
+require_relative "quicsilver/protocol/datagram"
 require_relative "quicsilver/protocol/priority"
 require_relative "quicsilver/protocol/qpack/encoder"
 require_relative "quicsilver/protocol/request_parser"

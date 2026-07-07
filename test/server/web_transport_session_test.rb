@@ -30,6 +30,28 @@ class WebTransportSessionTest < Minitest::Test
     assert_raises(RuntimeError) { session.send_datagram("data") }
   end
 
+  def test_send_datagram_prefixes_payload_with_quarter_stream_id
+    connection_data = Object.new
+    connection = Minitest::Mock.new
+    connection.expect(:data, connection_data)
+    session = build_session(connection: connection)
+    accept_webtransport_session(session)
+
+    expected = Quicsilver::Protocol::Datagram.encode(session.stream_id, "hello")
+    assert_datagram_sent(connection_data, expected) do
+      session.send_datagram("hello")
+    end
+
+    connection.verify
+  end
+
+  def test_send_datagram_raises_after_close
+    session = build_session_accepted
+    session.close
+
+    assert_raises(RuntimeError) { session.send_datagram("hello") }
+  end
+
   def test_close_makes_session_not_open
     session = build_session_accepted
     assert session.open?
@@ -185,8 +207,7 @@ class WebTransportSessionTest < Minitest::Test
 
   def test_receive_connect_data_handles_close_session_capsule
     session = build_session
-    session.instance_variable_get(:@stream).expect(:send, true, [String], fin: false)
-    session.accept!
+    accept_webtransport_session(session)
     closed = false
     capsule = close_session_capsule(code: 7, reason: "bye")
 
@@ -199,8 +220,7 @@ class WebTransportSessionTest < Minitest::Test
 
   def test_receive_connect_data_buffers_partial_capsule
     session = build_session
-    session.instance_variable_get(:@stream).expect(:send, true, [String], fin: false)
-    session.accept!
+    accept_webtransport_session(session)
     closed = false
     capsule = close_session_capsule(code: 7, reason: "bye")
 
@@ -263,12 +283,21 @@ class WebTransportSessionTest < Minitest::Test
       payload
   end
 
-  def build_session(headers: nil)
+  def assert_datagram_sent(expected_connection_data, expected_payload)
+    Quicsilver.stub(:datagram_send, ->(connection_data, payload) {
+      assert_same expected_connection_data, connection_data
+      assert_equal expected_payload, payload
+      true
+    }) do
+      yield
+    end
+  end
+
+  def build_session(headers: nil, connection: Minitest::Mock.new)
     headers ||= {
       ":method" => "CONNECT", ":protocol" => "webtransport",
       ":scheme" => "https", ":authority" => "localhost:4433", ":path" => "/cable"
     }
-    connection = Minitest::Mock.new
     stream = Minitest::Mock.new
     stream.expect(:stream_id, 0)
     stream.expect(:stream_handle, 99999)
@@ -280,11 +309,31 @@ class WebTransportSessionTest < Minitest::Test
 
   def build_session_accepted
     session = build_session
-    stream_mock = session.instance_variable_get(:@stream)
-    stream_mock.expect(:send, true, [String], fin: false)  # accept! headers
-    stream_mock.expect(:send, true, [String], fin: false)  # close capsule
-    stream_mock.expect(:reset, true, [Integer])            # stream reset
+    expect_successful_connect_response(session)
+    expect_close_session_capsule(session)
+    expect_stream_reset(session)
     session.accept!
     session
+  end
+
+  def accept_webtransport_session(session)
+    expect_successful_connect_response(session)
+    session.accept!
+  end
+
+  def expect_successful_connect_response(session)
+    session_stream(session).expect(:send, true, [String], fin: false)
+  end
+
+  def expect_close_session_capsule(session)
+    session_stream(session).expect(:send, true, [String], fin: false)
+  end
+
+  def expect_stream_reset(session)
+    session_stream(session).expect(:reset, true, [Integer])
+  end
+
+  def session_stream(session)
+    session.instance_variable_get(:@stream)
   end
 end

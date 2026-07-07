@@ -86,6 +86,7 @@ HTML = <<~HTML
 
   <button onclick="connectWT()">Connect WebTransport</button>
   <button onclick="sendBidi()">Open bidi stream + send hello</button>
+  <button onclick="sendDatagram()">Send datagram</button>
   <button onclick="closeWT()">Close</button>
   <button onclick="clearLog()">Clear</button>
 
@@ -163,6 +164,31 @@ HTML = <<~HTML
       }
     }
 
+    window.sendDatagram = async function() {
+      try {
+        if (!transport) await connectWT()
+
+        const message = `datagram from browser ${Date.now()}`
+        log(`sending datagram: ${message}`)
+        const writer = transport.datagrams.writable.getWriter()
+        await writer.write(encoder.encode(message))
+        writer.releaseLock()
+
+        log("waiting for datagram echo")
+        const reader = transport.datagrams.readable.getReader()
+        const { value, done } = await reader.read()
+        reader.releaseLock()
+
+        if (done) {
+          log("datagram reader done")
+        } else {
+          log(`datagram read: ${decoder.decode(value)}`)
+        }
+      } catch (error) {
+        log(`datagram failed: ${error.stack || error}`)
+      }
+    }
+
     window.closeWT = function() {
       if (transport) {
         log("closing transport")
@@ -204,6 +230,16 @@ app = lambda do |env|
         warn "WT stream #{stream.stream_id} error: #{error.class}: #{error.message}"
         warn error.backtrace&.first(5)&.join("\n")
       end
+    end
+
+    session.on_datagram do |datagram|
+      puts "WT datagram read #{datagram.bytesize} bytes"
+      response = "echo: #{datagram}"
+      session.send_datagram(response)
+      puts "WT datagram wrote #{response.bytesize} bytes"
+    rescue => error
+      warn "WT datagram error: #{error.class}: #{error.message}"
+      warn error.backtrace&.first(5)&.join("\n")
     end
 
     session.on_close do

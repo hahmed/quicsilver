@@ -3,6 +3,7 @@
 require "test_helper"
 
 class WebTransportManagerTest < Minitest::Test
+  include HTTP3TestHelpers
   def test_register_and_lookup_session
     manager = Quicsilver::Server::WebTransportManager.new
     session = build_session(stream_id: 0)
@@ -71,7 +72,7 @@ class WebTransportManagerTest < Minitest::Test
     manager = Quicsilver::Server::WebTransportManager.new
     connection = Object.new
     session = build_session(stream_id: 0, connection: connection)
-    accept_session(session)
+    accept_webtransport_session(session)
 
     manager.register(session)
 
@@ -81,7 +82,7 @@ class WebTransportManagerTest < Minitest::Test
   def test_pending_payload_buffers_incomplete_bidi_prefix
     manager = Quicsilver::Server::WebTransportManager.new
     session = build_session(stream_id: 64)
-    accept_session(session)
+    accept_webtransport_session(session)
     manager.register(session)
 
     prefix = Quicsilver::Protocol.encode_varint(Quicsilver::Server::WebTransportSession::WT_STREAM_BIDI) +
@@ -102,7 +103,7 @@ class WebTransportManagerTest < Minitest::Test
     refute manager.bidi_stream?(prefix)
 
     session = build_session(stream_id: 0)
-    accept_session(session)
+    accept_webtransport_session(session)
     manager.register(session)
 
     assert manager.bidi_stream?(prefix)
@@ -154,11 +155,73 @@ class WebTransportManagerTest < Minitest::Test
     assert_nil manager.accept_uni_stream(8, 99999, payload)
   end
 
+  def test_receive_datagram_routes_by_quarter_stream_id
+    manager = Quicsilver::Server::WebTransportManager.new
+    session = build_session(stream_id: 8)
+    accept_webtransport_session(session)
+    received = []
+    session.on_datagram { |data| received << data }
+    manager.register(session)
+
+    datagram = datagram_for(session, "hello")
+
+    assert manager.receive_datagram(datagram)
+    assert_equal ["hello"], received
+  end
+
+  def test_receive_datagram_returns_false_for_unknown_session
+    manager = Quicsilver::Server::WebTransportManager.new
+    datagram = h3_datagram(396, "hello")
+
+    refute manager.receive_datagram(datagram)
+  end
+
+  def test_receive_datagram_returns_false_for_closed_session
+    manager = Quicsilver::Server::WebTransportManager.new
+    session = build_session(stream_id: 8)
+    session.notify_close
+    manager.register(session)
+
+    datagram = datagram_for(session, "hello")
+
+    refute manager.receive_datagram(datagram)
+  end
+
+  def test_receive_datagram_returns_false_for_malformed_datagram
+    manager = Quicsilver::Server::WebTransportManager.new
+
+    refute manager.receive_datagram(truncated_two_byte_varint)
+  end
+
+  def test_build_datagram_prefixes_payload_with_quarter_stream_id
+    manager = Quicsilver::Server::WebTransportManager.new
+    session = build_session(stream_id: 8)
+    manager.register(session)
+
+    assert_equal datagram_for(session, "hello"), manager.build_datagram(session, "hello")
+  end
+
   private
 
-  def accept_session(session)
-    session.instance_variable_get(:@stream).expect(:send, true, [String], fin: false)
+  def datagram_for(session, payload)
+    h3_datagram(session.stream_id, payload)
+  end
+
+  def h3_datagram(stream_id, payload)
+    Quicsilver::Protocol.encode_varint(stream_id / 4) + payload
+  end
+
+  def accept_webtransport_session(session)
+    expect_successful_connect_response(session)
     session.accept!
+  end
+
+  def expect_successful_connect_response(session)
+    session_stream(session).expect(:send, true, [String], fin: false)
+  end
+
+  def session_stream(session)
+    session.instance_variable_get(:@stream)
   end
 
   def build_session(stream_id:, connection: Object.new)

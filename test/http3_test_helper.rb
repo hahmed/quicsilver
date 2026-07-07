@@ -21,6 +21,12 @@ module HTTP3TestHelpers
     Quicsilver::Protocol.encode_varint(value)
   end
 
+  def truncated_two_byte_varint
+    # QUIC varint prefix 0b01 means this integer needs 2 bytes; providing only
+    # the first byte simulates a payload too short to contain the full integer.
+    [0x40].pack("C")
+  end
+
   def build_qpack_headers(headers)
     Quicsilver::Protocol::Qpack::Encoder.new(huffman: false).encode(headers)
   end
