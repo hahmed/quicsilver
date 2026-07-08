@@ -214,62 +214,16 @@ module Quicsilver
         buf = @mutex.synchronize { @response_buffers[stream_id] || "".b }
         return if buf.empty?
 
-        # First time seeing this stream: identify stream type
         unless @uni_stream_types&.key?(stream_id)
           @uni_stream_types ||= {}
-          stream_type, type_len = Protocol.decode_varint_str(buf, 0)
-          return if type_len == 0  # need more data
+          stream_type, payload = decode_unidirectional_stream(buf)
+          return unless stream_type
 
-          case stream_type
-          when 0x00 # Control stream
-            raise Protocol::FrameError, "Duplicate control stream" if @control_stream_id
-            @control_stream_id = stream_id
-            @uni_stream_types[stream_id] = :control
-            # Remove the stream type byte from the buffer
-            @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
-          when 0x01
-            raise Protocol::FrameError.new("Client must not send push streams",
-              error_code: Protocol::H3_STREAM_CREATION_ERROR)
-          when 0x02 # QPACK encoder stream
-            raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
-            @qpack_encoder_stream_id = stream_id
-            @uni_stream_types[stream_id] = :qpack_encoder
-            @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
-          when 0x03 # QPACK decoder stream
-            raise Protocol::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
-            @qpack_decoder_stream_id = stream_id
-            @uni_stream_types[stream_id] = :qpack_decoder
-            @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
-          when Protocol::WebTransport::UNI_STREAM_TYPE # WebTransport unidirectional stream
-            @uni_stream_types[stream_id] = :webtransport_uni
-            @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
-          else
-            # Unknown unidirectional stream types MUST be ignored (RFC 9114 §6.2)
-            @uni_stream_types[stream_id] = :unknown
-            return
-          end
-
+          register_unidirectional_stream(stream_id, stream_type, payload)
           buf = @mutex.synchronize { @response_buffers[stream_id] || "".b }
         end
 
-        stream_type = @uni_stream_types[stream_id]
-        return if buf.empty?
-
-        case stream_type
-        when :webtransport_uni
-          @mutex.synchronize { @response_buffers[stream_id] = "".b }
-          [:webtransport_uni, buf]
-        when :control
-          parse_control_frames(buf)
-          # Clear parsed data from buffer
-          @mutex.synchronize { @response_buffers[stream_id] = "".b }
-        when :qpack_encoder
-          validate_qpack_encoder_data(buf)
-          @mutex.synchronize { @response_buffers[stream_id] = "".b }
-        when :qpack_decoder
-          validate_qpack_decoder_data(buf)
-          @mutex.synchronize { @response_buffers[stream_id] = "".b }
-        end
+        process_unidirectional_payload(stream_id, buf)
       end
 
       def handle_unidirectional_stream(stream, fin: true)
@@ -283,26 +237,25 @@ module Quicsilver
         data = stream.data
         return if data.empty?
 
-        stream_type, type_len = Protocol.decode_varint_str(data, 0)
-        return if type_len == 0
-        payload = data[type_len..-1]
+        stream_type, payload = decode_unidirectional_stream(data)
+        return unless stream_type
 
         case stream_type
-        when 0x00
+        when Protocol::UnidirectionalStream::CONTROL
           set_control_stream(stream_id, payload)
           if fin
             raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
           end
-        when 0x01
+        when Protocol::UnidirectionalStream::PUSH
           raise Protocol::FrameError.new("Client must not send push streams",
             error_code: Protocol::H3_STREAM_CREATION_ERROR)
-        when 0x02
+        when Protocol::UnidirectionalStream::QPACK_ENCODER
           raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
           @qpack_encoder_stream_id = stream_id
           if fin
             raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
           end
-        when 0x03
+        when Protocol::UnidirectionalStream::QPACK_DECODER
           raise Protocol::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
           @qpack_decoder_stream_id = stream_id
           if fin
@@ -312,6 +265,60 @@ module Quicsilver
           @uni_stream_types ||= {}
           @uni_stream_types[stream_id] = :webtransport_uni
           [:webtransport_uni, payload || "".b]
+        end
+      end
+
+      def decode_unidirectional_stream(data)
+        stream_type, type_len = Protocol.decode_varint_str(data, 0)
+        return if type_len == 0
+
+        [stream_type, data[type_len..] || "".b]
+      end
+
+      def register_unidirectional_stream(stream_id, stream_type, payload)
+        case stream_type
+        when Protocol::UnidirectionalStream::CONTROL
+          raise Protocol::FrameError, "Duplicate control stream" if @control_stream_id
+          @control_stream_id = stream_id
+          @uni_stream_types[stream_id] = :control
+          @mutex.synchronize { @response_buffers[stream_id] = payload }
+        when Protocol::UnidirectionalStream::PUSH
+          raise Protocol::FrameError.new("Client must not send push streams",
+            error_code: Protocol::H3_STREAM_CREATION_ERROR)
+        when Protocol::UnidirectionalStream::QPACK_ENCODER
+          raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
+          @qpack_encoder_stream_id = stream_id
+          @uni_stream_types[stream_id] = :qpack_encoder
+          @mutex.synchronize { @response_buffers[stream_id] = payload }
+        when Protocol::UnidirectionalStream::QPACK_DECODER
+          raise Protocol::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
+          @qpack_decoder_stream_id = stream_id
+          @uni_stream_types[stream_id] = :qpack_decoder
+          @mutex.synchronize { @response_buffers[stream_id] = payload }
+        when Protocol::WebTransport::UNI_STREAM_TYPE
+          @uni_stream_types[stream_id] = :webtransport_uni
+          @mutex.synchronize { @response_buffers[stream_id] = payload }
+        else
+          @uni_stream_types[stream_id] = :unknown
+        end
+      end
+
+      def process_unidirectional_payload(stream_id, payload)
+        return if payload.empty?
+
+        case @uni_stream_types[stream_id]
+        when :webtransport_uni
+          @mutex.synchronize { @response_buffers[stream_id] = "".b }
+          [:webtransport_uni, payload]
+        when :control
+          parse_control_frames(payload)
+          @mutex.synchronize { @response_buffers[stream_id] = "".b }
+        when :qpack_encoder
+          validate_qpack_encoder_data(payload)
+          @mutex.synchronize { @response_buffers[stream_id] = "".b }
+        when :qpack_decoder
+          validate_qpack_decoder_data(payload)
+          @mutex.synchronize { @response_buffers[stream_id] = "".b }
         end
       end
 
