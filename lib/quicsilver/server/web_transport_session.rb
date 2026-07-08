@@ -184,19 +184,9 @@ module Quicsilver
       def receive_connect_data(data)
         @connect_buffer << data if data && !data.empty?
 
-        loop do
-          type, type_len = Protocol.decode_varint_str(@connect_buffer, 0)
-          return if type_len == 0
-
-          length, length_len = Protocol.decode_varint_str(@connect_buffer, type_len)
-          return if length_len == 0
-
-          header_len = type_len + length_len
-          return if @connect_buffer.bytesize < header_len + length
-
-          payload = @connect_buffer.byteslice(header_len, length) || "".b
+        while (capsule = Protocol::Capsule.parse(@connect_buffer))
+          type, payload, @connect_buffer = capsule
           handle_capsule(type, payload)
-          @connect_buffer = @connect_buffer.byteslice(header_len + length..-1) || "".b
         end
       end
 

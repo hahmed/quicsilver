@@ -8,6 +8,7 @@ require_relative "quicsilver/response"
 # Protocol layer
 require_relative "quicsilver/protocol/frames"
 require_relative "quicsilver/protocol/datagram"
+require_relative "quicsilver/protocol/capsule"
 require_relative "quicsilver/protocol/web_transport"
 require_relative "quicsilver/protocol/unidirectional_stream"
 require_relative "quicsilver/protocol/priority"
