@@ -26,7 +26,8 @@ module Quicsilver
         @stream = stream
         @stream_id = stream_id
         @direction = direction
-        @open = true
+        @read_open = direction != :send_only
+        @write_open = direction != :receive_only
         @data_callback = nil
         @close_callback = nil
         @close_notified = false
@@ -42,16 +43,14 @@ module Quicsilver
 
       def write(data)
         raise "Cannot write to a receive-only stream" if @direction == :receive_only
-        return unless @open
+        return unless @write_open
 
         @stream.send(data.to_s.b)
       end
 
       def close
-        return unless @open
-
-        @stream.send("".b, fin: true) rescue nil
-        @open = false
+        close_write
+        @read_open = false
         notify_close_callback
       end
 
@@ -64,28 +63,37 @@ module Quicsilver
       end
 
       def open?
-        @open
+        @read_open || @write_open
       end
 
       # Called by Server when data arrives on this stream. :nodoc:
       def receive_data(data)
-        return if data.nil? || data.empty?
+        return if data.nil? || data.empty? || !@read_open
 
         @data_callback&.call(data)
       end
 
       # Called by Server when the peer has closed its write side. :nodoc:
       def notify_read_close
+        @read_open = false
         notify_close_callback
       end
 
       # Called by Server when the stream is reset or fully closed. :nodoc:
       def notify_close
-        @open = false
+        @read_open = false
+        @write_open = false
         notify_close_callback
       end
 
       private
+
+      def close_write
+        return unless @write_open
+
+        @stream.send("".b, fin: true) rescue nil
+        @write_open = false
+      end
 
       def notify_close_callback
         return if @close_notified

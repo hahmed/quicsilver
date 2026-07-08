@@ -87,6 +87,15 @@ class WebTransportStreamTest < Minitest::Test
     assert_equal 1, closed
   end
 
+  def test_close_after_peer_read_close_still_sends_fin
+    stream = build_stream(:closeable)
+
+    stream.notify_read_close
+    stream.close
+
+    refute stream.open?
+  end
+
   def test_write_on_closed_stream_does_nothing
     stream = build_stream(:closeable)
     stream.close
