@@ -88,6 +88,8 @@ HTML = <<~HTML
   <button onclick="sendBidi()">Open bidi stream + send hello</button>
   <button onclick="sendUni()">Open uni stream + send hello</button>
   <button onclick="sendDatagram()">Send datagram</button>
+  <button onclick="requestServerBidi()">Request server bidi stream</button>
+  <button onclick="requestServerUni()">Request server uni stream</button>
   <button onclick="closeWT()">Close</button>
   <button onclick="clearLog()">Clear</button>
 
@@ -131,6 +133,8 @@ HTML = <<~HTML
         log("waiting for ready")
         await transport.ready
         log("ready")
+        readIncomingBidi(transport)
+        readIncomingUni(transport)
       } catch (error) {
         log(`connect failed: ${error.stack || error}`)
       }
@@ -183,6 +187,52 @@ HTML = <<~HTML
       }
     }
 
+    async function readIncomingBidi(wt) {
+      try {
+        const reader = wt.incomingBidirectionalStreams.getReader()
+        while (true) {
+          const { value: stream, done } = await reader.read()
+          if (done) return
+
+          log("incoming server bidi stream")
+          const streamReader = stream.readable.getReader()
+          while (true) {
+            const { value, done } = await streamReader.read()
+            if (done) {
+              log("incoming server bidi reader done")
+              break
+            }
+            log(`incoming server bidi read: ${decoder.decode(value)}`)
+          }
+        }
+      } catch (error) {
+        log(`incoming bidi failed: ${error.stack || error}`)
+      }
+    }
+
+    async function readIncomingUni(wt) {
+      try {
+        const reader = wt.incomingUnidirectionalStreams.getReader()
+        while (true) {
+          const { value: stream, done } = await reader.read()
+          if (done) return
+
+          log("incoming server uni stream")
+          const streamReader = stream.getReader()
+          while (true) {
+            const { value, done } = await streamReader.read()
+            if (done) {
+              log("incoming server uni reader done")
+              break
+            }
+            log(`incoming server uni read: ${decoder.decode(value)}`)
+          }
+        }
+      } catch (error) {
+        log(`incoming uni failed: ${error.stack || error}`)
+      }
+    }
+
     window.sendDatagram = async function() {
       try {
         if (!transport) await connectWT()
@@ -205,6 +255,31 @@ HTML = <<~HTML
         }
       } catch (error) {
         log(`datagram failed: ${error.stack || error}`)
+      }
+    }
+
+    async function sendControlDatagram(command) {
+      if (!transport) await connectWT()
+      const writer = transport.datagrams.writable.getWriter()
+      await writer.write(encoder.encode(command))
+      writer.releaseLock()
+    }
+
+    window.requestServerBidi = async function() {
+      try {
+        log("requesting server bidi stream")
+        await sendControlDatagram("__open_server_bidi__")
+      } catch (error) {
+        log(`server bidi request failed: ${error.stack || error}`)
+      }
+    }
+
+    window.requestServerUni = async function() {
+      try {
+        log("requesting server uni stream")
+        await sendControlDatagram("__open_server_uni__")
+      } catch (error) {
+        log(`server uni request failed: ${error.stack || error}`)
       }
     }
 
@@ -268,9 +343,25 @@ app = lambda do |env|
 
     session.on_datagram do |datagram|
       puts "WT datagram read #{datagram.bytesize} bytes"
-      response = "echo: #{datagram}"
-      session.send_datagram(response)
-      puts "WT datagram wrote #{response.bytesize} bytes"
+
+      case datagram
+      when "__open_server_bidi__"
+        stream = session.open_stream
+        message = "hello from server bidi #{Time.now.to_f}"
+        stream.write(message)
+        stream.close
+        puts "WT server bidi stream #{stream.stream_id} wrote #{message.bytesize} bytes"
+      when "__open_server_uni__"
+        stream = session.open_uni_stream
+        message = "hello from server uni #{Time.now.to_f}"
+        stream.write(message)
+        stream.close
+        puts "WT server uni stream #{stream.stream_id} wrote #{message.bytesize} bytes"
+      else
+        response = "echo: #{datagram}"
+        session.send_datagram(response)
+        puts "WT datagram wrote #{response.bytesize} bytes"
+      end
     rescue => error
       warn "WT datagram error: #{error.class}: #{error.message}"
       warn error.backtrace&.first(5)&.join("\n")
