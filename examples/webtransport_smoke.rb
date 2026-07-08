@@ -97,6 +97,7 @@ HTML = <<~HTML
 
   <script type="module">
     let transport
+    let readyPromise
     const encoder = new TextEncoder()
     const decoder = new TextDecoder()
 
@@ -115,6 +116,12 @@ HTML = <<~HTML
 
     window.connectWT = async function() {
       try {
+        if (transport && readyPromise) {
+          log("using existing WebTransport")
+          await readyPromise
+          return transport
+        }
+
         log(`creating WebTransport ${wtURL()}`)
         log(`using serverCertificateHashes sha-256 #{CERT_SHA256}`)
         const certificateHash = Uint8Array.from(atob("#{CERT_SHA256}"), character => character.charCodeAt(0))
@@ -124,28 +131,36 @@ HTML = <<~HTML
             value: certificateHash,
           }],
         })
+        readyPromise = transport.ready
 
         transport.closed.then(
           () => log("transport closed cleanly"),
           error => log(`transport closed with error: ${error}`)
-        )
+        ).finally(() => {
+          transport = null
+          readyPromise = null
+        })
 
         log("waiting for ready")
-        await transport.ready
+        await readyPromise
         log("ready")
         readIncomingBidi(transport)
         readIncomingUni(transport)
+        return transport
       } catch (error) {
+        transport = null
+        readyPromise = null
         log(`connect failed: ${error.stack || error}`)
       }
     }
 
     window.sendBidi = async function() {
       try {
-        if (!transport) await connectWT()
+        const wt = await connectWT()
+        if (!wt) return
 
         log("creating bidirectional stream")
-        const stream = await transport.createBidirectionalStream()
+        const stream = await wt.createBidirectionalStream()
         const writer = stream.writable.getWriter()
         const reader = stream.readable.getReader()
 
@@ -171,10 +186,11 @@ HTML = <<~HTML
 
     window.sendUni = async function() {
       try {
-        if (!transport) await connectWT()
+        const wt = await connectWT()
+        if (!wt) return
 
         log("creating unidirectional stream")
-        const stream = await transport.createUnidirectionalStream()
+        const stream = await wt.createUnidirectionalStream()
         const writer = stream.getWriter()
 
         const message = `hello uni from browser ${Date.now()}`
@@ -235,16 +251,17 @@ HTML = <<~HTML
 
     window.sendDatagram = async function() {
       try {
-        if (!transport) await connectWT()
+        const wt = await connectWT()
+        if (!wt) return
 
         const message = `datagram from browser ${Date.now()}`
         log(`sending datagram: ${message}`)
-        const writer = transport.datagrams.writable.getWriter()
+        const writer = wt.datagrams.writable.getWriter()
         await writer.write(encoder.encode(message))
         writer.releaseLock()
 
         log("waiting for datagram echo")
-        const reader = transport.datagrams.readable.getReader()
+        const reader = wt.datagrams.readable.getReader()
         const { value, done } = await reader.read()
         reader.releaseLock()
 
@@ -259,8 +276,9 @@ HTML = <<~HTML
     }
 
     async function sendControlDatagram(command) {
-      if (!transport) await connectWT()
-      const writer = transport.datagrams.writable.getWriter()
+      const wt = await connectWT()
+      if (!wt) return
+      const writer = wt.datagrams.writable.getWriter()
       await writer.write(encoder.encode(command))
       writer.releaseLock()
     }
@@ -287,7 +305,6 @@ HTML = <<~HTML
       if (transport) {
         log("closing transport")
         transport.close()
-        transport = null
       }
     }
   </script>
