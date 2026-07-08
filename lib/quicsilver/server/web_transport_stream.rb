@@ -29,6 +29,7 @@ module Quicsilver
         @open = true
         @data_callback = nil
         @close_callback = nil
+        @close_notified = false
       end
 
       def stream_handle
@@ -51,7 +52,7 @@ module Quicsilver
 
         @stream.send("".b, fin: true) rescue nil
         @open = false
-        @close_callback&.call
+        notify_close_callback
       end
 
       def on_data(&block)
@@ -75,12 +76,21 @@ module Quicsilver
 
       # Called by Server when the peer has closed its write side. :nodoc:
       def notify_read_close
-        @close_callback&.call
+        notify_close_callback
       end
 
       # Called by Server when the stream is reset or fully closed. :nodoc:
       def notify_close
         @open = false
+        notify_close_callback
+      end
+
+      private
+
+      def notify_close_callback
+        return if @close_notified
+
+        @close_notified = true
         @close_callback&.call
       end
     end

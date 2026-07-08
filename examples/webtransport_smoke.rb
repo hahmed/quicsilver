@@ -86,6 +86,7 @@ HTML = <<~HTML
 
   <button onclick="connectWT()">Connect WebTransport</button>
   <button onclick="sendBidi()">Open bidi stream + send hello</button>
+  <button onclick="sendUni()">Open uni stream + send hello</button>
   <button onclick="sendDatagram()">Send datagram</button>
   <button onclick="closeWT()">Close</button>
   <button onclick="clearLog()">Clear</button>
@@ -164,6 +165,24 @@ HTML = <<~HTML
       }
     }
 
+    window.sendUni = async function() {
+      try {
+        if (!transport) await connectWT()
+
+        log("creating unidirectional stream")
+        const stream = await transport.createUnidirectionalStream()
+        const writer = stream.getWriter()
+
+        const message = `hello uni from browser ${Date.now()}`
+        log(`writing uni: ${message}`)
+        await writer.write(encoder.encode(message))
+        await writer.close()
+        log("uni writer closed")
+      } catch (error) {
+        log(`uni failed: ${error.stack || error}`)
+      }
+    }
+
     window.sendDatagram = async function() {
       try {
         if (!transport) await connectWT()
@@ -229,6 +248,21 @@ app = lambda do |env|
       rescue => error
         warn "WT stream #{stream.stream_id} error: #{error.class}: #{error.message}"
         warn error.backtrace&.first(5)&.join("\n")
+      end
+    end
+
+    session.on_uni_stream do |stream|
+      puts "WT accepted uni stream id=#{stream.stream_id}"
+
+      stream.on_data do |chunk|
+        puts "WT uni stream #{stream.stream_id} read #{chunk.bytesize} bytes"
+      rescue => error
+        warn "WT uni stream #{stream.stream_id} error: #{error.class}: #{error.message}"
+        warn error.backtrace&.first(5)&.join("\n")
+      end
+
+      stream.on_close do
+        puts "WT uni stream #{stream.stream_id} closed"
       end
     end
 

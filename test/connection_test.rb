@@ -306,6 +306,30 @@ class ConnectionTest < Minitest::Test
     assert_equal 3, @connection.control_stream_id
   end
 
+  # === WebTransport unidirectional streams ===
+
+  def test_receive_unidirectional_data_identifies_webtransport_uni_stream
+    payload = Quicsilver::Protocol.encode_varint(0) + "hello"
+    data = Quicsilver::Protocol.encode_varint(Quicsilver::Protocol::WebTransport::UNI_STREAM_TYPE) + payload
+
+    result = @connection.receive_unidirectional_data(14, data)
+
+    assert_equal [:webtransport_uni, payload], result
+    assert_equal :webtransport_uni, @connection.uni_stream_type(14)
+  end
+
+  def test_handle_unidirectional_stream_identifies_complete_webtransport_uni_stream
+    payload = Quicsilver::Protocol.encode_varint(0) + "hello"
+    data = Quicsilver::Protocol.encode_varint(Quicsilver::Protocol::WebTransport::UNI_STREAM_TYPE) + payload
+    stream = Quicsilver::Transport::InboundStream.new(14, is_unidirectional: true)
+    stream.append_data(data)
+
+    result = @connection.handle_unidirectional_stream(stream)
+
+    assert_equal [:webtransport_uni, payload], result
+    assert_equal :webtransport_uni, @connection.uni_stream_type(14)
+  end
+
   # === QPACK stream validation ===
 
   def test_qpack_encoder_stream_allows_zero_capacity

@@ -76,6 +76,17 @@ class WebTransportStreamTest < Minitest::Test
     assert closed
   end
 
+  def test_close_callback_only_runs_once
+    stream = build_stream
+    closed = 0
+
+    stream.on_close { closed += 1 }
+    stream.notify_read_close
+    stream.notify_close
+
+    assert_equal 1, closed
+  end
+
   def test_write_on_closed_stream_does_nothing
     stream = build_stream(:closeable)
     stream.close

@@ -547,9 +547,9 @@ module Quicsilver
       # they never send FIN, so waiting for RECEIVE_FIN would mean never parsing.
       if Transport::StreamId.unidirectional?(stream_id)
         begin
-          connection.receive_unidirectional_data(stream_id, payload)
-          if connection.uni_stream_type(stream_id) == :webtransport_uni
-            route_wt_uni_stream(stream_id, stream_handle, payload)
+          stream_type, stream_payload = connection.receive_unidirectional_data(stream_id, payload)
+          if stream_type == :webtransport_uni
+            route_wt_uni_stream(stream_id, stream_handle, stream_payload)
           end
         rescue Protocol::FrameError => e
           Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
@@ -627,7 +627,11 @@ module Quicsilver
         dispatch_request(connection, stream, early_data: early_data)
       else
         begin
-          connection.handle_unidirectional_stream(stream)
+          stream_type, payload = connection.handle_unidirectional_stream(stream)
+          if stream_type == :webtransport_uni
+            wt_stream = route_wt_uni_stream(stream_id, stream.stream_handle, payload)
+            wt_stream&.notify_read_close
+          end
         rescue Protocol::FrameError => e
           Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
           Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil

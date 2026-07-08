@@ -217,7 +217,7 @@ module Quicsilver
         # First time seeing this stream: identify stream type
         unless @uni_stream_types&.key?(stream_id)
           @uni_stream_types ||= {}
-          stream_type, type_len = Protocol.decode_varint(buf.bytes, 0)
+          stream_type, type_len = Protocol.decode_varint_str(buf, 0)
           return if type_len == 0  # need more data
 
           case stream_type
@@ -240,7 +240,7 @@ module Quicsilver
             @qpack_decoder_stream_id = stream_id
             @uni_stream_types[stream_id] = :qpack_decoder
             @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
-          when 0x54 # WebTransport unidirectional stream
+          when Protocol::WebTransport::UNI_STREAM_TYPE # WebTransport unidirectional stream
             @uni_stream_types[stream_id] = :webtransport_uni
             @mutex.synchronize { @response_buffers[stream_id] = (buf[type_len..] || "".b) }
           else
@@ -256,6 +256,9 @@ module Quicsilver
         return if buf.empty?
 
         case stream_type
+        when :webtransport_uni
+          @mutex.synchronize { @response_buffers[stream_id] = "".b }
+          [:webtransport_uni, buf]
         when :control
           parse_control_frames(buf)
           # Clear parsed data from buffer
@@ -280,7 +283,7 @@ module Quicsilver
         data = stream.data
         return if data.empty?
 
-        stream_type, type_len = Protocol.decode_varint(data.bytes, 0)
+        stream_type, type_len = Protocol.decode_varint_str(data, 0)
         return if type_len == 0
         payload = data[type_len..-1]
 
@@ -305,6 +308,10 @@ module Quicsilver
           if fin
             raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
           end
+        when Protocol::WebTransport::UNI_STREAM_TYPE
+          @uni_stream_types ||= {}
+          @uni_stream_types[stream_id] = :webtransport_uni
+          [:webtransport_uni, payload || "".b]
         end
       end
 

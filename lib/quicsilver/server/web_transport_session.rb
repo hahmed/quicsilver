@@ -17,9 +17,9 @@ module Quicsilver
       attr_reader :path, :authority, :headers, :connection, :stream_id
 
       # WebTransport stream types (draft-ietf-webtrans-http3), matching aioquic/Chrome.
-      WT_STREAM_BIDI = 0x41
-      WT_STREAM_UNI = 0x54
-      WT_CLOSE_SESSION = 0x2843
+      WT_STREAM_BIDI = Protocol::WebTransport::BIDI_STREAM_TYPE
+      WT_STREAM_UNI = Protocol::WebTransport::UNI_STREAM_TYPE
+      WT_CLOSE_SESSION = Protocol::WebTransport::CLOSE_SESSION_CAPSULE
       MAX_CLOSE_MESSAGE_LENGTH = 1024
 
       # Parse a bidirectional WebTransport stream prefix:
