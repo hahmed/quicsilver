@@ -71,6 +71,7 @@ module Quicsilver
         @close_callback = nil
         @streams = {}  # stream_id => WebTransportStream
         @connect_buffer = "".b
+        @closed = false
       end
 
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
@@ -188,6 +189,15 @@ module Quicsilver
           type, payload, @connect_buffer = capsule
           handle_capsule(type, payload)
         end
+      rescue Protocol::Capsule::ParseError => error
+        handle_capsule_error(error)
+      end
+
+      # Called by Server when the CONNECT/session stream receives FIN. :nodoc:
+      def receive_connect_fin(data)
+        receive_connect_data(data)
+        handle_capsule_error(Protocol::Capsule::ParseError.new("Truncated capsule")) unless @connect_buffer.empty?
+        notify_close
       end
 
       # Called by Server when a datagram arrives for this session.
@@ -196,7 +206,15 @@ module Quicsilver
       end
 
       # Called by Server when the CONNECT stream is reset/closed.
+      #
+      # Idempotent: subsequent calls are a no-op. This matters because the FIN
+      # and capsule-error paths both fan into notify_close, and a CLOSE_SESSION
+      # capsule followed by FIN would otherwise fire @close_callback twice and
+      # re-walk an already-cleared @streams map.
       def notify_close # :nodoc:
+        return if @closed
+        @closed = true
+
         Quicsilver.logger.debug("WebTransport session #{@stream_id} notify_close")
         @open = false
         @streams.each_value(&:notify_close)
@@ -252,14 +270,18 @@ module Quicsilver
         end
       end
 
+      def handle_capsule_error(error)
+        Quicsilver.logger.debug("WebTransport session #{@stream_id} capsule error: #{error.message}")
+        @connect_buffer = "".b
+        @stream.reset(Protocol::H3_DATAGRAM_ERROR) rescue nil
+        notify_close
+      end
+
       def write_close_reason(code, reason)
         reason = reason.to_s
         reason = reason.byteslice(0, MAX_CLOSE_MESSAGE_LENGTH) if reason.bytesize > MAX_CLOSE_MESSAGE_LENGTH
         payload = [code].pack("N") + reason.b
-        capsule = Protocol.encode_varint(WT_CLOSE_SESSION) +
-                  Protocol.encode_varint(payload.bytesize) +
-                  payload
-        @stream.send(capsule, fin: false)
+        @stream.send(Protocol::Capsule.encode(WT_CLOSE_SESSION, payload), fin: false)
       rescue
         # Best-effort — connection may already be gone
       end

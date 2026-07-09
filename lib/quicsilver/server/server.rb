@@ -585,8 +585,7 @@ module Quicsilver
       event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
 
       if (wt_session = @webtransport.session(stream_id))
-        wt_session.receive_connect_data(event.data) if event.data && !event.data.empty?
-        wt_session.notify_close
+        wt_session.receive_connect_fin(event.data)
         return
       end
 

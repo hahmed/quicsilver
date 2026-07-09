@@ -92,6 +92,17 @@ class WebTransportSessionTest < Minitest::Test
     assert closed
   end
 
+  def test_notify_close_is_idempotent
+    session = build_session
+    call_count = 0
+
+    session.on_close { call_count += 1 }
+    session.notify_close
+    session.notify_close
+
+    assert_equal 1, call_count
+  end
+
   # === Datagrams ===
 
   def test_receive_datagram_invokes_callback
@@ -234,6 +245,95 @@ class WebTransportSessionTest < Minitest::Test
     assert closed
   end
 
+  def test_receive_connect_data_ignores_unknown_capsule
+    session = build_session
+    accept_webtransport_session(session)
+    closed = false
+    capsule = Quicsilver::Protocol::Capsule.encode(0x2a, "ignored")
+
+    session.on_close { closed = true }
+    session.receive_connect_data(capsule)
+
+    assert session.open?
+    refute closed
+  end
+
+  def test_receive_connect_data_handles_multiple_capsules
+    session = build_session
+    accept_webtransport_session(session)
+    closed = false
+    capsules = Quicsilver::Protocol::Capsule.encode(0x2a, "ignored") +
+      close_session_capsule(code: 7, reason: "bye")
+
+    session.on_close { closed = true }
+    session.receive_connect_data(capsules)
+
+    refute session.open?
+    assert closed
+  end
+
+  def test_receive_connect_data_handles_empty_close_session_capsule
+    session = build_session
+    accept_webtransport_session(session)
+    closed = false
+    capsule = Quicsilver::Protocol::Capsule.encode(
+      Quicsilver::Server::WebTransportSession::WT_CLOSE_SESSION,
+      ""
+    )
+
+    session.on_close { closed = true }
+    session.receive_connect_data(capsule)
+
+    refute session.open?
+    assert closed
+  end
+
+  def test_receive_connect_data_closes_session_when_capsule_is_too_large
+    session = build_session
+    accept_webtransport_session(session)
+    expect_capsule_error_reset(session)
+    closed = false
+    capsule = Quicsilver::Protocol::Capsule.encode(0x2a, "hello")
+
+    session.on_close { closed = true }
+    parser = Quicsilver::Protocol::Capsule.method(:parse)
+    Quicsilver::Protocol::Capsule.stub(:parse, ->(buffer, max_payload_size: Quicsilver::Protocol::Capsule::MAX_PAYLOAD_SIZE) {
+      parser.call(buffer, max_payload_size: 4)
+    }) do
+      session.receive_connect_data(capsule)
+    end
+
+    refute session.open?
+    assert closed
+  end
+
+  def test_receive_connect_fin_closes_session_when_capsule_is_truncated
+    session = build_session
+    accept_webtransport_session(session)
+    expect_capsule_error_reset(session)
+    closed = false
+    capsule = close_session_capsule(code: 7, reason: "bye")
+
+    session.on_close { closed = true }
+    session.receive_connect_fin(capsule.byteslice(0, 2))
+
+    refute session.open?
+    assert closed
+  end
+
+  def test_receive_connect_fin_closes_session_after_complete_capsules
+    session = build_session
+    accept_webtransport_session(session)
+    closed = false
+    capsule = Quicsilver::Protocol::Capsule.encode(0x2a, "ignored")
+
+    session.on_close { closed = true }
+    session.receive_connect_fin(capsule)
+
+    refute session.open?
+    assert closed
+  end
+
   # === Class methods (routing) ===
 
   def test_accept_stream_routes_to_correct_session
@@ -278,9 +378,10 @@ class WebTransportSessionTest < Minitest::Test
 
   def close_session_capsule(code:, reason:)
     payload = [code].pack("N") + reason.b
-    Quicsilver::Protocol.encode_varint(Quicsilver::Server::WebTransportSession::WT_CLOSE_SESSION) +
-      Quicsilver::Protocol.encode_varint(payload.bytesize) +
+    Quicsilver::Protocol::Capsule.encode(
+      Quicsilver::Server::WebTransportSession::WT_CLOSE_SESSION,
       payload
+    )
   end
 
   def assert_datagram_sent(expected_connection_data, expected_payload)
@@ -331,6 +432,10 @@ class WebTransportSessionTest < Minitest::Test
 
   def expect_stream_reset(session)
     session_stream(session).expect(:reset, true, [Integer])
+  end
+
+  def expect_capsule_error_reset(session)
+    session_stream(session).expect(:reset, true, [Quicsilver::Protocol::H3_DATAGRAM_ERROR])
   end
 
   def session_stream(session)

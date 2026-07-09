@@ -27,6 +27,8 @@ module Quicsilver
 
     # Frame types forbidden on request streams (RFC 9114 Section 7.2.4, 7.2.6, 7.2.7)
     CONTROL_ONLY_FRAMES = [FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID].freeze
+    # HTTP/3 Datagram Error Code (RFC 9297 Section 5.2)
+    H3_DATAGRAM_ERROR = 0x33
 
     # HTTP/3 Error Codes (RFC 9114 Section 8.1)
     H3_NO_ERROR = 0x100

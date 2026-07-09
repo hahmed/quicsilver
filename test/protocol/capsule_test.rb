@@ -49,4 +49,14 @@ class ProtocolCapsuleTest < Minitest::Test
 
     assert_nil Quicsilver::Protocol::Capsule.parse(encoded)
   end
+
+  def test_parse_raises_when_payload_is_too_large
+    encoded = Quicsilver::Protocol.encode_varint(0x2a) +
+      Quicsilver::Protocol.encode_varint(5) +
+      "he"
+
+    assert_raises(Quicsilver::Protocol::Capsule::PayloadTooLarge) do
+      Quicsilver::Protocol::Capsule.parse(encoded, max_payload_size: 4)
+    end
+  end
 end
