@@ -3,9 +3,16 @@ require 'mkmf'
 ext_dir = File.expand_path('../../lib/quicsilver', __dir__)
 gemspec_dir = File.expand_path('../..', __dir__)
 
-# Skip compilation if precompiled binary is already present
-if File.exist?(File.join(ext_dir, 'quicsilver.bundle')) || File.exist?(File.join(ext_dir, 'quicsilver.so'))
-  File.write('Makefile', "install:\n\t@echo 'Using precompiled binary'\n\nall:\n\t@echo 'Using precompiled binary'\n")
+# Skip compilation for installed platform gems that already contain a native
+# extension. In a source checkout we must always compile for the current Ruby;
+# otherwise a stale lib/quicsilver/quicsilver.bundle from another Ruby ABI can
+# prevent rake-compiler from producing the extension it is about to copy.
+source_checkout = File.exist?(File.expand_path("../../.git", __dir__))
+precompiled_binary = File.exist?(File.join(ext_dir, "quicsilver.bundle")) ||
+  File.exist?(File.join(ext_dir, "quicsilver.so"))
+
+if precompiled_binary && !source_checkout
+  File.write("Makefile", "install:\n\t@echo 'Using precompiled binary'\n\nall:\n\t@echo 'Using precompiled binary'\n")
   exit
 end
 
