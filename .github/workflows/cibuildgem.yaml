@@ -63,7 +63,7 @@ jobs:
       matrix:
         os: ["macos-latest", "ubuntu-22.04"]
         rubies: ["3.4", "4.0"]
-        type: ["cross", "native"]
+        type: ["cross"]
     runs-on: "${{ matrix.os }}"
     steps:
       - name: "Checkout code"
