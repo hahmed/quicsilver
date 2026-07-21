@@ -84,7 +84,14 @@ end
 $CFLAGS << " -I#{File.expand_path('.', __FILE__)}"
 
 $LDFLAGS << " -L#{lib_dir}"
-$LDFLAGS << " -Wl,-rpath,#{lib_dir}"
+
+if RUBY_PLATFORM =~ /darwin/
+  $LDFLAGS << " -Wl,-rpath,@loader_path"
+  $LDFLAGS << " -Wl,-rpath,@loader_path/.."
+else
+  $LDFLAGS << " -Wl,-rpath,\\$$ORIGIN"
+  $LDFLAGS << " -Wl,-rpath,\\$$ORIGIN/.."
+end
 
 unless find_library('msquic', nil, lib_dir)
   raise "MSQUIC library not found in #{lib_dir}. " \
