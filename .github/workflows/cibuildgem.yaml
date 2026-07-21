@@ -37,10 +37,27 @@ jobs:
       - name: "Verify package file list"
         run: |
           ruby -e 'puts "RELEASE=#{ENV["RELEASE"].inspect}"; spec = Gem::Specification.load("quicsilver.gemspec"); puts spec.files.grep(/libmsquic/)'
-      - name: "Run cibuildgem"
+      - name: "Install cibuildgem"
+        run: gem install cibuildgem
+      - name: "Setup Rake Compiler"
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
-          step: "compile"
+          step: "noop"
+      - name: "Package"
+        run: cibuildgem package
+      - name: "Upload staged artifacts"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "stage-${{ runner.os }}-${{ runner.arch }}"
+          path: |
+            ./tmp/**/*.so
+            ./tmp/**/*.so.*
+            ./tmp/**/*.bundle
+            ./tmp/**/*.dylib
+            ./tmp/**/*.dylib.*
+            ./pkg/*.gem
+          if-no-files-found: error
+          retention-days: 1
   test:
     timeout-minutes: 20
     name: "Run the test suite"
@@ -63,6 +80,9 @@ jobs:
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
           step: "test_${{ matrix.type }}"
+      - name: "Verify staged native libraries"
+        if: "${{ matrix.type == 'cross' && always() }}"
+        run: find lib/quicsilver -maxdepth 3 -type f -print
   install:
     timeout-minutes: 5
     name: "Verify the gem can be installed"
