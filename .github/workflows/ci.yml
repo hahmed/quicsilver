@@ -20,9 +20,17 @@ jobs:
   test:
 
     runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.allow-failure }}
     strategy:
+      fail-fast: false
       matrix:
-        ruby-version: ["3.4"]
+        include:
+          - ruby-version: "3.4"
+            allow-failure: false
+          - ruby-version: "4.0"
+            allow-failure: false
+          - ruby-version: "head"
+            allow-failure: true
 
     steps:
     - uses: actions/checkout@v4
