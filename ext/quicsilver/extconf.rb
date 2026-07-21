@@ -1,4 +1,5 @@
 require 'mkmf'
+require 'fileutils'
 
 ext_dir = File.expand_path('../../lib/quicsilver', __dir__)
 gemspec_dir = File.expand_path('../..', __dir__)
@@ -66,6 +67,18 @@ else
   end
 
   vendor_lib_dir
+end
+
+# Copy MsQuic next to the Ruby extension so @loader_path/@rpath works for
+# Bundler git installs as well as local checkouts. GitHub checkouts do not have
+# generated dylibs checked in, so when we build MsQuic from the submodule we
+# must also place the runtime library where `require "quicsilver"` expects it.
+FileUtils.mkdir_p(ext_dir)
+Dir.glob(File.join(lib_dir, "libmsquic*")) do |library|
+  target = File.join(ext_dir, File.basename(library))
+  next if File.identical?(library, target) rescue false
+
+  FileUtils.cp(library, target)
 end
 
 # --- Locate MsQuic headers ---
