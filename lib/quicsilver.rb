@@ -50,13 +50,7 @@ require_relative "quicsilver/client/connection_pool"
 require_relative "quicsilver/client/client"
 
 # C extension
-# Load precompiled binary if available, fall back to native extension
-begin
-  ruby_version = /(\d+\.\d+)/.match(RUBY_VERSION)
-  require_relative "quicsilver/#{ruby_version}/quicsilver"
-rescue LoadError
-  require_relative "quicsilver/quicsilver"
-end
+require_relative "quicsilver/quicsilver"
 
 # Rackup handler
 require_relative "rackup/handler/quicsilver"

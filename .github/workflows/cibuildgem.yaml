@@ -28,7 +28,7 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
       - name: "Build MsQuic"
-        run: bundle exec rake build_msquic
+        run: bundle exec rake build_msquic bundle_msquic
       - name: "Run cibuildgem"
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:

@@ -30,8 +30,8 @@ Gem::Specification.new do |spec|
   # The `git ls-files -z` loads the files in the RubyGem that have been added into git.
   spec.files         = Dir.chdir(File.expand_path('..', __FILE__)) do
     files = `git ls-files -z`.split("\x0").reject { |f| f.match(%r{^(test|spec|features|vendor)/}) }
-    # Include precompiled binaries if present
-    files += Dir["lib/quicsilver/libmsquic*"]
+    # Include native binaries when building platform gems.
+    files += Dir["lib/quicsilver/libmsquic*.{dylib,so,so.*}"]
     files += Dir["lib/quicsilver/quicsilver.{bundle,so}"]
     files
   end
@@ -46,6 +46,7 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency "rake", "~> 13.0"
   spec.add_development_dependency 'rake-compiler', '~> 1.2'
   spec.add_development_dependency 'rake-compiler-dock', '~> 1.3'
+  spec.add_development_dependency "cibuildgem"
   spec.add_development_dependency "minitest", "~> 5.0"
   spec.add_development_dependency "minitest-focus", "~> 1.3"
   spec.add_development_dependency "benchmark-ips", "~> 2.12"
