@@ -77,9 +77,6 @@ jobs:
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
           step: "test_${{ matrix.type }}"
-      - name: "Verify staged native libraries"
-        if: "${{ matrix.type == 'cross' && always() }}"
-        run: find lib/quicsilver -maxdepth 3 -type f -print
   install:
     timeout-minutes: 5
     name: "Verify the gem can be installed"

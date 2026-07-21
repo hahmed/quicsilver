@@ -10,6 +10,11 @@
 /certs/*
 /certificates/*
 *.bundle
+*.bundle.*
+*.so
+*.so.*
+*.dylib
+*.dylib.*
 lib/quicsilver/quicsilver.bundle
 *.gem
 autoresearch.*
