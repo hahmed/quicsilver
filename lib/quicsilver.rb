@@ -51,7 +51,8 @@ require_relative "quicsilver/client/client"
 
 # C extension
 begin
-  require "quicsilver/#{Gem.ruby_api_version}/quicsilver"
+  ruby_version = /(\d+\.\d+)/.match(RUBY_VERSION)
+  require "quicsilver/#{ruby_version}/quicsilver"
 rescue LoadError
   require "quicsilver/quicsilver"
 end
