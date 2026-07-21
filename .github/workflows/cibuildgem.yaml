@@ -93,10 +93,12 @@ jobs:
         uses: "ruby/setup-ruby@v1"
         with:
           ruby-version: "4.0.0"
-      - name: "Run cibuildgem"
-        uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
+      - name: "Download platform gems"
+        uses: "actions/download-artifact@v5"
         with:
-          step: "install"
+          name: "stage-${{ runner.os }}-${{ runner.arch }}"
+      - name: "Install platform gem"
+        run: ruby -e 'puts Dir["pkg/*-#{Gem::Platform.local}.gem"].fetch(0)' | xargs gem install
   release:
     environment: release
     permissions:
