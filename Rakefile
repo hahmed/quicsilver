@@ -7,8 +7,9 @@ Rake::ExtensionTask.new('quicsilver') do |ext|
   ext.lib_dir = 'lib/quicsilver'
 end
 
-# Ensure MsQuic is built before compiling the C extension
-task :compile => :build_msquic
+# Keep `rake compile` useful in source checkouts, but let cibuildgem own
+# extension compilation after the workflow has built and bundled MsQuic.
+task :compile => :build_msquic unless ENV["CIBUILDGEM"]
 
 # Copy MsQuic dylib next to the compiled extension for gem packaging
 task :bundle_msquic do
