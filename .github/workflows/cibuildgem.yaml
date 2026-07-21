@@ -37,15 +37,11 @@ jobs:
       - name: "Verify package file list"
         run: |
           ruby -e 'puts "RELEASE=#{ENV["RELEASE"].inspect}"; spec = Gem::Specification.load("quicsilver.gemspec"); puts spec.files.grep(/libmsquic/)'
-      - name: "Install cibuildgem"
-        run: gem install cibuildgem
-      - name: "Setup Rake Compiler"
+      - name: "Run cibuildgem"
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
-          step: "noop"
-      - name: "Package"
-        run: cibuildgem package
-      - name: "Upload staged artifacts"
+          step: "compile"
+      - name: "Upload staged artifacts with MsQuic"
         uses: "actions/upload-artifact@v4"
         with:
           name: "stage-${{ runner.os }}-${{ runner.arch }}"
@@ -58,6 +54,7 @@ jobs:
             ./pkg/*.gem
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
   test:
     timeout-minutes: 20
     name: "Run the test suite"

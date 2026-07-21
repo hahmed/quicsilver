@@ -9,7 +9,7 @@ end
 
 # Keep `rake compile` useful in source checkouts, but let cibuildgem own
 # extension compilation after the workflow has built and bundled MsQuic.
-task :compile => :build_msquic unless ENV["CIBUILDGEM"]
+task :compile => :bundle_msquic unless ENV["CIBUILDGEM"]
 
 # Copy MsQuic dylib next to the compiled extension for gem packaging
 task :bundle_msquic do
