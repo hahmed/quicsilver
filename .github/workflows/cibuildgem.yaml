@@ -17,6 +17,8 @@ jobs:
       matrix:
         os: ["macos-latest", "ubuntu-22.04"]
     runs-on: "${{ matrix.os }}"
+    env:
+      RELEASE: "true"
     steps:
       - name: "Checkout code"
         uses: "actions/checkout@v5"

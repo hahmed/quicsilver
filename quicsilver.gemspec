@@ -30,9 +30,15 @@ Gem::Specification.new do |spec|
   # The `git ls-files -z` loads the files in the RubyGem that have been added into git.
   spec.files         = Dir.chdir(File.expand_path('..', __FILE__)) do
     files = `git ls-files -z`.split("\x0").reject { |f| f.match(%r{^(test|spec|features|vendor)/}) }
-    # Include native binaries when building platform gems.
-    files += Dir["lib/quicsilver/libmsquic*.{dylib,so,so.*}"]
-    files += Dir["lib/quicsilver/quicsilver.{bundle,so}"]
+
+    if ENV["RELEASE"]
+      if RUBY_PLATFORM.include?("darwin")
+        files += Dir["lib/quicsilver/libmsquic*.dylib"]
+      elsif RUBY_PLATFORM.include?("linux")
+        files += Dir["lib/quicsilver/libmsquic.so*"]
+      end
+    end
+
     files
   end
   spec.bindir        = "exe"

@@ -50,7 +50,11 @@ require_relative "quicsilver/client/connection_pool"
 require_relative "quicsilver/client/client"
 
 # C extension
-require_relative "quicsilver/quicsilver"
+begin
+  require "quicsilver/#{Gem.ruby_api_version}/quicsilver"
+rescue LoadError
+  require "quicsilver/quicsilver"
+end
 
 # Rackup handler
 require_relative "rackup/handler/quicsilver"
