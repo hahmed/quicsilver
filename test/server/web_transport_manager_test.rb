@@ -112,6 +112,7 @@ class WebTransportManagerTest < Minitest::Test
   def test_accept_bidi_stream_routes_to_session
     manager = Quicsilver::Server::WebTransportManager.new
     session = build_session(stream_id: 0)
+    accept_webtransport_session(session)
     accepted = []
     session.on_stream { |stream| accepted << stream }
     manager.register(session)
@@ -137,6 +138,7 @@ class WebTransportManagerTest < Minitest::Test
   def test_accept_uni_stream_routes_to_session
     manager = Quicsilver::Server::WebTransportManager.new
     session = build_session(stream_id: 0)
+    accept_webtransport_session(session)
     accepted = []
     session.on_uni_stream { |stream| accepted << stream }
     manager.register(session)
@@ -179,12 +181,53 @@ class WebTransportManagerTest < Minitest::Test
   def test_receive_datagram_returns_false_for_closed_session
     manager = Quicsilver::Server::WebTransportManager.new
     session = build_session(stream_id: 8)
+    accept_webtransport_session(session)
     session.notify_close
     manager.register(session)
 
     datagram = datagram_for(session, "hello")
 
     refute manager.receive_datagram(datagram)
+  end
+
+  def test_session_returns_nil_for_closed_session
+    manager = Quicsilver::Server::WebTransportManager.new
+    session = build_session(stream_id: 0)
+    accept_webtransport_session(session)
+    manager.register(session)
+
+    assert_same session, manager.session(0)
+
+    session.notify_close
+
+    assert_nil manager.session(0)
+  end
+
+  def test_closed_session_does_not_match_bidi_stream_prefix
+    manager = Quicsilver::Server::WebTransportManager.new
+    session = build_session(stream_id: 0)
+    accept_webtransport_session(session)
+    manager.register(session)
+    session.notify_close
+
+    prefix = Quicsilver::Protocol.encode_varint(Quicsilver::Server::WebTransportSession::WT_STREAM_BIDI) +
+             Quicsilver::Protocol.encode_varint(0)
+
+    refute manager.bidi_stream?(prefix)
+  end
+
+  def test_accept_bidi_stream_returns_nil_for_closed_session
+    manager = Quicsilver::Server::WebTransportManager.new
+    session = build_session(stream_id: 0)
+    accept_webtransport_session(session)
+    manager.register(session)
+    session.notify_close
+
+    payload = Quicsilver::Protocol.encode_varint(Quicsilver::Server::WebTransportSession::WT_STREAM_BIDI) +
+              Quicsilver::Protocol.encode_varint(0) +
+              "hello"
+
+    assert_nil manager.accept_bidi_stream(4, 99999, payload)
   end
 
   def test_receive_datagram_returns_false_for_malformed_datagram

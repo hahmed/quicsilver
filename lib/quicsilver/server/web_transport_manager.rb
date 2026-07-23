@@ -23,11 +23,15 @@ module Quicsilver
       end
 
       def session(stream_id)
-        @sessions[stream_id]
+        session = @sessions[stream_id]
+        return session if session&.routable?
+
+        @sessions.delete(stream_id) if session&.closed?
+        nil
       end
 
       def sessions_for_connection(connection)
-        @sessions.select { |_id, session| session.connection == connection }
+        @sessions.select { |_id, session| session.connection == connection && session.routable? }
       end
 
       def open_session_for_connection(connection)
@@ -36,6 +40,8 @@ module Quicsilver
 
       def active_stream(stream_id)
         @sessions.each_value do |session|
+          next unless session.routable?
+
           stream = session.stream(stream_id)
           return stream if stream
         end
@@ -44,6 +50,8 @@ module Quicsilver
 
       def session_for_stream(stream_id)
         @sessions.each_value do |session|
+          next unless session.routable?
+
           return session if session.stream(stream_id)
         end
         nil
@@ -87,6 +95,10 @@ module Quicsilver
       end
 
       def accept_bidi_stream(stream_id, stream_handle, payload)
+        session_id, = WebTransportSession.parse_stream_prefix(payload)
+        return unless session_id
+        return unless @sessions[session_id]&.accepts_new_streams?
+
         WebTransportSession.accept_stream(@sessions, stream_id, stream_handle, payload)
       end
 
@@ -94,6 +106,7 @@ module Quicsilver
         session_id, initial_data = WebTransportSession.parse_uni_stream_data(payload)
         return unless session_id
         return unless (session = @sessions[session_id])
+        return unless session.accepts_new_streams?
 
         stream = session.add_uni_stream(stream_handle, stream_id)
         stream.receive_data(initial_data) if initial_data && !initial_data.empty?
@@ -125,7 +138,7 @@ module Quicsilver
         session_id, sid_len = Protocol.decode_varint_str(data, type_len)
         return :incomplete if sid_len == 0 && incomplete_varint?(data, type_len)
 
-        sid_len > 0 && @sessions[session_id]&.open? ? :matched : :no_match
+        sid_len > 0 && @sessions[session_id]&.accepts_new_streams? ? :matched : :no_match
       rescue
         :no_match
       end

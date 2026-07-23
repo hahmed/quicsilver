@@ -87,7 +87,7 @@ module Quicsilver
       # Send a datagram to the client (unreliable, no retransmission).
       def send_datagram(data)
         raise "Session not accepted" unless @accepted
-        raise "Session not open" unless @open
+        raise "Session not open" unless accepts_datagrams?
 
         Quicsilver.datagram_send(@connection.data, Protocol::Datagram.encode(@stream_id, data))
       end
@@ -105,6 +105,7 @@ module Quicsilver
       # Open a server-initiated bidirectional stream to the client.
       def open_stream
         raise "Session not accepted" unless @accepted
+        raise "Session not open" unless accepts_new_streams?
         stream = @connection.open_stream
         prefix = Protocol.encode_varint(WT_STREAM_BIDI) +
                  Protocol.encode_varint(@stream_id)
@@ -125,6 +126,7 @@ module Quicsilver
       # Open a server-initiated unidirectional stream to the client (write-only).
       def open_uni_stream
         raise "Session not accepted" unless @accepted
+        raise "Session not open" unless accepts_new_streams?
         stream = @connection.open_stream(unidirectional: true)
         prefix = Protocol.encode_varint(WT_STREAM_UNI) +
                  Protocol.encode_varint(@stream_id)
@@ -148,7 +150,23 @@ module Quicsilver
       end
 
       def open?
-        @open
+        @open && !@closed
+      end
+
+      def closed?
+        @closed
+      end
+
+      def routable?
+        !@closed
+      end
+
+      def accepts_new_streams?
+        open?
+      end
+
+      def accepts_datagrams?
+        open?
       end
 
       def reject!(status = 403, headers = {})
