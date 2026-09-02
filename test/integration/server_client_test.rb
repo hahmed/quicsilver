@@ -778,6 +778,73 @@ class ServerClientIntegrationTest < Minitest::Test
     client.disconnect
   end
 
+  # === Load shedding ===
+  #
+  # When the server is at capacity it must answer, and must not keep counting
+  # the shed request as in-flight afterwards.
+  #
+  # The two status assertions below pass with or without the streaming-path
+  # fix, because a shed streaming request falls through to the buffered path on
+  # RECEIVE_FIN and gets a 503 that way. They are behavioural coverage, not
+  # regression proof. The active-request assertion is the discriminating one.
+
+  def test_client_receives_response_when_server_is_at_capacity
+    app = ->(_env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+
+    response = @server.scheduler.stub(:full?, true) do
+      client.get("/render", timeout: 5)
+    end
+
+    assert_equal 503, response.status
+  ensure
+    client&.disconnect
+  end
+
+  # A small streamed body still arrives in one RECEIVE_FIN and takes the
+  # buffered path. Only a body large enough to be split across RECEIVE events
+  # reaches dispatch_streaming, which is the path that used to drop silently.
+  def test_streaming_client_receives_response_when_server_is_at_capacity
+    app = ->(_env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+
+    response = @server.scheduler.stub(:full?, true) do
+      request = client.build_request("POST", "/upload", body: :stream)
+      request.stream_body { |writer| 20.times { writer.write("x" * 4096) } }
+      request.response(timeout: 2)
+    end
+
+    assert_equal 503, response.status
+  ensure
+    client&.disconnect
+  end
+
+  # A shed request must not be counted as in-flight afterwards, otherwise an
+  # idle server keeps reporting pressure it does not have.
+  def test_shedding_does_not_leave_active_requests_behind
+    app = ->(_env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+
+    @server.scheduler.stub(:full?, true) do
+      2.times do |i|
+        request = client.build_request("POST", "/upload-#{i}", body: :stream)
+        request.stream_body { |writer| 20.times { writer.write("x" * 4096) } }
+        request.response(timeout: 2)
+      end
+    end
+
+    assert_equal 0, @server.request_registry.active_count
+    assert_equal 0, @server.stats["requests"]["active"]
+  ensure
+    client&.disconnect
+  end
+
   private
 
   def start_server(app, **options)

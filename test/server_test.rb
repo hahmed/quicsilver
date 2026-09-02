@@ -253,6 +253,76 @@ class ServerTest < Minitest::Test
     assert_equal [503, "Service Unavailable"], error_sent
   end
 
+  # The streaming path registers three pieces of state before it checks
+  # capacity (server.rb:741-745). Shedding must undo all of them and must tell
+  # the client, matching the buffered path above.
+
+  def test_streaming_dispatch_sends_503_when_queue_full
+    server, connection = server_with_full_queue
+
+    error_sent = nil
+    connection.stub(:send_error, ->(_s, status, msg) { error_sent = [status, msg] }) do
+      dispatch_streaming(server, connection, 4)
+    end
+
+    assert_equal [503, "Service Unavailable"], error_sent
+  end
+
+  def test_streaming_dispatch_leaves_no_active_request_when_queue_full
+    server, connection = server_with_full_queue
+
+    connection.stub(:send_error, ->(*) {}) do
+      dispatch_streaming(server, connection, 4)
+    end
+
+    assert_equal 0, server.request_registry.active_count
+  end
+
+  def test_streaming_dispatch_leaves_no_tracked_stream_when_queue_full
+    server, connection = server_with_full_queue
+
+    connection.stub(:send_error, ->(*) {}) do
+      dispatch_streaming(server, connection, 4)
+    end
+
+    assert_empty connection.streams
+  end
+
+  # active_count feeds stats["requests"]["active"], which load balancers read
+  # as pressure. A per-shed leak would make an idle worker look busy forever.
+  def test_repeated_streaming_sheds_do_not_inflate_active_count
+    server, connection = server_with_full_queue
+
+    connection.stub(:send_error, ->(*) {}) do
+      10.times { |i| dispatch_streaming(server, connection, i * 4) }
+    end
+
+    assert_equal 0, server.request_registry.active_count
+    assert server.request_registry.empty?
+  end
+
+  def test_streaming_dispatch_without_stream_handle_still_cleans_up
+    server, connection = server_with_full_queue
+
+    # No handle yet: RECEIVE_FIN has not arrived so no response can be written.
+    # Cleanup must happen anyway.
+    dispatch_streaming(server, connection, 4, stream_handle: nil)
+
+    assert_equal 0, server.request_registry.active_count
+    assert_empty connection.streams
+  end
+
+  def test_streaming_dispatch_tracks_request_when_under_limit
+    server = create_server_direct(threads: 1, max_queue_size: 5, app: ->(_env) { [200, {}, ["OK"]] })
+    connection = tracked_connection(server)
+
+    dispatch_streaming(server, connection, 4)
+
+    assert_equal 1, server.request_registry.active_count
+    assert_includes connection.streams.keys, 4
+    assert_equal 1, server.scheduler.pending
+  end
+
   def test_default_max_connections
     server = create_server_direct
     assert_equal 100, server.max_connections
@@ -326,5 +396,32 @@ class ServerTest < Minitest::Test
   def create_server_direct(**kwargs)
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
     Quicsilver::Server.new(4433, server_configuration: config, **kwargs)
+  end
+
+  def tracked_connection(server, connection_handle: 12345)
+    connection = Quicsilver::Transport::Connection.new(connection_handle, [connection_handle, 67890])
+    server.connections[connection_handle] = connection
+    connection
+  end
+
+  # A server whose scheduler is already at capacity, plus a registered connection.
+  def server_with_full_queue
+    server = create_server_direct(threads: 1, max_queue_size: 1, app: ->(_env) { [200, {}, ["OK"]] })
+    connection = tracked_connection(server)
+    server.scheduler.enqueue([:dummy, :work])
+    [server, connection]
+  end
+
+  def dispatch_streaming(server, connection, stream_id, stream_handle: 0xBEEF)
+    data = Quicsilver::Protocol::RequestEncoder.new(method: "GET", path: "/render", headers: {}).encode
+
+    server.send(
+      :dispatch_streaming,
+      connection,
+      connection.handle,
+      stream_id,
+      data,
+      stream_handle: stream_handle
+    )
   end
 end

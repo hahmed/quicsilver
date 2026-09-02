@@ -647,6 +647,17 @@ module Quicsilver
       end
     end
 
+    # Send an error response on a stream we only hold a raw handle for.
+    # Without a handle the peer has not given us anywhere to write yet, so the
+    # stream is left for the normal reset/close path.
+    def send_stream_error(connection, stream_id, stream_handle, status, message)
+      return unless stream_handle
+
+      stream = Transport::InboundStream.new(stream_id)
+      stream.stream_handle = stream_handle
+      connection.send_error(stream, status, message) if stream.writable?
+    end
+
     def build_scheduler(scheduler_class)
       klass = scheduler_class || Schedulers::ThreadScheduler
 
@@ -705,6 +716,16 @@ module Quicsilver
         return
       end
 
+      # Shed before registering any state. Checking capacity after tracking the
+      # stream would leave @request_registry and connection.streams entries that
+      # nothing later completes, so an overloaded server would keep reporting
+      # in-flight work it is not doing.
+      if @scheduler.full?
+        Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), shedding stream #{stream_id}")
+        send_stream_error(connection, stream_id, stream_handle, 503, "Service Unavailable")
+        return
+      end
+
       request, body = @request_handler.adapter.build_request(
         headers,
         remote_address: connection.remote_address,
@@ -744,13 +765,7 @@ module Quicsilver
       @request_registry.track(stream_id, connection_handle,
         path: headers[":path"] || "/", method: method || "GET")
 
-      if @scheduler.full?
-        Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
-        body&.close
-        @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
-      else
-        @scheduler.enqueue([:streaming, pending])
-      end
+      @scheduler.enqueue([:streaming, pending])
     rescue Protocol::FrameError => e
       Quicsilver.logger.error("Frame error: #{e.message}")
       Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
