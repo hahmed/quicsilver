@@ -845,6 +845,69 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # === Stream-limit admission ===
+  #
+  # QUIC already has a permit mechanism: a peer may only open as many streams
+  # as we have granted credit for. When that runs out the peer waits on the
+  # wire instead of queueing in our process, and MsQuic tells us via
+  # PEER_NEEDS_STREAMS that demand exists we are not serving.
+
+  def test_peer_blocked_on_stream_limit_is_reported
+    app = ->(_env) { sleep 0.05; [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app, max_concurrent_requests: 2)
+
+    blocked = []
+    @server.on_peer_needs_streams { |_conn, bidirectional| blocked << bidirectional }
+
+    # One connection, more concurrent requests than the advertised limit.
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    threads = 6.times.map do |i|
+      Thread.new { client.get("/render/#{i}", timeout: 5).status }
+    end
+    statuses = threads.map(&:value)
+
+    assert_equal [200] * 6, statuses,
+      "requests should queue in flow control and still be served"
+    assert_operator @server.peer_needs_streams_count, :>, 0,
+      "peer should report being blocked on the advertised stream limit"
+    assert_includes blocked, true
+  ensure
+    client&.disconnect
+  end
+
+  def test_stream_limit_backpressure_does_not_shed
+    app = ->(_env) { sleep 0.05; [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app, max_concurrent_requests: 2)
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    threads = 6.times.map { |i| Thread.new { client.get("/r/#{i}", timeout: 5).status } }
+    threads.each(&:value)
+
+    assert_equal 0, @server.stats.dig("admission", "shed_count"),
+      "flow control should absorb this without refusing anything"
+  ensure
+    client&.disconnect
+  end
+
+  def test_grant_streams_widens_a_live_connection
+    app = ->(_env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app, max_concurrent_requests: 2)
+
+    widened = false
+    @server.on_peer_needs_streams do |connection, _bidirectional|
+      @server.grant_streams(connection, 16)
+      widened = true
+    end
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    threads = 8.times.map { |i| Thread.new { client.get("/w/#{i}", timeout: 5).status } }
+
+    assert_equal [200] * 8, threads.map(&:value)
+    assert widened, "expected to widen the window in response to blocked peers"
+  ensure
+    client&.disconnect
+  end
+
   private
 
   def start_server(app, **options)
