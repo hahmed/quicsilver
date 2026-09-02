@@ -2,12 +2,14 @@
 
 require_relative "scheduler"
 require_relative "schedulers/thread_scheduler"
+require_relative "wait_time"
+require_relative "admission"
 require_relative "web_transport_session"
 require_relative "web_transport_stream"
 
 module Quicsilver
   class Server
-    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size, :max_connections, :scheduler
+    attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size, :max_connections, :scheduler, :admission
 
     DEFAULT_THREAD_POOL_SIZE = 5
     DEFAULT_QUEUE_MULTIPLIER = 4
@@ -22,6 +24,9 @@ module Quicsilver
     STREAM_EVENT_START_COMPLETE = "STREAM_START_COMPLETE"
     STREAM_EVENT_PEER_ACCEPTED = "STREAM_PEER_ACCEPTED"
     STREAM_EVENT_SHUTDOWN_COMPLETE = "STREAM_SHUTDOWN_COMPLETE"
+    # Connection-level admission signals (see ConnectionCallback in the C ext).
+    CONNECTION_EVENT_STREAMS_AVAILABLE = "STREAMS_AVAILABLE"
+    CONNECTION_EVENT_PEER_NEEDS_STREAMS = "PEER_NEEDS_STREAMS"
 
     ServerStopError = Class.new(Quicsilver::Error)
     DrainTimeoutError = Class.new(Quicsilver::Error)
@@ -73,7 +78,7 @@ module Quicsilver
     # If you need IPv6, either:
     #   1. Add "::1 your-hostname" to /etc/hosts, OR
     #   2. Run two server instances (one IPv4, one IPv6) like Caddy/ngtcp2
-    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil, max_connections: DEFAULT_MAX_CONNECTIONS, scheduler: nil)
+    def initialize(port = 4433, address: "0.0.0.0", app: nil, server_configuration: nil, threads: DEFAULT_THREAD_POOL_SIZE, max_queue_size: nil, max_connections: DEFAULT_MAX_CONNECTIONS, scheduler: nil, wait_limit: Admission::DEFAULT_WAIT_LIMIT)
       @port = port
       @address = address
       @app = app || default_rack_app
@@ -87,6 +92,14 @@ module Quicsilver
       @thread_pool_size = threads
       @max_queue_size = max_queue_size || threads * DEFAULT_QUEUE_MULTIPLIER
       @scheduler = build_scheduler(scheduler)
+      @admission = Admission.new(
+        scheduler: @scheduler,
+        max_queue_size: @max_queue_size,
+        wait_limit: wait_limit
+      )
+      @peer_needs_streams_count = 0
+      @streams_available = {}
+      @peer_needs_streams_callback = nil
       @max_connections = max_connections
       @cancelled_streams = Set.new
       @cancelled_mutex = Mutex.new
@@ -139,6 +152,33 @@ module Quicsilver
     #     puts "New connection from #{conn.remote_address} (resumed: #{conn.session_resumed})"
     #   }
     #
+    # Called when a peer wants to open a stream but is blocked by the stream
+    # limit we advertised. This fires before anything reaches the queue, so it
+    # is a leading signal that demand exists which we are not serving.
+    #
+    #   server.on_peer_needs_streams do |connection, bidirectional|
+    #     server.grant_streams(connection, 200) if server.admission.pressure < 0.5
+    #   end
+    def on_peer_needs_streams(&block)
+      @peer_needs_streams_callback = block
+    end
+
+    # Number of times peers have been blocked on our advertised stream limit.
+    def peer_needs_streams_count
+      @peer_needs_streams_count
+    end
+
+    # Adjust how many bidirectional streams a peer may have open at once.
+    #
+    # Widening takes effect immediately (MsQuic queues a MAX_STREAMS frame).
+    # Narrowing does not revoke credit already granted — RFC 9000 requires
+    # MAX_STREAMS to be monotonic — so it only stops the window being extended
+    # as streams complete.
+    def grant_streams(connection, count)
+      handle = connection.respond_to?(:handle) ? connection.handle : connection
+      Quicsilver.connection_set_max_streams(handle, count)
+    end
+
     def on_connection(&block)
       @connection_callback = block
     end
@@ -275,6 +315,10 @@ module Quicsilver
           "max_queue_size" => @max_queue_size,
           "full" => @scheduler.full?
         },
+        "admission" => @admission.to_h.merge(
+          "peer_needs_streams" => @peer_needs_streams_count,
+          "streams_available" => @streams_available.values.last
+        ),
         "transport" => transport_counters
       }
     end
@@ -372,6 +416,22 @@ module Quicsilver
         @connection_closed_callback&.call(connection) if connection
         connection&.streams&.clear
         Quicsilver.close_server_connection(connection_handle)
+      when CONNECTION_EVENT_STREAMS_AVAILABLE
+        # How many streams the peer is still willing to accept from us.
+        return unless data && data.bytesize >= 4
+        bidirectional, unidirectional = data.unpack("S<S<")
+        @streams_available[connection_handle] = {
+          "bidirectional" => bidirectional,
+          "unidirectional" => unidirectional
+        }
+      when CONNECTION_EVENT_PEER_NEEDS_STREAMS
+        # A peer is blocked on the limit we advertised: demand exists on the
+        # wire that has not reached the queue. Leading signal, unlike depth.
+        @peer_needs_streams_count += 1
+        connection = @connections[connection_handle]
+        bidirectional = data && data.bytesize >= 1 ? data.getbyte(0) == 1 : true
+        Quicsilver.logger.debug("Peer blocked on stream limit (bidirectional=#{bidirectional})")
+        @peer_needs_streams_callback&.call(connection, bidirectional)
       when STREAM_EVENT_SEND_COMPLETE
         # Buffer cleanup handled in C extension
       when STREAM_EVENT_SHUTDOWN_COMPLETE
@@ -616,6 +676,14 @@ module Quicsilver
     end
 
     def complete_buffered_request(connection, connection_handle, stream_id, event, early_data: false)
+      # Already answered while the request was still arriving (shed or
+      # cancelled). Consume the marker so it does not accumulate.
+      if @cancelled_mutex.synchronize { @cancelled_streams.delete?(stream_id) }
+        connection.complete_stream(stream_id, event.data)
+        connection.remove_stream(stream_id)
+        return
+      end
+
       full_data = connection.complete_stream(stream_id, event.data)
       stream = Transport::InboundStream.new(stream_id)
       stream.stream_handle = event.handle
@@ -639,12 +707,22 @@ module Quicsilver
     end
 
     def dispatch_request(connection, stream, early_data: false)
-      if @scheduler.full?
-        Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
-        connection.send_error(stream, 503, "Service Unavailable") if stream.writable?
+      decision = @admission.decide
+
+      if decision.shed?
+        log_shed(decision, stream.stream_id)
+        connection.send_error(stream, decision.status, "Service Unavailable") if stream.writable?
       else
         @scheduler.enqueue([connection, stream, early_data])
       end
+    end
+
+    def log_shed(decision, stream_id)
+      Quicsilver.logger.warn(
+        "Shedding stream #{stream_id}: #{decision.reason} " \
+        "(pending=#{@scheduler.pending}/#{@max_queue_size} " \
+        "wait_p99=#{@admission.wait_time.to_h["p99_ms"]}ms)"
+      )
     end
 
     # Send an error response on a stream we only hold a raw handle for.
@@ -720,9 +798,14 @@ module Quicsilver
       # stream would leave @request_registry and connection.streams entries that
       # nothing later completes, so an overloaded server would keep reporting
       # in-flight work it is not doing.
-      if @scheduler.full?
-        Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), shedding stream #{stream_id}")
-        send_stream_error(connection, stream_id, stream_handle, 503, "Service Unavailable")
+      decision = @admission.decide
+      if decision.shed?
+        log_shed(decision, stream_id)
+        # Mark before responding: RECEIVE_FIN still arrives for this stream and
+        # would otherwise find no pending entry, fall through to the buffered
+        # path, and shed it a second time — two responses on one stream.
+        @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
+        send_stream_error(connection, stream_id, stream_handle, decision.status, "Service Unavailable")
         return
       end
 

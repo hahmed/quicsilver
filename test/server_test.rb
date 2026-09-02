@@ -323,6 +323,150 @@ class ServerTest < Minitest::Test
     assert_equal 1, server.scheduler.pending
   end
 
+  # === Admission signals ===
+
+  def test_stats_reports_admission_state
+    server = create_server_direct(threads: 2, max_queue_size: 8)
+
+    Quicsilver.stub(:transport_counters, {}) do
+      admission = server.stats["admission"]
+
+      assert_equal 0.0, admission["pressure"]
+      refute admission["under_pressure"]
+      assert_equal 250.0, admission["wait_limit_ms"]
+      assert_equal 0, admission["shed_count"]
+      assert_equal 0, admission["peer_needs_streams"]
+    end
+  end
+
+  def test_wait_limit_is_configurable
+    server = create_server_direct(wait_limit: 1.5)
+
+    assert_equal 1.5, server.admission.wait_limit
+  end
+
+  # Long waits mean the queue drains slower than clients will wait, so work is
+  # refused even though there is still room in the queue.
+  def test_dispatch_sheds_on_wait_limit_before_queue_is_full
+    server = create_server_direct(threads: 1, max_queue_size: 50)
+    connection = tracked_connection(server)
+    10.times { server.scheduler.wait_time.record(2.0) }
+
+    refute server.scheduler.full?, "queue still has room"
+
+    error_sent = nil
+    connection.stub(:send_error, ->(_s, status, msg) { error_sent = [status, msg] }) do
+      server.send(:dispatch_request, connection, writable_stream(4))
+    end
+
+    assert_equal [503, "Service Unavailable"], error_sent
+    assert_equal 0, server.scheduler.pending
+  end
+
+  # A burst is queued work that still completes quickly. It must be absorbed,
+  # not refused, or we throw away work that would have succeeded.
+  def test_dispatch_absorbs_a_burst_with_short_waits
+    server = create_server_direct(threads: 1, max_queue_size: 50)
+    connection = tracked_connection(server)
+    10.times { server.scheduler.wait_time.record(0.001) }
+
+    server.send(:dispatch_request, connection, writable_stream(4))
+
+    assert_equal 1, server.scheduler.pending
+  end
+
+  def test_scheduler_records_how_long_work_waited
+    server = create_server_direct(threads: 1, max_queue_size: 5, app: ->(_env) { [200, {}, ["OK"]] })
+    assert server.scheduler.wait_time.empty?
+
+    processed = Queue.new
+    scheduler = Quicsilver::Server::Schedulers::ThreadScheduler.new(concurrency: 1, max_queue_size: 5) do |_work|
+      processed << :done
+    end
+    scheduler.start
+    scheduler.enqueue([:dummy, :work])
+    processed.pop
+    scheduler.stop
+
+    refute scheduler.wait_time.empty?, "worker should record queue wait time"
+  end
+
+  def test_streams_available_event_is_recorded
+    server = create_server_direct
+    connection_handle = 12345
+    tracked_connection(server, connection_handle: connection_handle)
+
+    server.handle_stream_event(
+      [connection_handle, 67890], 0,
+      Quicsilver::Server::CONNECTION_EVENT_STREAMS_AVAILABLE,
+      [42, 7].pack("S<S<"), false
+    )
+
+    Quicsilver.stub(:transport_counters, {}) do
+      available = server.stats.dig("admission", "streams_available")
+      assert_equal 42, available["bidirectional"]
+      assert_equal 7, available["unidirectional"]
+    end
+  end
+
+  # This is the leading demand signal: a peer wanting to open a stream but
+  # blocked by our advertised limit, before anything reaches the queue.
+  def test_peer_needs_streams_event_counts_and_notifies
+    server = create_server_direct
+    connection_handle = 12345
+    connection = tracked_connection(server, connection_handle: connection_handle)
+
+    notified = []
+    server.on_peer_needs_streams { |conn, bidi| notified << [conn, bidi] }
+
+    server.handle_stream_event(
+      [connection_handle, 67890], 0,
+      Quicsilver::Server::CONNECTION_EVENT_PEER_NEEDS_STREAMS,
+      [1].pack("C"), false
+    )
+
+    assert_equal 1, server.peer_needs_streams_count
+    assert_equal [[connection, true]], notified
+  end
+
+  def test_peer_needs_streams_accumulates
+    server = create_server_direct
+    tracked_connection(server)
+
+    3.times do
+      server.handle_stream_event(
+        [12345, 67890], 0,
+        Quicsilver::Server::CONNECTION_EVENT_PEER_NEEDS_STREAMS,
+        [1].pack("C"), false
+      )
+    end
+
+    assert_equal 3, server.peer_needs_streams_count
+  end
+
+  def test_grant_streams_sets_the_peer_limit
+    server = create_server_direct
+    connection = tracked_connection(server)
+
+    called = nil
+    Quicsilver.stub(:connection_set_max_streams, ->(handle, count) { called = [handle, count] }) do
+      server.grant_streams(connection, 250)
+    end
+
+    assert_equal [connection.handle, 250], called
+  end
+
+  def test_grant_streams_accepts_a_raw_handle
+    server = create_server_direct
+
+    called = nil
+    Quicsilver.stub(:connection_set_max_streams, ->(handle, count) { called = [handle, count] }) do
+      server.grant_streams(999, 10)
+    end
+
+    assert_equal [999, 10], called
+  end
+
   def test_default_max_connections
     server = create_server_direct
     assert_equal 100, server.max_connections
@@ -396,6 +540,12 @@ class ServerTest < Minitest::Test
   def create_server_direct(**kwargs)
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
     Quicsilver::Server.new(4433, server_configuration: config, **kwargs)
+  end
+
+  def writable_stream(stream_id, handle: 0xBEEF)
+    Quicsilver::Transport::InboundStream.new(stream_id).tap do |stream|
+      stream.stream_handle = handle
+    end
   end
 
   def tracked_connection(server, connection_handle: 12345)
