@@ -31,6 +31,15 @@ module Quicsilver
         raise NotImplementedError
       end
 
+      # Rolling record of how long work waited before being picked up.
+      #
+      # Depth says how much is queued; this says whether that depth is a burst
+      # being absorbed or saturation that should be shed. Implementations that
+      # do not track it get an empty recorder, which reads as zero pressure.
+      def wait_time
+        @wait_time ||= WaitTime.new
+      end
+
       # Wait for the queue to empty.
       def drain(timeout: 5)
         raise NotImplementedError

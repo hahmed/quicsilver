@@ -1,12 +1,15 @@
 # frozen_string_literal: true
 
 require_relative "../scheduler"
+require_relative "../wait_time"
 
 module Quicsilver
   class Server
     module Schedulers
       # Thread-based scheduler — uses a thread pool with Thread::Queue.
       class ThreadScheduler < Scheduler
+        attr_reader :wait_time
+
         def initialize(concurrency:, max_queue_size:, &handler)
           @size = concurrency
           @max_queue_size = max_queue_size
@@ -14,10 +17,14 @@ module Quicsilver
           @queue = Queue.new
           @threads = []
           @mutex = Mutex.new
+          @wait_time = WaitTime.new
         end
 
+        # Work is stamped on the way in so the worker can record how long it
+        # waited. Depth tells you how much is queued; this tells you whether
+        # that depth actually matters.
         def enqueue(work)
-          @queue.push(work)
+          @queue.push([WaitTime.now, work])
         end
 
         def full?
@@ -31,8 +38,11 @@ module Quicsilver
         def start
           @size.times do
             thread = Thread.new do
-              while (work = @queue.pop)
-                break if work == :shutdown
+              while (item = @queue.pop)
+                break if item == :shutdown
+
+                enqueued_at, work = item
+                @wait_time.record_since(enqueued_at)
                 @handler.call(work)
               end
             end
