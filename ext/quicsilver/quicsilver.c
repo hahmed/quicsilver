@@ -512,6 +512,25 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
                 MsQuic->StreamClose(Stream);
             }
          break; 
+        case QUIC_CONNECTION_EVENT_STREAMS_AVAILABLE: {
+            // How many streams the peer is still willing to accept. Falls as we
+            // open streams toward them; rises as their limit is extended.
+            uint16_t counts[2];
+            counts[0] = Event->STREAMS_AVAILABLE.BidirectionalCount;
+            counts[1] = Event->STREAMS_AVAILABLE.UnidirectionalCount;
+            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "STREAMS_AVAILABLE", 0,
+                (const char*)counts, sizeof(counts), 0);
+            break;
+        }
+        case QUIC_CONNECTION_EVENT_PEER_NEEDS_STREAMS: {
+            // The peer wants to open a stream and is blocked by the limit we
+            // advertised. This is a leading demand signal: a request is waiting
+            // on the wire right now, before anything reaches our queue.
+            uint8_t bidirectional = Event->PEER_NEEDS_STREAMS.Bidirectional ? 1 : 0;
+            dispatch_to_ruby(Connection, ctx, ctx->client_obj, "PEER_NEEDS_STREAMS", 0,
+                (const char*)&bidirectional, sizeof(bidirectional), 0);
+            break;
+        }
         case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
             dispatch_to_ruby(Connection, ctx, ctx->client_obj, "DATAGRAM_RECEIVED", 0,
                 (const char*)Event->DATAGRAM_RECEIVED.Buffer->Buffer,
@@ -1448,6 +1467,47 @@ quicsilver_apply_msquic_server_id(VALUE self, VALUE server_id_bytes_val)
     return Qtrue;
 }
 
+// Adjust how many bidirectional streams the peer may have open concurrently.
+//
+// This is the QUIC-native admission window. MsQuic queues a MAX_STREAMS frame
+// when the limit is widened; when it is narrowed, already-granted credit is not
+// revoked (RFC 9000 requires MAX_STREAMS to be monotonic), so narrowing only
+// stops the window being extended as streams complete.
+static VALUE
+quicsilver_connection_set_max_streams(VALUE self, VALUE connection_handle, VALUE count)
+{
+    if (MsQuic == NULL) {
+        rb_raise(rb_eRuntimeError, "MSQUIC not initialized.");
+        return Qfalse;
+    }
+
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
+    unsigned int requested = NUM2UINT(count);
+    if (requested > UINT16_MAX) {
+        rb_raise(rb_eArgError, "Stream count must be between 0 and %u", UINT16_MAX);
+        return Qfalse;
+    }
+
+    QUIC_SETTINGS Settings;
+    memset(&Settings, 0, sizeof(Settings));
+    Settings.IsSet.PeerBidiStreamCount = TRUE;
+    Settings.PeerBidiStreamCount = (uint16_t)requested;
+
+    QUIC_STATUS Status = MsQuic->SetParam(
+        Connection,
+        QUIC_PARAM_CONN_SETTINGS,
+        sizeof(Settings),
+        &Settings);
+
+    if (QUIC_FAILED(Status)) {
+        rb_raise(rb_eRuntimeError, "Setting peer stream count failed, 0x%x!", Status);
+        return Qfalse;
+    }
+
+    wake_event_loop();
+    return Qtrue;
+}
+
 // Configure listener-level CIBIR (Connection ID Based Implicit Routing) bytes.
 static VALUE
 quicsilver_configure_listener_cibir(VALUE self, VALUE listener_handle, VALUE cibir_bytes_val)
@@ -1855,6 +1915,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "connection_ids", quicsilver_connection_ids, 1);
     rb_define_singleton_method(mQuicsilver, "get_resumption_ticket", quicsilver_get_resumption_ticket, 1);
     rb_define_singleton_method(mQuicsilver, "set_resumption_ticket", quicsilver_set_resumption_ticket, 2);
+    rb_define_singleton_method(mQuicsilver, "connection_set_max_streams", quicsilver_connection_set_max_streams, 2);
     rb_define_singleton_method(mQuicsilver, "connection_shutdown", quicsilver_connection_shutdown, 3);
     rb_define_singleton_method(mQuicsilver, "close_connection_handle", quicsilver_close_connection_handle, 1);
     rb_define_singleton_method(mQuicsilver, "close_server_connection", quicsilver_close_server_connection, 1);
