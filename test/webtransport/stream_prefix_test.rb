@@ -103,6 +103,26 @@ class WebTransportStreamPrefixTest < Minitest::Test
     assert_nil Session.parse_uni_stream_data(varint(7) + "d")
   end
 
+  # === extended CONNECT :protocol (§3.2) ===
+  #
+  # draft-16 requires "webtransport-h3". The bare "webtransport" token is the
+  # capsule-based HTTP/2 binding (§2.1.2) and what pre-15 drafts used over
+  # HTTP/3; Chrome still sends it, so both are accepted.
+
+  def test_accepts_the_draft_16_protocol_token
+    assert Quicsilver::Protocol::WebTransport.protocol?("webtransport-h3")
+  end
+
+  def test_accepts_the_legacy_protocol_token
+    assert Quicsilver::Protocol::WebTransport.protocol?("webtransport")
+  end
+
+  def test_rejects_other_protocol_tokens
+    refute Quicsilver::Protocol::WebTransport.protocol?("websocket")
+    refute Quicsilver::Protocol::WebTransport.protocol?(nil)
+    refute Quicsilver::Protocol::WebTransport.protocol?("")
+  end
+
   def test_parses_uni_session_id_and_data
     session_id, data = Session.parse_uni_stream_data(varint(4) + "body")
 

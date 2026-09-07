@@ -713,7 +713,7 @@ module Quicsilver
 
       # WebTransport: intercept before normal request dispatch.
       # The CONNECT stream stays open (no FIN) — it becomes the session.
-      if method == "CONNECT" && headers[":protocol"] == "webtransport"
+      if method == "CONNECT" && Protocol::WebTransport.protocol?(headers[":protocol"])
         accept_webtransport(connection, stream_id, stream_handle, headers, early_data: early_data)
         return
       end
