@@ -601,6 +601,14 @@ module Quicsilver
       pending = @pending_mutex.synchronize { @pending_streams[stream_id] }
       if pending
         complete_streaming_request(pending, event)
+      elsif @webtransport.bidi_stream?(event.data)
+        # A short WebTransport stream can arrive complete, prefix and all, in a
+        # single RECEIVE_FIN. The checks above only match streams already
+        # registered with a session, so without this it falls through to the
+        # HTTP/3 parser, which reads the WT_STREAM_BIDI prefix as a frame
+        # header and raises H3_FRAME_UNEXPECTED — a connection error.
+        accept_webtransport_stream(connection, stream_id, event.handle, event.data)
+        @webtransport.active_stream(stream_id)&.notify_read_close
       else
         complete_buffered_request(connection, connection_handle, stream_id, event, early_data: early_data)
       end
