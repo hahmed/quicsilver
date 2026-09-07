@@ -28,13 +28,16 @@ class WebTransportStreamPrefixTest < Minitest::Test
   end
 
   def test_parses_session_ids_across_every_varint_width
+    # Session ids are CONNECT stream ids, so every value here is divisible by
+    # 4 — the largest valid id in each varint width rather than the largest
+    # encodable one.
     {
       0 => "1-byte, minimum",
-      63 => "1-byte, maximum",
+      60 => "1-byte, maximum",
       64 => "2-byte, minimum",
-      16_383 => "2-byte, maximum",
+      16_380 => "2-byte, maximum",
       16_384 => "4-byte, minimum",
-      1_073_741_823 => "4-byte, maximum",
+      1_073_741_820 => "4-byte, maximum",
       1_073_741_824 => "8-byte, minimum"
     }.each do |id, width|
       session_id, remainder = Session.parse_stream_prefix(bidi_prefix(id) + "x")
@@ -88,15 +91,15 @@ class WebTransportStreamPrefixTest < Minitest::Test
     assert_nil Session.parse_stream_prefix(full.byteslice(0, 3))
   end
 
-  def test_rejects_a_bidi_session_id_not_divisible_by_four
-    skip "known gap: session ids are not validated"
+  # === session id validity (§4) ===
+  #
+  # Session ids are CONNECT stream ids, so id % 4 == 0 always holds.
 
+  def test_rejects_a_bidi_session_id_not_divisible_by_four
     assert_nil Session.parse_stream_prefix(bidi_prefix(7) + "d")
   end
 
   def test_rejects_a_uni_session_id_not_divisible_by_four
-    skip "known gap: session ids are not validated"
-
     assert_nil Session.parse_uni_stream_data(varint(7) + "d")
   end
 
