@@ -3,9 +3,6 @@
 require "test_helper"
 
 class WebTransportStreamTest < Minitest::Test
-
-  # === Receiving data ===
-
   def test_receive_data_invokes_callback_with_raw_bytes
     stream = build_stream
     received = []
@@ -14,6 +11,41 @@ class WebTransportStreamTest < Minitest::Test
     stream.receive_data("hello")
 
     assert_equal ["hello"], received
+  end
+
+  # accept_stream calls add_stream then receive_data on the event loop thread,
+  # but add_stream's callback spawns a worker to consume the stream. Data that
+  # arrives before that worker registers on_data must not be dropped.
+  def test_receive_data_before_a_callback_is_registered_is_not_lost
+    stream = build_stream
+    received = []
+
+    stream.receive_data("hello")
+    stream.on_data { |data| received << data }
+
+    assert_equal ["hello"], received
+  end
+
+  def test_buffered_chunks_are_delivered_in_order
+    stream = build_stream
+    received = []
+
+    stream.receive_data("one")
+    stream.receive_data("two")
+    stream.on_data { |data| received << data }
+
+    assert_equal ["one", "two"], received
+  end
+
+  def test_buffered_chunks_are_only_delivered_once
+    stream = build_stream
+    received = []
+    stream.receive_data("hello")
+    stream.on_data { |data| received << data }
+
+    stream.receive_data("world")
+
+    assert_equal ["hello", "world"], received
   end
 
   def test_receive_data_ignores_empty_chunks

@@ -31,6 +31,8 @@ module Quicsilver
         @data_callback = nil
         @close_callback = nil
         @close_notified = false
+        @buffered_data = []
+        @data_mutex = Mutex.new
       end
 
       def stream_handle
@@ -54,8 +56,17 @@ module Quicsilver
         notify_close_callback
       end
 
+      # Data can arrive before a consumer attaches: accept_stream delivers the
+      # stream's first bytes on the event loop thread, while the callback is
+      # registered by whatever the on_stream handler spawns. Anything buffered
+      # in that window is flushed here, in arrival order.
       def on_data(&block)
-        @data_callback = block
+        buffered = @data_mutex.synchronize do
+          @data_callback = block
+          @buffered_data.slice!(0..-1)
+        end
+
+        buffered.each { |chunk| block.call(chunk) }
       end
 
       def on_close(&block)
@@ -70,7 +81,12 @@ module Quicsilver
       def receive_data(data)
         return if data.nil? || data.empty? || !@read_open
 
-        @data_callback&.call(data)
+        callback = @data_mutex.synchronize do
+          @buffered_data << data unless @data_callback
+          @data_callback
+        end
+
+        callback&.call(data)
       end
 
       # Called by Server when the peer has closed its write side. :nodoc:
