@@ -20,6 +20,7 @@ module Quicsilver
       WT_STREAM_BIDI = Protocol::WebTransport::BIDI_STREAM_TYPE
       WT_STREAM_UNI = Protocol::WebTransport::UNI_STREAM_TYPE
       WT_CLOSE_SESSION = Protocol::WebTransport::CLOSE_SESSION_CAPSULE
+      WT_DRAIN_SESSION = Protocol::WebTransport::DRAIN_SESSION_CAPSULE
       MAX_CLOSE_MESSAGE_LENGTH = 1024
 
       # Parse a bidirectional WebTransport stream prefix:
@@ -89,6 +90,7 @@ module Quicsilver
         @accepted = false
         @open = false
         @datagram_callback = nil
+        @drain_callback = nil
         @stream_callback = nil
         @uni_stream_callback = nil
         @close_callback = nil
@@ -166,6 +168,21 @@ module Quicsilver
       # Register a callback for session close.
       def on_close(&block)
         @close_callback = block
+      end
+
+      # The peer is asking us to wind this session down. Advisory: the session
+      # stays usable, and the application decides when to close (draft-16 §4.7).
+      #
+      #   session.on_drain { stop_accepting_work }
+      def on_drain(&block)
+        @drain_callback = block
+      end
+
+      # Ask the peer to wind the session down. Does not close it.
+      def drain!
+        @stream.send(Protocol::Capsule.encode(WT_DRAIN_SESSION, ""), fin: false)
+      rescue
+        # Best-effort — connection may already be gone
       end
 
       def accepted?
@@ -306,6 +323,11 @@ module Quicsilver
           reason = payload.bytesize > 4 ? payload.byteslice(4..-1).to_s : ""
           Quicsilver.logger.debug("WebTransport session #{@stream_id} received close capsule code=#{code} reason=#{reason.inspect}")
           notify_close
+        when WT_DRAIN_SESSION
+          # Advisory only. The session stays open and usable; it is up to the
+          # application to wind down (draft-16 §4.7).
+          Quicsilver.logger.debug("WebTransport session #{@stream_id} received drain capsule")
+          @drain_callback&.call
         else
           # Unknown capsules are ignored, matching HTTP Capsule extensibility.
         end

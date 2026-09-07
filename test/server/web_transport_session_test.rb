@@ -282,6 +282,76 @@ class WebTransportSessionTest < Minitest::Test
     assert closed
   end
 
+  # === WT_DRAIN_SESSION (draft-16 §4.7) ===
+  #
+  #   After sending or receiving either a WT_DRAIN_SESSION capsule or a HTTP/3
+  #   GOAWAY frame, an endpoint MAY continue using the session ... The signal
+  #   is intended for the application, which is expected to attempt to
+  #   gracefully terminate the session as soon as possible.
+  #
+  # So it is advisory: the session stays usable and the app decides when to go.
+
+  def test_drain_capsule_notifies_the_application
+    session = build_session
+    accept_webtransport_session(session)
+    drained = false
+
+    session.on_drain { drained = true }
+    session.receive_connect_data(drain_capsule)
+
+    assert drained
+  end
+
+  def test_drain_capsule_leaves_the_session_open
+    session = build_session
+    accept_webtransport_session(session)
+
+    session.receive_connect_data(drain_capsule)
+
+    assert session.open?
+    assert session.accepts_new_streams?, "draining is advisory, not a close"
+  end
+
+  def test_drain_capsule_does_not_close_the_session
+    session = build_session
+    accept_webtransport_session(session)
+    closed = false
+
+    session.on_close { closed = true }
+    session.receive_connect_data(drain_capsule)
+
+    refute closed
+  end
+
+  def test_drain_capsule_without_a_handler_is_harmless
+    session = build_session
+    accept_webtransport_session(session)
+
+    session.receive_connect_data(drain_capsule)
+
+    assert session.open?
+  end
+
+  def test_drain_sends_an_empty_capsule
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+
+    session.drain!
+
+    assert_includes stream.writes, drain_capsule
+  end
+
+  def test_drain_leaves_the_session_usable
+    session = session_with(RecordingConnectStream.new)
+    session.accept!
+
+    session.drain!
+
+    assert session.open?
+    assert session.accepts_new_streams?
+  end
+
   def test_receive_connect_data_ignores_unknown_capsule
     session = build_session
     accept_webtransport_session(session)
@@ -461,6 +531,36 @@ class WebTransportSessionTest < Minitest::Test
 
   def expect_successful_connect_response(session)
     session_stream(session).expect(:send, true, [String], fin: false)
+  end
+
+  def drain_capsule
+    Quicsilver::Protocol::Capsule.encode(
+      Quicsilver::Protocol::WebTransport::DRAIN_SESSION_CAPSULE, ""
+    )
+  end
+
+  # Records what reaches the CONNECT stream, so tests assert on the bytes the
+  # peer would receive rather than on mock expectations.
+  class RecordingConnectStream
+    attr_reader :writes
+
+    def initialize = @writes = []
+
+    def send(data, fin: false) = @writes << data
+    def reset(code = nil) = nil
+    def stream_id = 0
+    def stream_handle = 99_999
+  end
+
+  def session_with(stream)
+    Quicsilver::Server::WebTransportSession.new(
+      connection: Object.new,
+      stream: stream,
+      headers: {
+        ":method" => "CONNECT", ":protocol" => "webtransport",
+        ":scheme" => "https", ":authority" => "localhost:4433", ":path" => "/cable"
+      }
+    )
   end
 
   def expect_close_session_capsule(session)
