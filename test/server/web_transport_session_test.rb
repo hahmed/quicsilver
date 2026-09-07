@@ -3,6 +3,8 @@
 require "test_helper"
 
 class WebTransportSessionTest < Minitest::Test
+  Session = Quicsilver::Server::WebTransportSession
+
 
   # === Session lifecycle ===
 
@@ -70,6 +72,41 @@ class WebTransportSessionTest < Minitest::Test
     long_reason = "x" * 2000
     session.close(code: 1, reason: long_reason)
     refute session.open?
+  end
+
+  # draft-16 §6: "Senders that truncate an application-supplied message MUST do
+  # so at a UTF-8 character boundary." A receiver seeing invalid UTF-8 MUST
+  # reset the stream with H3_MESSAGE_ERROR, so cutting mid-character makes a
+  # conformant peer tear down our stream.
+
+  def test_truncate_reason_leaves_short_messages_alone
+    assert_equal "Go \u{1F680}", Session.truncate_reason("Go \u{1F680}", 100)
+  end
+
+  def test_truncate_reason_keeps_a_character_that_exactly_fits
+    assert_equal "Go \u{1F680}", Session.truncate_reason("Go \u{1F680}", 7)
+  end
+
+  def test_truncate_reason_drops_a_character_that_would_be_split
+    # The rocket is 4 bytes, so limits 3..6 cannot include it.
+    (3..6).each do |limit|
+      assert_equal "Go ", Session.truncate_reason("Go \u{1F680}", limit),
+        "failed at limit #{limit}"
+    end
+  end
+
+  def test_truncate_reason_never_produces_invalid_utf8
+    reason = "a" * 1022 + "\u{1F680}"
+    truncated = Session.truncate_reason(reason, 1024)
+
+    assert truncated.valid_encoding?
+    assert_operator truncated.bytesize, :<=, 1024
+  end
+
+  def test_truncate_reason_respects_the_spec_limit_by_default
+    truncated = Session.truncate_reason("x" * 2000)
+
+    assert_equal Session::MAX_CLOSE_MESSAGE_LENGTH, truncated.bytesize
   end
 
   def test_close_closes_all_streams

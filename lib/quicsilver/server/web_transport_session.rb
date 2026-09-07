@@ -58,6 +58,19 @@ module Quicsilver
 
       # Parse uni stream data after Connection strips the 0x54 type byte.
       # Payload is [session_id varint][data...]
+      # Cut a close reason to at most `limit` bytes without splitting a
+      # character. draft-ietf-webtrans-http3-16 §6 requires truncation on a
+      # UTF-8 boundary; a receiver seeing invalid UTF-8 MUST reset the stream
+      # with H3_MESSAGE_ERROR.
+      def self.truncate_reason(reason, limit = MAX_CLOSE_MESSAGE_LENGTH)
+        reason = reason.to_s
+        return reason if reason.bytesize <= limit
+
+        truncated = reason.byteslice(0, limit)
+        truncated = truncated.byteslice(0, truncated.bytesize - 1) until truncated.valid_encoding?
+        truncated
+      end
+
       def self.parse_uni_stream_data(payload)
         session_id, sid_len = Protocol.decode_varint_str(payload, 0)
         return nil if sid_len == 0
@@ -306,9 +319,7 @@ module Quicsilver
       end
 
       def write_close_reason(code, reason)
-        reason = reason.to_s
-        reason = reason.byteslice(0, MAX_CLOSE_MESSAGE_LENGTH) if reason.bytesize > MAX_CLOSE_MESSAGE_LENGTH
-        payload = [code].pack("N") + reason.b
+        payload = [code].pack("N") + self.class.truncate_reason(reason).b
         @stream.send(Protocol::Capsule.encode(WT_CLOSE_SESSION, payload), fin: false)
       rescue
         # Best-effort — connection may already be gone
