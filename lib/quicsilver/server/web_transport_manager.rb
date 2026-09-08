@@ -8,10 +8,16 @@ module Quicsilver
     # can be associated with a session. The stream prefix carries the session ID,
     # and that prefix can be split across receives. This object owns that
     # cross-session routing state so Server can stay focused on HTTP/3 dispatch.
+    #
+    # Scoped to a single connection — see WebTransportRegistry.
     class WebTransportManager
       def initialize
         @sessions = {}
         @pending_streams = {}
+      end
+
+      def sessions
+        @sessions.values
       end
 
       def register(session)
@@ -30,12 +36,12 @@ module Quicsilver
         nil
       end
 
-      def sessions_for_connection(connection)
-        @sessions.select { |_id, session| session.connection == connection && session.routable? }
+      def routable_sessions
+        @sessions.each_value.select(&:routable?)
       end
 
-      def open_session_for_connection(connection)
-        @sessions.each_value.find { |session| session.connection == connection && session.open? }
+      def open_session
+        @sessions.each_value.find(&:open?)
       end
 
       def active_stream(stream_id)

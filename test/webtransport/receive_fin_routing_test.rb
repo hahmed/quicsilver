@@ -131,7 +131,7 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     server.connections[connection_handle] = connection
 
     @session = build_session(connection)
-    server.instance_variable_get(:@webtransport).register(@session)
+    server.instance_variable_get(:@webtransport).for(connection_handle).register(@session)
 
     [server, connection]
   end

@@ -23,17 +23,16 @@ class WebTransportManagerTest < Minitest::Test
     assert_nil manager.session(0)
   end
 
-  def test_sessions_for_connection_returns_matching_sessions
+  def test_routable_sessions_excludes_closed_ones
     manager = Quicsilver::Server::WebTransportManager.new
-    connection = Object.new
-    other_connection = Object.new
-    session = build_session(stream_id: 0, connection: connection)
-    other_session = build_session(stream_id: 4, connection: other_connection)
+    session = build_session(stream_id: 0)
+    closed = build_session(stream_id: 4)
+    closed.notify_close
 
     manager.register(session)
-    manager.register(other_session)
+    manager.register(closed)
 
-    assert_equal({ 0 => session }, manager.sessions_for_connection(connection))
+    assert_equal [session], manager.routable_sessions
   end
 
   def test_active_stream_finds_stream_across_sessions
@@ -68,15 +67,14 @@ class WebTransportManagerTest < Minitest::Test
     refute stream.open?
   end
 
-  def test_open_session_for_connection
+  def test_open_session_finds_an_accepted_session
     manager = Quicsilver::Server::WebTransportManager.new
-    connection = Object.new
-    session = build_session(stream_id: 0, connection: connection)
+    session = build_session(stream_id: 0)
     accept_webtransport_session(session)
 
     manager.register(session)
 
-    assert_same session, manager.open_session_for_connection(connection)
+    assert_same session, manager.open_session
   end
 
   def test_pending_payload_buffers_incomplete_bidi_prefix
@@ -107,6 +105,71 @@ class WebTransportManagerTest < Minitest::Test
     manager.register(session)
 
     assert manager.bidi_stream?(prefix)
+  end
+
+  # Session ids restart per connection, so two clients routinely both use 0.
+
+  def test_a_registry_keeps_one_manager_per_connection
+    registry = Quicsilver::Server::WebTransportRegistry.new
+
+    alice = registry.for("alice")
+    bob = registry.for("bob")
+
+    refute_same alice, bob
+    assert_same alice, registry.for("alice")
+  end
+
+  def test_sessions_on_different_connections_do_not_collide
+    registry = Quicsilver::Server::WebTransportRegistry.new
+    alice_session = build_session(stream_id: 0, connection: "alice")
+    bob_session = build_session(stream_id: 0, connection: "bob")
+
+    registry.for("alice").register(alice_session)
+    registry.for("bob").register(bob_session)
+
+    assert_same alice_session, registry.for("alice").session(0)
+    assert_same bob_session, registry.for("bob").session(0)
+  end
+
+  def test_a_stream_cannot_leak_into_another_connections_session
+    registry = Quicsilver::Server::WebTransportRegistry.new
+    alice_session = build_session(stream_id: 0, connection: "alice")
+    bob_session = build_session(stream_id: 0, connection: "bob")
+    accept_webtransport_session(alice_session)
+    accept_webtransport_session(bob_session)
+    registry.for("alice").register(alice_session)
+    registry.for("bob").register(bob_session)
+
+    registry.for("alice").accept_bidi_stream(4, 99_999, bidi_prefix(0) + "hi")
+
+    refute_nil alice_session.stream(4)
+    assert_nil bob_session.stream(4), "must not reach another client's session"
+  end
+
+  def test_dropping_a_connection_leaves_the_others
+    registry = Quicsilver::Server::WebTransportRegistry.new
+    registry.for("alice").register(build_session(stream_id: 0, connection: "alice"))
+    bob_session = build_session(stream_id: 0, connection: "bob")
+    registry.for("bob").register(bob_session)
+
+    registry.drop("alice")
+
+    assert_nil registry.for("alice").session(0), "alice's sessions went with the connection"
+    assert_same bob_session, registry.for("bob").session(0)
+  end
+
+  def test_dropping_a_connection_returns_its_sessions_for_teardown
+    registry = Quicsilver::Server::WebTransportRegistry.new
+    session = build_session(stream_id: 0, connection: "alice")
+    registry.for("alice").register(session)
+
+    assert_equal [session], registry.drop("alice")
+  end
+
+  def test_dropping_an_unknown_connection_is_harmless
+    registry = Quicsilver::Server::WebTransportRegistry.new
+
+    assert_empty registry.drop("nobody")
   end
 
   def test_accept_bidi_stream_routes_to_session
@@ -265,6 +328,11 @@ class WebTransportManagerTest < Minitest::Test
 
   def session_stream(session)
     session.instance_variable_get(:@stream)
+  end
+
+  def bidi_prefix(session_id)
+    Quicsilver::Protocol.encode_varint(Quicsilver::Server::WebTransportSession::WT_STREAM_BIDI) +
+      Quicsilver::Protocol.encode_varint(session_id)
   end
 
   def build_session(stream_id:, connection: Object.new)
