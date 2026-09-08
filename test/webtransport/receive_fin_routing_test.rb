@@ -54,6 +54,60 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     assert_equal [8], dispatched
   end
 
+  # === STOP_SENDING on a WebTransport stream (draft-16 §4.4) ===
+  #
+  #   A WebTransport endpoint can send a RESET_STREAM or a STOP_SENDING frame
+  #   for a WebTransport data stream. Those signals are propagated by the
+  #   WebTransport implementation to the application.
+  #
+  # The handler did not check for WebTransport streams at all, so it replied
+  # with a raw HTTP/3 code and ran cancel_stream, which touches the request
+  # registry and pending-stream bookkeeping for a stream that is not a request.
+
+  def test_stop_sending_reaches_the_owning_session
+    server, connection = server_with_session
+    stream = accept_stream(server, connection, COMMAND_STREAM)
+    reported = :unset
+    stream.on_reset { |code| reported = code }
+
+    stop_sending(server, connection, COMMAND_STREAM,
+      Quicsilver::Protocol::WebTransport.application_error_to_http(42))
+
+    assert_equal 42, reported
+  end
+
+  def test_stop_sending_removes_the_stream_from_its_session
+    server, connection = server_with_session
+    accept_stream(server, connection, COMMAND_STREAM)
+
+    stop_sending(server, connection, COMMAND_STREAM, Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+
+    assert_nil session.stream(COMMAND_STREAM)
+  end
+
+  def test_stop_sending_does_not_touch_http3_bookkeeping
+    server, connection = server_with_session
+    accept_stream(server, connection, COMMAND_STREAM)
+
+    stop_sending(server, connection, COMMAND_STREAM, Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+
+    refute server.cancelled_stream?(COMMAND_STREAM),
+      "a WebTransport stream is not a cancelled HTTP/3 request"
+  end
+
+  # Ordinary requests must still be cancelled the old way. The HTTP/3 path
+  # answers with a real RESET_STREAM, so that call is stubbed out; the
+  # assertion is on the cancellation, not the stub.
+  def test_stop_sending_on_a_request_stream_still_cancels_it
+    server, connection = server_with_session
+
+    Quicsilver.stub(:stream_reset, nil) do
+      stop_sending(server, connection, 20, Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+    end
+
+    assert server.cancelled_stream?(20)
+  end
+
   private
 
   attr_reader :session
@@ -88,6 +142,19 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     server.handle_stream_event(
       [connection.handle, 0], stream_id,
       Quicsilver::Server::STREAM_EVENT_RECEIVE_FIN, raw, false
+    )
+  end
+
+  def accept_stream(server, connection, stream_id)
+    receive_fin(server, connection, stream_id, bidi_payload(%({"type":"reaction"})))
+    session.stream(stream_id)
+  end
+
+  def stop_sending(server, connection, stream_id, error_code)
+    raw = [99_000 + stream_id].pack("Q") + [error_code].pack("Q")
+    server.handle_stream_event(
+      [connection.handle, 0], stream_id,
+      Quicsilver::Server::STREAM_EVENT_STOP_SENDING, raw, false
     )
   end
 

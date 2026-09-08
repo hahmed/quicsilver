@@ -397,7 +397,6 @@ module Quicsilver
           wt.notify_close
           connection.remove_stream(stream_id)
         elsif (wt_session = @webtransport.session_for_stream(stream_id))
-          # Pass the peer's code through so the application can see it (§4.4).
           wt_session.remove_stream(stream_id, error_code: event.error_code)
         else
           cancel_stream(connection, stream_id)
@@ -406,8 +405,17 @@ module Quicsilver
         return unless (connection = @connections[connection_handle])
         event = Transport::StreamEvent.new(data, "STOP_SENDING")
         Quicsilver.logger.debug("Stream #{stream_id} stop sending requested with error code: 0x#{event.error_code.to_s(16)}")
-        Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
-        cancel_stream(connection, stream_id)
+
+        # §4.4: STOP_SENDING on a WebTransport stream is delivered to the
+        # application, like RESET_STREAM. Without this it falls through to the
+        # HTTP/3 cancel below, which answers with the wrong code and runs
+        # request bookkeeping for a stream that is not a request.
+        if (wt_session = @webtransport.session_for_stream(stream_id))
+          wt_session.remove_stream(stream_id, error_code: event.error_code)
+        else
+          Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
+          cancel_stream(connection, stream_id)
+        end
       when STREAM_EVENT_START_COMPLETE
         # peer_accepted=true: stream is flowing. false: queued at peer's limit.
         # Server-side: this fires for outbound streams (control, QPACK).
