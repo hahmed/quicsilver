@@ -79,6 +79,49 @@ class WebTransportSessionTest < Minitest::Test
   # reset the stream with H3_MESSAGE_ERROR, so cutting mid-character makes a
   # conformant peer tear down our stream.
 
+  # A short or absent payload is a clean close: code 0, empty reason (§6).
+
+  def test_parse_close_payload_reads_code_and_reason
+    info = Session.parse_close_payload([7].pack("N") + "bye")
+
+    assert_equal 7, info.code
+    assert_equal "bye", info.reason
+  end
+
+  def test_parse_close_payload_handles_a_code_with_no_reason
+    info = Session.parse_close_payload([7].pack("N"))
+
+    assert_equal 7, info.code
+    assert_equal "", info.reason
+  end
+
+  def test_parse_close_payload_handles_an_empty_payload
+    info = Session.parse_close_payload("")
+
+    assert_equal 0, info.code
+    assert_equal "", info.reason
+  end
+
+  def test_parse_close_payload_handles_a_truncated_code
+    info = Session.parse_close_payload("\x00\x07".b)
+
+    assert_equal 0, info.code
+  end
+
+  def test_parse_close_payload_tags_the_reason_as_utf8
+    info = Session.parse_close_payload([0].pack("N") + "完了".b)
+
+    assert_equal "完了", info.reason
+    assert_equal Encoding::UTF_8, info.reason.encoding
+  end
+
+  def test_close_payload_round_trips
+    info = Session.parse_close_payload(Session.build_close_payload(7, "bye"))
+
+    assert_equal 7, info.code
+    assert_equal "bye", info.reason
+  end
+
   def test_truncate_reason_leaves_short_messages_alone
     assert_equal "Go \u{1F680}", Session.truncate_reason("Go \u{1F680}", 100)
   end
@@ -280,6 +323,99 @@ class WebTransportSessionTest < Minitest::Test
     session.receive_connect_data(capsule.byteslice(2..-1))
     refute session.open?
     assert closed
+  end
+
+  # === close code and reason (draft-16 §6) ===
+  #
+  # The peer's WT_CLOSE_SESSION capsule carries a 32-bit code and a UTF-8
+  # reason. We decoded both and dropped them, so an application could not tell
+  # a clean close from an error, or the peer hanging up from us closing.
+
+  def test_close_capsule_reports_the_code_and_reason
+    session = build_session
+    accept_webtransport_session(session)
+    info = nil
+
+    session.on_close { |close_info| info = close_info }
+    session.receive_connect_data(close_capsule(7, "going away"))
+
+    assert_equal 7, info.code
+    assert_equal "going away", info.reason
+  end
+
+  def test_close_capsule_without_a_reason_reports_an_empty_string
+    session = build_session
+    accept_webtransport_session(session)
+    info = nil
+
+    session.on_close { |close_info| info = close_info }
+    session.receive_connect_data(close_capsule(3, ""))
+
+    assert_equal 3, info.code
+    assert_equal "", info.reason
+  end
+
+  # §6: a clean CONNECT stream close is equivalent to a capsule with code 0 and
+  # an empty reason.
+  def test_a_clean_close_reports_code_zero
+    session = build_session
+    accept_webtransport_session(session)
+    info = nil
+
+    session.on_close { |close_info| info = close_info }
+    session.notify_close
+
+    assert_equal 0, info.code
+    assert_equal "", info.reason
+  end
+
+  # Existing handlers take no arguments; they must keep working.
+  def test_close_handlers_that_ignore_the_argument_still_work
+    session = build_session
+    accept_webtransport_session(session)
+    closed = false
+
+    session.on_close { closed = true }
+    session.receive_connect_data(close_capsule(7, "bye"))
+
+    assert closed
+  end
+
+  def test_close_capsule_preserves_a_utf8_reason
+    session = build_session
+    accept_webtransport_session(session)
+    info = nil
+
+    session.on_close { |close_info| info = close_info }
+    session.receive_connect_data(close_capsule(0, "完了"))
+
+    assert_equal "完了", info.reason
+  end
+
+  # The wire format cannot say who closed; applications need it for reconnect.
+
+  def test_a_peer_close_is_reported_as_remote
+    session = build_session
+    accept_webtransport_session(session)
+    info = nil
+
+    session.on_close { |close_info| info = close_info }
+    session.receive_connect_data(close_capsule(7, "bye"))
+
+    assert info.remote?
+  end
+
+  def test_closing_ourselves_is_reported_as_local
+    session = session_with(RecordingConnectStream.new)
+    session.accept!
+    info = nil
+
+    session.on_close { |close_info| info = close_info }
+    session.close(code: 3, reason: "shutting down")
+
+    assert info.local?
+    assert_equal 3, info.code
+    assert_equal "shutting down", info.reason
   end
 
   # === WT_DRAIN_SESSION (draft-16 §4.7) ===
@@ -536,6 +672,13 @@ class WebTransportSessionTest < Minitest::Test
   def drain_capsule
     Quicsilver::Protocol::Capsule.encode(
       Quicsilver::Protocol::WebTransport::DRAIN_SESSION_CAPSULE, ""
+    )
+  end
+
+  def close_capsule(code, reason)
+    Quicsilver::Protocol::Capsule.encode(
+      Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE,
+      [code].pack("N") + reason.b
     )
   end
 

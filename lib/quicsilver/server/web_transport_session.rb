@@ -21,6 +21,21 @@ module Quicsilver
       WT_STREAM_UNI = Protocol::WebTransport::UNI_STREAM_TYPE
       WT_CLOSE_SESSION = Protocol::WebTransport::CLOSE_SESSION_CAPSULE
       WT_DRAIN_SESSION = Protocol::WebTransport::DRAIN_SESSION_CAPSULE
+
+      # Why a session ended. A clean close with no capsule is code 0 and an
+      # empty reason (draft-ietf-webtrans-http3-16 §6).
+      #
+      # `remote` distinguishes the peer hanging up from us closing, which the
+      # wire format does not carry but applications need for reconnect logic.
+      CloseInfo = Data.define(:code, :reason, :remote) do
+        def remote? = remote
+        def local? = !remote
+      end
+
+      # WT_CLOSE_SESSION payload layout (§6):
+      #
+      #   [error code: 4 bytes, network order][reason: UTF-8, ≤ 1024 bytes]
+      ERROR_CODE_BYTES = 4
       MAX_CLOSE_MESSAGE_LENGTH = 1024
 
       # Parse a bidirectional WebTransport stream prefix:
@@ -63,6 +78,27 @@ module Quicsilver
       # character. draft-ietf-webtrans-http3-16 §6 requires truncation on a
       # UTF-8 boundary; a receiver seeing invalid UTF-8 MUST reset the stream
       # with H3_MESSAGE_ERROR.
+      # Read a WT_CLOSE_SESSION payload. A short or absent payload counts as a
+      # clean close: §6 makes a bare stream close equivalent to code 0 with an
+      # empty reason. Always remote — a payload only exists because a peer sent
+      # one.
+      def self.parse_close_payload(payload)
+        code = payload.byteslice(0, ERROR_CODE_BYTES)&.unpack1("N") || 0
+        # +"" because nil.to_s is frozen and force_encoding mutates.
+        reason = +payload.byteslice(ERROR_CODE_BYTES..-1).to_s
+
+        CloseInfo.new(
+          code: code,
+          reason: reason.force_encoding(Encoding::UTF_8),
+          remote: true
+        )
+      end
+
+      # Inverse of parse_close_payload, so the layout is defined in one place.
+      def self.build_close_payload(code, reason)
+        [code].pack("N") + truncate_reason(reason).b
+      end
+
       def self.truncate_reason(reason, limit = MAX_CLOSE_MESSAGE_LENGTH)
         reason = reason.to_s
         return reason if reason.bytesize <= limit
@@ -236,7 +272,7 @@ module Quicsilver
           @stream.reset(Protocol::H3_NO_ERROR) rescue nil
         end
 
-        notify_close
+        notify_close(code: code, reason: reason, remote: false)
       end
 
       # Called by Server when data arrives on the CONNECT/session stream. :nodoc:
@@ -269,7 +305,7 @@ module Quicsilver
       # and capsule-error paths both fan into notify_close, and a CLOSE_SESSION
       # capsule followed by FIN would otherwise fire @close_callback twice and
       # re-walk an already-cleared @streams map.
-      def notify_close # :nodoc:
+      def notify_close(code: 0, reason: "", remote: true) # :nodoc:
         return if @closed
         @closed = true
 
@@ -277,7 +313,7 @@ module Quicsilver
         @open = false
         @streams.each_value(&:notify_close)
         @streams.clear
-        @close_callback&.call
+        @close_callback&.call(CloseInfo.new(code: code, reason: reason, remote: remote))
       end
 
       # Called by Server when a new stream with our session ID arrives.
@@ -319,10 +355,12 @@ module Quicsilver
       def handle_capsule(type, payload)
         case type
         when WT_CLOSE_SESSION
-          code = payload.bytesize >= 4 ? payload.byteslice(0, 4).unpack1("N") : 0
-          reason = payload.bytesize > 4 ? payload.byteslice(4..-1).to_s : ""
-          Quicsilver.logger.debug("WebTransport session #{@stream_id} received close capsule code=#{code} reason=#{reason.inspect}")
-          notify_close
+          closed_with = self.class.parse_close_payload(payload)
+          Quicsilver.logger.debug(
+            "WebTransport session #{@stream_id} received close capsule " \
+            "code=#{closed_with.code} reason=#{closed_with.reason.inspect}"
+          )
+          notify_close(**closed_with.to_h)
         when WT_DRAIN_SESSION
           # Advisory only. The session stays open and usable; it is up to the
           # application to wind down (draft-16 §4.7).
@@ -341,7 +379,7 @@ module Quicsilver
       end
 
       def write_close_reason(code, reason)
-        payload = [code].pack("N") + self.class.truncate_reason(reason).b
+        payload = self.class.build_close_payload(code, reason)
         @stream.send(Protocol::Capsule.encode(WT_CLOSE_SESSION, payload), fin: false)
       rescue
         # Best-effort — connection may already be gone
