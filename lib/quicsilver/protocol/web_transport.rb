@@ -24,6 +24,36 @@ module Quicsilver
       def self.protocol?(value)
         value == PROTOCOL || value == PROTOCOL_LEGACY
       end
+
+      # WebTransport shares the HTTP/3 error space, so 32-bit application error
+      # codes are mapped into a reserved range (§4.4, §9.5). Codepoints of the
+      # form 0x1f * N + 0x21 are reserved by HTTP/3 §8.1 and skipped, which is
+      # why this is not a plain offset.
+      APPLICATION_ERROR_FIRST = 0x52e4a40fa8db
+      APPLICATION_ERROR_LAST = 0x52e5ac983162
+
+      RESERVED_STRIDE = 0x1f
+      RESERVED_OFFSET = 0x21
+
+      # Application code -> HTTP/3 code, stepping over reserved codepoints.
+      def self.application_error_to_http(code)
+        APPLICATION_ERROR_FIRST + code + (code / 0x1e)
+      end
+
+      # HTTP/3 code -> application code. nil when the code is outside the
+      # reserved range or lands on a reserved codepoint, neither of which a
+      # peer should ever send.
+      def self.http_to_application_error(code)
+        return nil unless code.between?(APPLICATION_ERROR_FIRST, APPLICATION_ERROR_LAST)
+        return nil if reserved_codepoint?(code)
+
+        shifted = code - APPLICATION_ERROR_FIRST
+        shifted - (shifted / RESERVED_STRIDE)
+      end
+
+      def self.reserved_codepoint?(code)
+        (code - RESERVED_OFFSET) % RESERVED_STRIDE == 0
+      end
     end
   end
 end

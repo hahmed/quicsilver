@@ -3,6 +3,91 @@
 require "test_helper"
 
 class WebTransportStreamTest < Minitest::Test
+  WT = Quicsilver::Protocol::WebTransport
+
+  # Records what reaches the transport, so tests assert on what the peer would
+  # see rather than on internal flags.
+  class RecordingTransport
+    attr_reader :resets
+
+    def initialize = @resets = []
+
+    def reset(code) = @resets << code
+    def stop_sending(code) = nil
+    def send(data, fin: false) = nil
+    def handle = 99_999
+  end
+
+  # === Application error codes (draft-16 §4.4) ===
+  #
+  #   The error code from a WebTransport stream reset MUST be delivered
+  #   unchanged ... by endpoints delivering to the application.
+  #
+  # Codes share the HTTP/3 space, so they are mapped into the reserved
+  # WT_APPLICATION_ERROR range going out and back again coming in.
+
+  def test_reset_maps_the_application_code_onto_the_wire
+    transport = RecordingTransport.new
+
+    stream_on(transport).reset(42)
+
+    assert_equal [WT.application_error_to_http(42)], transport.resets
+  end
+
+  def test_reset_closes_the_stream
+    stream = stream_on(RecordingTransport.new)
+
+    stream.reset(42)
+
+    refute stream.open?
+  end
+
+  def test_reset_on_an_already_closed_stream_sends_nothing
+    transport = RecordingTransport.new
+    stream = stream_on(transport)
+    stream.notify_close
+
+    stream.reset(42)
+
+    assert_empty transport.resets
+  end
+
+  def test_a_peer_reset_reports_the_application_code
+    stream = stream_on(RecordingTransport.new)
+    received = nil
+    stream.on_reset { |code| received = code }
+
+    stream.notify_reset(WT.application_error_to_http(42))
+
+    assert_equal 42, received
+  end
+
+  # §4.4: a code outside the reserved range is still a reset, but carries no
+  # application code.
+  def test_a_peer_reset_outside_the_range_reports_no_code
+    stream = stream_on(RecordingTransport.new)
+    received = :unset
+    stream.on_reset { |code| received = code }
+
+    stream.notify_reset(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+
+    assert_nil received
+  end
+
+  def test_a_peer_reset_closes_the_stream
+    stream = stream_on(RecordingTransport.new)
+
+    stream.notify_reset(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+
+    refute stream.open?
+  end
+
+  def stream_on(transport)
+    Quicsilver::Server::WebTransportStream.new(
+      session: nil, stream: transport, stream_id: 4
+    )
+  end
+
   def test_receive_data_invokes_callback_with_raw_bytes
     stream = build_stream
     received = []

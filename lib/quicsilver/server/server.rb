@@ -397,7 +397,8 @@ module Quicsilver
           wt.notify_close
           connection.remove_stream(stream_id)
         elsif (wt_session = @webtransport.session_for_stream(stream_id))
-          wt_session.remove_stream(stream_id)
+          # Pass the peer's code through so the application can see it (§4.4).
+          wt_session.remove_stream(stream_id, error_code: event.error_code)
         else
           cancel_stream(connection, stream_id)
         end

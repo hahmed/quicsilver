@@ -30,6 +30,7 @@ module Quicsilver
         @write_open = direction != :receive_only
         @data_callback = nil
         @close_callback = nil
+        @reset_callback = nil
         @close_notified = false
         @buffered_data = []
         @data_mutex = Mutex.new
@@ -73,6 +74,24 @@ module Quicsilver
         @close_callback = block
       end
 
+      # The peer reset this stream. Yields the application error code, or nil
+      # when the peer used a code outside the WebTransport range (draft-16
+      # §4.4 — still a reset, just no application code to report).
+      def on_reset(&block)
+        @reset_callback = block
+      end
+
+      # Reset this stream with an application error code.
+      #
+      # §4.4: application codes are 32-bit and share the HTTP/3 error space, so
+      # they are mapped into the reserved WT_APPLICATION_ERROR range.
+      def reset(error_code)
+        return unless @write_open || @read_open
+
+        @stream.reset(Protocol::WebTransport.application_error_to_http(error_code)) rescue nil
+        notify_close
+      end
+
       def open?
         @read_open || @write_open
       end
@@ -93,6 +112,12 @@ module Quicsilver
       def notify_read_close
         @read_open = false
         notify_close_callback
+      end
+
+      # Called by Server when the peer resets this stream. :nodoc:
+      def notify_reset(http_error_code)
+        @reset_callback&.call(Protocol::WebTransport.http_to_application_error(http_error_code))
+        notify_close
       end
 
       # Called by Server when the stream is reset or fully closed. :nodoc:

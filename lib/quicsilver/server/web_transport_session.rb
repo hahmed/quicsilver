@@ -311,6 +311,14 @@ module Quicsilver
 
         Quicsilver.logger.debug("WebTransport session #{@stream_id} notify_close")
         @open = false
+        # TODO: teardown only closes streams locally, so the peer's streams
+        # hang. §6 requires resetting each one with WT_SESSION_GONE
+        # (0x170d7b68, protocol-level so not remapped), and no longer sending
+        # datagrams.
+        #
+        # Blocked: resetting here segfaults. MsQuic frees stream handles and
+        # nothing nulls the Ruby side, so CONNECTION_CLOSED tears down sessions
+        # whose handles are already gone. Needs handle lifetime tracking first.
         @streams.each_value(&:notify_close)
         @streams.clear
         @close_callback&.call(CloseInfo.new(code: code, reason: reason, remote: remote))
@@ -345,9 +353,14 @@ module Quicsilver
       end
 
       # Called when a stream within this session is reset.
-      def remove_stream(stream_id) # :nodoc:
+      # `error_code` is the raw HTTP/3 code from a peer RESET_STREAM, so the
+      # stream can report it to the application (§4.4). nil for an ordinary
+      # close, where there is no code to deliver.
+      def remove_stream(stream_id, error_code: nil) # :nodoc:
         stream = @streams.delete(stream_id)
-        stream&.notify_close
+        return unless stream
+
+        error_code ? stream.notify_reset(error_code) : stream.notify_close
       end
 
       private
