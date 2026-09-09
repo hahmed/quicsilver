@@ -25,8 +25,8 @@ module Quicsilver
 
       # @param length [Integer, nil] The content-length if known from headers.
       # @param queue_size [Integer, nil] Maximum buffered chunks for back-pressure.
-      #   nil (default) = unbounded. When bounded, write blocks if queue is full,
-      #   which naturally maps to QUIC flow control.
+      #   nil (default) = unbounded. When bounded, write blocks if queue is full.
+      #   A bounded queue must not block the MsQuic poll thread.
       # @param read_timeout [Numeric, nil] Seconds to wait for data before raising
       #   ReadTimeout. nil (default) = wait forever.
       def initialize(length = nil, queue_size: nil, read_timeout: nil)

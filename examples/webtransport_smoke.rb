@@ -331,29 +331,33 @@ app = lambda do |env|
     session.on_stream do |stream|
       puts "WT accepted bidi stream id=#{stream.stream_id}"
 
-      stream.on_data do |chunk|
-        puts "WT stream #{stream.stream_id} read #{chunk.bytesize} bytes"
-        response = "echo: #{chunk}"
-        stream.write(response)
-        stream.close
-        puts "WT stream #{stream.stream_id} wrote #{response.bytesize} bytes"
+      Thread.new do
+        while (chunk = stream.read)
+          puts "WT stream #{stream.stream_id} read #{chunk.bytesize} bytes"
+          response = "echo: #{chunk}"
+          stream.write(response)
+          puts "WT stream #{stream.stream_id} wrote #{response.bytesize} bytes"
+        end
       rescue => error
         warn "WT stream #{stream.stream_id} error: #{error.class}: #{error.message}"
         warn error.backtrace&.first(5)&.join("\n")
+      ensure
+        stream.close
       end
     end
 
     session.on_uni_stream do |stream|
       puts "WT accepted uni stream id=#{stream.stream_id}"
 
-      stream.on_data do |chunk|
-        puts "WT uni stream #{stream.stream_id} read #{chunk.bytesize} bytes"
+      Thread.new do
+        while (chunk = stream.read)
+          puts "WT uni stream #{stream.stream_id} read #{chunk.bytesize} bytes"
+        end
       rescue => error
         warn "WT uni stream #{stream.stream_id} error: #{error.class}: #{error.message}"
         warn error.backtrace&.first(5)&.join("\n")
-      end
-
-      stream.on_close do
+      ensure
+        stream.close
         puts "WT uni stream #{stream.stream_id} closed"
       end
     end

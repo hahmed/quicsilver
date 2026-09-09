@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "protocol/http/body/writable"
+
 module Quicsilver
   class Server
     # A reliable bidirectional stream within a WebTransport session.
@@ -9,8 +11,12 @@ module Quicsilver
     #
     # Usage:
     #   session.on_stream do |stream|
-    #     stream.on_data { |data| stream.write("echo: #{data}") }
-    #     stream.on_close { cleanup }
+    #     Thread.new do
+    #       while (data = stream.read)
+    #         stream.write("echo: #{data}")
+    #       end
+    #       stream.close_write
+    #     end
     #   end
     #
     #   # Server-initiated:
@@ -19,6 +25,16 @@ module Quicsilver
     #   stream.close
     #
     class WebTransportStream
+      class ResetError < Quicsilver::Error
+        attr_reader :http_error_code, :application_error_code
+
+        def initialize(http_error_code)
+          @http_error_code = http_error_code
+          @application_error_code = Protocol::WebTransport.http_to_application_error(http_error_code)
+          super("WebTransport stream reset (HTTP/3 code 0x#{http_error_code.to_s(16)})")
+        end
+      end
+
       attr_reader :stream_id, :session
 
       def initialize(session:, stream:, stream_id:, direction: :bidi)
@@ -28,12 +44,10 @@ module Quicsilver
         @direction = direction
         @read_open = direction != :send_only
         @write_open = direction != :receive_only
-        @data_callback = nil
+        @input = ::Protocol::HTTP::Body::Writable.new
         @close_callback = nil
         @reset_callback = nil
         @close_notified = false
-        @buffered_data = []
-        @data_mutex = Mutex.new
       end
 
       def stream_handle
@@ -51,23 +65,19 @@ module Quicsilver
         @stream.send(data.to_s.b)
       end
 
+      # Finish sending and discard unread input; use close_write to keep reading.
       def close
         close_write
         @read_open = false
+        @input.close
         notify_close_callback
       end
 
-      # Data can arrive before a consumer attaches: accept_stream delivers the
-      # stream's first bytes on the event loop thread, while the callback is
-      # registered by whatever the on_stream handler spawns. Anything buffered
-      # in that window is flushed here, in arrival order.
-      def on_data(&block)
-        buffered = @data_mutex.synchronize do
-          @data_callback = block
-          @buffered_data.slice!(0..-1)
-        end
+      # One application reader; never call from the transport event loop.
+      def read
+        raise IOError, "Cannot read from a send-only stream" if @direction == :send_only
 
-        buffered.each { |chunk| block.call(chunk) }
+        @input.read
       end
 
       def on_close(&block)
@@ -88,8 +98,12 @@ module Quicsilver
       def reset(error_code)
         return unless @write_open || @read_open
 
-        @stream.reset(Protocol::WebTransport.application_error_to_http(error_code)) rescue nil
-        notify_close
+        abort(Protocol::WebTransport.application_error_to_http(error_code))
+      end
+
+      def abort(http_error_code)
+        @stream.abort(http_error_code)
+        notify_close(error: ResetError.new(http_error_code))
       end
 
       def open?
@@ -100,34 +114,36 @@ module Quicsilver
       def receive_data(data)
         return if data.nil? || data.empty? || !@read_open
 
-        callback = @data_mutex.synchronize do
-          @buffered_data << data unless @data_callback
-          @data_callback
-        end
-
-        callback&.call(data)
+        @input.write(data)
+      rescue ::Protocol::HTTP::Body::Writable::Closed, ClosedQueueError, ResetError
+        # Closing can race the write after the read-open check above.
+        raise if @read_open
       end
 
       # Called by Server when the peer has closed its write side. :nodoc:
       def notify_read_close
         @read_open = false
+        @input.close_write
         notify_close_callback
       end
 
       # Called by Server when the peer resets this stream. :nodoc:
       def notify_reset(http_error_code)
-        @reset_callback&.call(Protocol::WebTransport.http_to_application_error(http_error_code))
-        notify_close
+        error = ResetError.new(http_error_code)
+        begin
+          notify_close(error: error)
+        ensure
+          @reset_callback&.call(error.application_error_code)
+        end
       end
 
       # Called by Server when the stream is reset or fully closed. :nodoc:
-      def notify_close
+      def notify_close(error: nil)
         @read_open = false
         @write_open = false
+        error ? @input.close(error) : @input.close_write
         notify_close_callback
       end
-
-      private
 
       def close_write
         return unless @write_open
@@ -135,6 +151,8 @@ module Quicsilver
         @stream.send("".b, fin: true) rescue nil
         @write_open = false
       end
+
+      private
 
       def notify_close_callback
         return if @close_notified

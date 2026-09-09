@@ -14,6 +14,8 @@ module Quicsilver
       def initialize
         @sessions = {}
         @pending_streams = {}
+        @stream_states = {}
+        @pending_uni_streams = {}
       end
 
       def sessions
@@ -63,8 +65,27 @@ module Quicsilver
         nil
       end
 
+      def known_stream?(stream_id)
+        @stream_states.key?(stream_id)
+      end
+
+      def rejected_stream?(stream_id)
+        @stream_states[stream_id] == :rejected
+      end
+
+      def reject_stream(stream_id, stream_handle)
+        @pending_streams.delete(stream_id)
+        @pending_uni_streams.delete(stream_id)
+        @stream_states[stream_id] = :rejected
+        Transport::Stream.new(stream_handle).abort(Protocol::WebTransport::BUFFERED_STREAM_REJECTED)
+        nil
+      end
+
       def shutdown_stream(stream_id)
-        return false unless (session = session_for_stream(stream_id))
+        @pending_uni_streams.delete(stream_id)
+        @pending_streams.delete(stream_id)
+        known = @stream_states.delete(stream_id)
+        return !!known unless (session = session_for_stream(stream_id))
 
         session.remove_stream(stream_id)
         true
@@ -102,18 +123,32 @@ module Quicsilver
 
       def accept_bidi_stream(stream_id, stream_handle, payload)
         session_id, = WebTransportSession.parse_stream_prefix(payload)
-        return unless session_id
-        return unless @sessions[session_id]&.accepts_new_streams?
+        return reject_stream(stream_id, stream_handle) unless session_id && @sessions[session_id]&.accepts_new_streams?
 
+        @stream_states[stream_id] = :accepted
         WebTransportSession.accept_stream(@sessions, stream_id, stream_handle, payload)
       end
 
-      def accept_uni_stream(stream_id, stream_handle, payload)
-        session_id, initial_data = WebTransportSession.parse_uni_stream_data(payload)
-        return unless session_id
-        return unless (session = @sessions[session_id])
-        return unless session.accepts_new_streams?
+      def accept_uni_stream(stream_id, stream_handle, payload, fin: false)
+        if (stream = active_stream(stream_id))
+          stream.receive_data(payload)
+          return stream
+        end
+        return if known_stream?(stream_id)
 
+        payload = @pending_uni_streams.delete(stream_id).to_s.b + payload
+        _, length = Protocol.decode_varint_str(payload, 0)
+        if length == 0
+          return reject_stream(stream_id, stream_handle) if fin
+
+          @pending_uni_streams[stream_id] = payload
+          return
+        end
+        session_id, initial_data = WebTransportSession.parse_uni_stream_data(payload)
+        session = @sessions[session_id]
+        return reject_stream(stream_id, stream_handle) unless session&.accepts_new_streams?
+
+        @stream_states[stream_id] = :accepted
         stream = session.add_uni_stream(stream_handle, stream_id)
         stream.receive_data(initial_data) if initial_data && !initial_data.empty?
         stream
@@ -141,10 +176,10 @@ module Quicsilver
         return :incomplete if type_len == 0 && incomplete_varint?(data, 0)
         return :no_match unless type == WebTransportSession::WT_STREAM_BIDI && type_len > 0
 
-        session_id, sid_len = Protocol.decode_varint_str(data, type_len)
-        return :incomplete if sid_len == 0 && incomplete_varint?(data, type_len)
+        _, sid_len = Protocol.decode_varint_str(data, type_len)
+        return :incomplete if sid_len == 0
 
-        sid_len > 0 && @sessions[session_id]&.accepts_new_streams? ? :matched : :no_match
+        :matched
       rescue
         :no_match
       end

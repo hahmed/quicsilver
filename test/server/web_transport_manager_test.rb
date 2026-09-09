@@ -93,12 +93,12 @@ class WebTransportManagerTest < Minitest::Test
     refute manager.pending_stream?(4)
   end
 
-  def test_bidi_stream_requires_registered_open_session
+  def test_bidi_prefix_recognition_does_not_require_a_session
     manager = Quicsilver::Server::WebTransportManager.new
     prefix = Quicsilver::Protocol.encode_varint(Quicsilver::Server::WebTransportSession::WT_STREAM_BIDI) +
              Quicsilver::Protocol.encode_varint(0)
 
-    refute manager.bidi_stream?(prefix)
+    assert manager.bidi_stream?(prefix)
 
     session = build_session(stream_id: 0)
     accept_webtransport_session(session)
@@ -266,7 +266,7 @@ class WebTransportManagerTest < Minitest::Test
     assert_nil manager.session(0)
   end
 
-  def test_closed_session_does_not_match_bidi_stream_prefix
+  def test_closed_session_still_has_a_webtransport_prefix
     manager = Quicsilver::Server::WebTransportManager.new
     session = build_session(stream_id: 0)
     accept_webtransport_session(session)
@@ -276,7 +276,7 @@ class WebTransportManagerTest < Minitest::Test
     prefix = Quicsilver::Protocol.encode_varint(Quicsilver::Server::WebTransportSession::WT_STREAM_BIDI) +
              Quicsilver::Protocol.encode_varint(0)
 
-    refute manager.bidi_stream?(prefix)
+    assert manager.bidi_stream?(prefix)
   end
 
   def test_accept_bidi_stream_returns_nil_for_closed_session
@@ -305,6 +305,20 @@ class WebTransportManagerTest < Minitest::Test
     manager.register(session)
 
     assert_equal datagram_for(session, "hello"), manager.build_datagram(session, "hello")
+  end
+
+  def test_unaccepted_session_is_rejected_and_retired_on_shutdown
+    manager = Quicsilver::Server::WebTransportManager.new
+    manager.register(build_session(stream_id: 0))
+    rejected = []
+    Quicsilver.stub(:stream_abort, ->(*args) { rejected << args }) do
+      assert_nil manager.accept_bidi_stream(4, 99999, bidi_prefix(0) + "hello")
+    end
+
+    assert_equal [[99999, Quicsilver::Protocol::WebTransport::BUFFERED_STREAM_REJECTED]], rejected
+    assert manager.rejected_stream?(4)
+    assert manager.shutdown_stream(4)
+    refute manager.rejected_stream?(4)
   end
 
   private

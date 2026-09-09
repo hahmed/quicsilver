@@ -177,6 +177,40 @@ class StreamLifetimeTest < Minitest::Test
     assert_raises(ArgumentError) { Quicsilver.set_stream_priority(incoming.handle, 65_536) }
   end
 
+  def test_session_shutdown_aborts_bidi_and_receive_only_children
+    _, bidi, bidi_id = open_stream
+    _, uni, uni_id = open_stream(unidirectional: true)
+    session = Quicsilver::Server::WebTransportSession.new(
+      connection: @server_connection, stream: bidi, headers: {}
+    )
+    session.add_stream(bidi.handle, bidi_id)
+    session.add_uni_stream(uni.handle, uni_id)
+
+    session.notify_close
+    session.notify_close
+
+    [[bidi_id, "STREAM_RESET"], [bidi_id, "STOP_SENDING"], [uni_id, "STOP_SENDING"]].each do |id, signal|
+      event = await_event(@client, signal, id)
+      assert_equal Quicsilver::Protocol::WebTransport::SESSION_GONE, decode_event(event).error_code
+    end
+    assert_nil session.stream(bidi_id)
+    assert_nil session.stream(uni_id)
+  end
+
+  def test_unknown_session_rejection_reaches_the_peer
+    _, incoming, id = open_stream
+    manager = Quicsilver::Server::WebTransportManager.new
+    prefix = Quicsilver::Protocol.encode_varint(0x41) + Quicsilver::Protocol.encode_varint(0)
+
+    assert_nil manager.accept_bidi_stream(id, incoming.handle, prefix + "hello")
+
+    %w[STREAM_RESET STOP_SENDING].each do |signal|
+      event = await_event(@client, signal, id)
+      assert_equal REJECTION, decode_event(event).error_code
+    end
+    assert_equal 200, @client.get("/").status
+  end
+
   private
 
   def connect_client

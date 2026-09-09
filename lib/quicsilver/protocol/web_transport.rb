@@ -3,6 +3,9 @@
 module Quicsilver
   module Protocol
     module WebTransport
+      SESSION_GONE = 0x170d7b68
+      BUFFERED_STREAM_REJECTED = 0x3994bd84
+
       BIDI_STREAM_TYPE = 0x41
       UNI_STREAM_TYPE = 0x54
       CLOSE_SESSION_CAPSULE = 0x2843

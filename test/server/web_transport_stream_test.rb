@@ -12,7 +12,7 @@ class WebTransportStreamTest < Minitest::Test
 
     def initialize = @resets = []
 
-    def reset(code) = @resets << code
+    def abort(code) = @resets << code
     def stop_sending(code) = nil
     def send(data, fin: false) = nil
     def handle = 99_999
@@ -88,70 +88,24 @@ class WebTransportStreamTest < Minitest::Test
     )
   end
 
-  def test_receive_data_invokes_callback_with_raw_bytes
+  def test_received_chunks_are_read_in_order_before_eof
     stream = build_stream
-    received = []
-
-    stream.on_data { |data| received << data }
-    stream.receive_data("hello")
-
-    assert_equal ["hello"], received
-  end
-
-  # accept_stream calls add_stream then receive_data on the event loop thread,
-  # but add_stream's callback spawns a worker to consume the stream. Data that
-  # arrives before that worker registers on_data must not be dropped.
-  def test_receive_data_before_a_callback_is_registered_is_not_lost
-    stream = build_stream
-    received = []
-
-    stream.receive_data("hello")
-    stream.on_data { |data| received << data }
-
-    assert_equal ["hello"], received
-  end
-
-  def test_buffered_chunks_are_delivered_in_order
-    stream = build_stream
-    received = []
-
     stream.receive_data("one")
     stream.receive_data("two")
-    stream.on_data { |data| received << data }
+    stream.notify_read_close
 
-    assert_equal ["one", "two"], received
-  end
-
-  def test_buffered_chunks_are_only_delivered_once
-    stream = build_stream
-    received = []
-    stream.receive_data("hello")
-    stream.on_data { |data| received << data }
-
-    stream.receive_data("world")
-
-    assert_equal ["hello", "world"], received
+    assert_equal "one", stream.read
+    assert_equal "two", stream.read
+    assert_nil stream.read
+    assert stream.open?
   end
 
   def test_receive_data_ignores_empty_chunks
     stream = build_stream
-    received = []
-
-    stream.on_data { |data| received << data }
     stream.receive_data("")
+    stream.notify_read_close
 
-    assert_empty received
-  end
-
-  def test_receive_data_can_deliver_multiple_raw_chunks
-    stream = build_stream
-    received = []
-
-    stream.on_data { |data| received << data }
-    stream.receive_data("one")
-    stream.receive_data("two")
-
-    assert_equal ["one", "two"], received
+    assert_nil stream.read
   end
 
   def test_notify_read_close_invokes_close_callback_without_closing_write_side
@@ -233,14 +187,10 @@ class WebTransportStreamTest < Minitest::Test
 
   # === Direction enforcement ===
 
-  def test_bidi_stream_allows_write_and_data
+  def test_bidi_stream_receives_data
     stream = build_stream
-    received = nil
-
-    stream.on_data { |data| received = data }
     stream.receive_data("hello")
-
-    assert_equal "hello", received
+    assert_equal "hello", stream.read
   end
 
   def test_receive_only_stream_raises_on_write
@@ -250,12 +200,121 @@ class WebTransportStreamTest < Minitest::Test
 
   def test_receive_only_stream_receives_data
     stream = build_stream(:receive_only)
-    received = nil
-
-    stream.on_data { |data| received = data }
     stream.receive_data("from client")
+    assert_equal "from client", stream.read
+  end
 
-    assert_equal "from client", received
+  def test_send_only_stream_rejects_reads
+    stream = Quicsilver::Server::WebTransportStream.new(
+      session: nil, stream: RecordingTransport.new, stream_id: 3, direction: :send_only
+    )
+    assert_raises(IOError) { stream.read }
+  end
+
+  def test_clean_native_shutdown_preserves_unread_bytes
+    stream = build_stream
+    stream.receive_data("last")
+    stream.notify_read_close
+    stream.notify_close
+
+    assert_equal "last", stream.read
+    assert_nil stream.read
+  end
+
+  def test_local_close_discards_unread_bytes
+    stream = build_stream(:closeable)
+    stream.receive_data("unread")
+    stream.close
+
+    assert_nil stream.read
+  end
+
+  def test_reset_discards_bytes_and_reports_both_error_codes
+    stream = build_stream
+    stream.receive_data("unread")
+    code = WT.application_error_to_http(42)
+    stream.notify_reset(code)
+
+    error = assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
+    assert_equal 42, error.application_error_code
+    assert_equal code, error.http_error_code
+  end
+
+  def test_session_abort_wakes_reader_with_protocol_error
+    stream = stream_on(RecordingTransport.new)
+    entered = Queue.new
+    reader = Thread.new do
+      entered << true
+      stream.read
+    rescue Quicsilver::Server::WebTransportStream::ResetError => error
+      error
+    end
+    assert entered.pop(timeout: 2)
+    stream.abort(WT::SESSION_GONE)
+    assert reader.join(2)
+    assert_equal WT::SESSION_GONE, reader.value.http_error_code
+    assert_nil reader.value.application_error_code
+  ensure
+    reader&.kill
+    reader&.join(2)
+  end
+
+  def test_fin_wakes_reader_with_eof
+    stream = build_stream
+    entered = Queue.new
+    reader = Thread.new { entered << true; stream.read }
+    assert entered.pop(timeout: 2)
+    stream.notify_read_close
+    assert reader.join(2)
+    assert_nil reader.value
+  ensure
+    reader&.kill
+    reader&.join(2)
+  end
+
+  def test_concurrent_receive_preserves_fifo_for_a_slow_reader
+    stream = build_stream
+    stream.receive_data("old")
+    started = Queue.new
+    continue = Queue.new
+    reader = Thread.new do
+      first = stream.read
+      started << true
+      continue.pop
+      [first, stream.read, stream.read]
+    end
+    assert started.pop(timeout: 2)
+    stream.receive_data("new")
+    stream.notify_read_close
+    continue << true
+    assert reader.join(2)
+    assert_equal ["old", "new", nil], reader.value
+  ensure
+    continue&.push(true)
+    reader&.kill
+    reader&.join(2)
+  end
+
+  def test_read_close_keeps_send_side_usable
+    transport = Minitest::Mock.new
+    transport.expect(:send, true, ["reply"])
+    stream = stream_on(transport)
+    stream.notify_read_close
+
+    assert_nil stream.read
+    stream.write("reply")
+    transport.verify
+  end
+
+  def test_write_close_keeps_receive_side_usable
+    stream = build_stream(:closeable)
+    stream.close_write
+    stream.receive_data("reply")
+    stream.notify_read_close
+
+    assert_equal "reply", stream.read
+    assert_nil stream.read
+    refute stream.open?
   end
 
   private

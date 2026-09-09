@@ -162,6 +162,27 @@ class WebTransportSessionTest < Minitest::Test
     refute stream2.open?
   end
 
+  def test_child_callback_failure_does_not_interrupt_session_termination
+    session = build_session
+    first = session.add_stream(99998, 4)
+    second = session.add_uni_stream(99999, 6)
+    first.on_close { raise "application close failed" }
+    closed = false
+    session.on_close { closed = true }
+    cancelled = []
+
+    Quicsilver.stub(:stream_abort, ->(*args) { cancelled << args }) do
+      assert_raises(RuntimeError) { session.notify_close }
+      session.notify_close
+    end
+
+    assert_equal [[99998, 0x170d7b68], [99999, 0x170d7b68]], cancelled
+    refute second.open?
+    assert closed
+    assert_nil session.stream(4)
+    assert_nil session.stream(6)
+  end
+
   def test_notify_close_invokes_close_callback
     session = build_session
     closed = false
@@ -593,11 +614,11 @@ class WebTransportSessionTest < Minitest::Test
     assert_equal [result], accepted
   end
 
-  def test_accept_stream_makes_initial_data_available_to_callback
+  def test_accept_stream_makes_initial_data_available_to_reader
     session = build_session
     sessions = { 0 => session }
     received = []
-    session.on_stream { |stream| stream.on_data { |data| received << data } }
+    session.on_stream { |stream| received << stream }
     prefix = Quicsilver::Protocol.encode_varint(0x41) +
              Quicsilver::Protocol.encode_varint(0) +
              "hello"
@@ -605,7 +626,8 @@ class WebTransportSessionTest < Minitest::Test
     result = Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
 
     assert_kind_of Quicsilver::Server::WebTransportStream, result
-    assert_equal ["hello"], received
+    assert_equal [result], received
+    assert_equal "hello", result.read
   end
 
   def test_accept_stream_ignores_unknown_session

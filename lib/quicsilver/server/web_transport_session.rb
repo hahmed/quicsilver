@@ -269,7 +269,7 @@ module Quicsilver
 
         if was_open
           write_close_reason(code, reason)
-          @stream.reset(Protocol::H3_NO_ERROR) rescue nil
+          @stream.reset(Protocol::H3_NO_ERROR)
         end
 
         notify_close(code: code, reason: reason, remote: false)
@@ -311,17 +311,11 @@ module Quicsilver
 
         Quicsilver.logger.debug("WebTransport session #{@stream_id} notify_close")
         @open = false
-        # TODO: teardown only closes streams locally, so the peer's streams
-        # hang. §6 requires resetting each one with WT_SESSION_GONE
-        # (0x170d7b68, protocol-level so not remapped), and no longer sending
-        # datagrams.
-        #
-        # Blocked: resetting here segfaults. MsQuic frees stream handles and
-        # nothing nulls the Ruby side, so CONNECTION_CLOSED tears down sessions
-        # whose handles are already gone. Needs handle lifetime tracking first.
-        @streams.each_value(&:notify_close)
-        @streams.clear
-        @close_callback&.call(CloseInfo.new(code: code, reason: reason, remote: remote))
+        begin
+          terminate_streams
+        ensure
+          @close_callback&.call(CloseInfo.new(code: code, reason: reason, remote: remote))
+        end
       end
 
       # Called by Server when a new stream with our session ID arrives.
@@ -365,6 +359,18 @@ module Quicsilver
 
       private
 
+      def terminate_streams
+        streams = @streams.values
+        @streams.clear
+        failure = nil
+        streams.each do |stream|
+          stream.abort(Protocol::WebTransport::SESSION_GONE)
+        rescue StandardError => error
+          failure ||= error
+        end
+        raise failure if failure
+      end
+
       def handle_capsule(type, payload)
         case type
         when WT_CLOSE_SESSION
@@ -387,7 +393,7 @@ module Quicsilver
       def handle_capsule_error(error)
         Quicsilver.logger.debug("WebTransport session #{@stream_id} capsule error: #{error.message}")
         @connect_buffer = "".b
-        @stream.reset(Protocol::H3_DATAGRAM_ERROR) rescue nil
+        @stream.reset(Protocol::H3_DATAGRAM_ERROR)
         notify_close
       end
 

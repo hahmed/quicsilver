@@ -108,6 +108,129 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     assert server.cancelled_stream?(20)
   end
 
+  def test_unknown_session_is_rejected_without_http_dispatch
+    server, connection = server_with_session
+    rejected = []
+    dispatched = []
+    Quicsilver.stub(:stream_abort, ->(*args) { rejected << args }) do
+      server.stub(:dispatch_request, ->(*) { dispatched << true }) do
+        receive_fin(server, connection, 8, bidi_payload("hello", session_id: 64))
+        receive_fin(server, connection, 8, http3_request)
+      end
+    end
+
+    assert_empty dispatched
+    assert_equal [[99_008, Quicsilver::Protocol::WebTransport::BUFFERED_STREAM_REJECTED]], rejected
+  end
+
+  def test_split_bidi_prefix_fin_is_delivered_exactly_once
+    (1...bidi_payload("").bytesize).each do |split|
+      server, connection = server_with_session
+      received = []
+      session.on_stream { |stream| received << stream }
+      payload = bidi_payload("hello")
+      receive(server, connection, 4, payload.byteslice(0, split))
+      receive_fin(server, connection, 4, payload.byteslice(split..))
+
+      assert_equal "hello", received.fetch(0).read
+      assert_nil received.fetch(0).read
+    end
+  end
+
+  def test_existing_stream_data_is_not_reclassified_as_a_prefix
+    server, connection = server_with_session
+    received = []
+    session.on_stream { |stream| received << stream }
+    receive(server, connection, 4, bidi_payload("first"))
+    payload = bidi_payload("application bytes", session_id: 64)
+    receive(server, connection, 4, payload)
+
+    assert_equal ["first", payload], [received.fetch(0).read, received.fetch(0).read]
+  end
+
+  def test_unknown_session_with_split_prefix_is_rejected_on_fin
+    server, connection = server_with_session
+    payload = bidi_payload("hello", session_id: 64)
+    receive(server, connection, 4, payload.byteslice(0, 3))
+    rejected = []
+    Quicsilver.stub(:stream_abort, ->(*args) { rejected << args }) do
+      receive_fin(server, connection, 4, payload.byteslice(3..))
+    end
+
+    assert_equal [[99_004, Quicsilver::Protocol::WebTransport::BUFFERED_STREAM_REJECTED]], rejected
+  end
+
+  def test_uni_session_prefix_can_finish_with_fin
+    server, connection = server_with_session
+    received = []
+    session.on_uni_stream { |stream| received << stream }
+    receive(server, connection, 6, varint(Session::WT_STREAM_UNI))
+    receive_fin(server, connection, 6, varint(0) + "hello")
+
+    assert_equal "hello", received.fetch(0).read
+    assert_nil received.fetch(0).read
+  end
+
+  def test_existing_uni_stream_payload_is_not_a_session_prefix
+    server, connection = server_with_session
+    received = []
+    session.on_uni_stream { |stream| received << stream }
+    receive(server, connection, 6, varint(Session::WT_STREAM_UNI) + varint(0) + "first")
+    receive(server, connection, 6, "second")
+
+    assert_equal ["first", "second"], [received.fetch(0).read, received.fetch(0).read]
+  end
+
+  def test_late_data_after_session_close_never_becomes_http
+    server, connection = server_with_session
+    receive(server, connection, 4, bidi_payload("first"))
+    session.notify_close
+    dispatched = []
+    server.stub(:dispatch_request, ->(*) { dispatched << true }) do
+      receive(server, connection, 4, http3_request)
+      receive_fin(server, connection, 4, http3_request)
+    end
+
+    assert_empty dispatched
+  end
+
+  def test_connection_teardown_survives_session_and_connection_callback_errors
+    server, connection = server_with_session
+    first = session
+    second = build_session(connection, stream_id: 8)
+    registry = server.instance_variable_get(:@webtransport)
+    registry.for(connection.handle).register(second)
+    first.on_close { raise "session callback failed" }
+    notified = false
+    second.on_close { notified = true }
+    connection.streams[4] = Object.new
+    server.on_connection_closed { raise "connection callback failed" }
+    closed_handles = []
+
+    Quicsilver.stub(:close_server_connection, ->(handle) { closed_handles << handle }) do
+      error = assert_raises(RuntimeError) do
+        server.handle_stream_event([connection.handle, 0], 0,
+          Quicsilver::Server::STREAM_EVENT_CONNECTION_CLOSED, "".b, false)
+      end
+      assert_equal "connection callback failed", error.message
+    end
+
+    assert first.closed?
+    assert second.closed?
+    assert notified
+    assert_empty connection.streams
+    assert_nil server.connections[connection.handle]
+    assert_equal 0, registry.connection_count
+    assert_equal [connection.handle], closed_handles
+    assert_includes @log.string, "session callback failed"
+  end
+
+  def receive(server, connection, stream_id, payload)
+    raw = [99_000 + stream_id].pack("Q") + payload
+    server.handle_stream_event([connection.handle, 0], stream_id,
+      Quicsilver::Server::STREAM_EVENT_RECEIVE, raw, false)
+  end
+
   private
 
   attr_reader :session
@@ -168,8 +291,8 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
 
   def varint(value) = Quicsilver::Protocol.encode_varint(value)
 
-  def build_session(connection)
-    stream = Quicsilver::Transport::InboundStream.new(SESSION_ID)
+  def build_session(connection, stream_id: SESSION_ID)
+    stream = Quicsilver::Transport::InboundStream.new(stream_id)
     stream.stream_handle = 99_999
 
     session = Session.new(
