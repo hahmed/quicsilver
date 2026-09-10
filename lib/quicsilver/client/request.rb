@@ -118,8 +118,7 @@ module Quicsilver
         @mutex.synchronize do
           return false unless @status == :pending
 
-          @stream.reset(error_code)
-          @stream.stop_sending(error_code)
+          @stream.abort(error_code)
           @status = :cancelled
         end
         true

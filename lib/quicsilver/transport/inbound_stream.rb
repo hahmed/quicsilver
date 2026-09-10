@@ -43,6 +43,11 @@ module Quicsilver
         return unless writable?
         Quicsilver.stream_stop_sending(@stream_handle, error_code)
       end
+
+      def abort(error_code = Protocol::H3_REQUEST_CANCELLED)
+        return unless writable?
+        Quicsilver.stream_abort(@stream_handle, error_code)
+      end
     end
   end
 end

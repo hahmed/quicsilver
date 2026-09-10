@@ -64,6 +64,12 @@ module Quicsilver
   class << self
     attr_writer :logger
 
+    def stream_abort(handle, error_code)
+      receiving_stopped = stream_stop_sending(handle, error_code)
+      sending_reset = stream_reset(handle, error_code)
+      receiving_stopped || sending_reset
+    end
+
     def logger
       @logger ||= default_logger
     end
