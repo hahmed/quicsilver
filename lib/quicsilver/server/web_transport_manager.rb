@@ -23,6 +23,7 @@ module Quicsilver
       end
 
       def register(session)
+        session.stream_manager = self
         @sessions[session.stream_id] = session
       end
 
@@ -63,6 +64,10 @@ module Quicsilver
           return session if session.stream(stream_id)
         end
         nil
+      end
+
+      def register_stream(stream_id)
+        @stream_states[stream_id] = :accepted
       end
 
       def known_stream?(stream_id)
@@ -125,7 +130,6 @@ module Quicsilver
         session_id, = WebTransportSession.parse_stream_prefix(payload)
         return reject_stream(stream_id, stream_handle) unless session_id && @sessions[session_id]&.accepts_new_streams?
 
-        @stream_states[stream_id] = :accepted
         WebTransportSession.accept_stream(@sessions, stream_id, stream_handle, payload)
       end
 
@@ -148,7 +152,6 @@ module Quicsilver
         session = @sessions[session_id]
         return reject_stream(stream_id, stream_handle) unless session&.accepts_new_streams?
 
-        @stream_states[stream_id] = :accepted
         stream = session.add_uni_stream(stream_handle, stream_id)
         stream.receive_data(initial_data) if initial_data && !initial_data.empty?
         stream

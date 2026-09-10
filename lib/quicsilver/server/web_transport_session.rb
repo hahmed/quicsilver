@@ -135,6 +135,11 @@ module Quicsilver
         @closed = false
       end
 
+      def stream_manager=(manager)
+        @stream_manager = manager
+        @streams.each_key { |stream_id| manager.register_stream(stream_id) }
+      end
+
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
       def accept!
         return if @accepted
@@ -175,7 +180,7 @@ module Quicsilver
         wt_stream = WebTransportStream.new(
           session: self, stream: stream, stream_id: stream.stream_id
         )
-        @streams[wt_stream.stream_id] = wt_stream
+        register_stream(wt_stream)
         wt_stream
       end
 
@@ -197,7 +202,7 @@ module Quicsilver
           session: self, stream: stream, stream_id: stream.stream_id,
           direction: :send_only
         )
-        @streams[wt_stream.stream_id] = wt_stream
+        register_stream(wt_stream)
         wt_stream
       end
 
@@ -324,7 +329,7 @@ module Quicsilver
         wt_stream = WebTransportStream.new(
           session: self, stream: stream, stream_id: stream_id
         )
-        @streams[stream_id] = wt_stream
+        register_stream(wt_stream)
         @stream_callback&.call(wt_stream)
         wt_stream
       end
@@ -341,7 +346,7 @@ module Quicsilver
           session: self, stream: stream, stream_id: stream_id,
           direction: :receive_only
         )
-        @streams[stream_id] = wt_stream
+        register_stream(wt_stream)
         @uni_stream_callback&.call(wt_stream)
         wt_stream
       end
@@ -358,6 +363,11 @@ module Quicsilver
       end
 
       private
+
+      def register_stream(stream)
+        @stream_manager&.register_stream(stream.stream_id)
+        @streams[stream.stream_id] = stream
+      end
 
       def terminate_streams
         streams = @streams.values

@@ -14,6 +14,11 @@ require_relative "../test_helper"
 class WebTransportReceiveFinRoutingTest < Minitest::Test
   Session = Quicsilver::Server::WebTransportSession
 
+  RecordingOutboundStream = Struct.new(:stream_id, :handle) do
+    def send(*) = true
+    def abort(*) = true
+  end
+
   SESSION_ID = 0
   COMMAND_STREAM = 4
 
@@ -184,14 +189,40 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
   def test_late_data_after_session_close_never_becomes_http
     server, connection = server_with_session
     receive(server, connection, 4, bidi_payload("first"))
+    outgoing = RecordingOutboundStream.new(1, 99_001)
+    connection.stub(:open_stream, outgoing) { session.open_stream }
     session.notify_close
     dispatched = []
     server.stub(:dispatch_request, ->(*) { dispatched << true }) do
-      receive(server, connection, 4, http3_request)
-      receive_fin(server, connection, 4, http3_request)
+      server.stub(:dispatch_streaming, ->(*) { dispatched << true }) do
+        [4, 1].each do |stream_id|
+          receive(server, connection, stream_id, http3_request)
+          receive_fin(server, connection, stream_id, http3_request)
+        end
+      end
     end
 
     assert_empty dispatched
+  end
+
+  def test_server_initiated_stream_ownership_ends_at_native_shutdown
+    server, connection = server_with_session
+    manager = server.instance_variable_get(:@webtransport).for(connection.handle)
+    [1, 3].each do |stream_id|
+      outgoing = RecordingOutboundStream.new(stream_id, 99_000 + stream_id)
+      connection.stub(:open_stream, outgoing) do
+        stream_id == 1 ? session.open_stream : session.open_uni_stream
+      end
+    end
+    session.notify_close
+
+    [1, 3].each do |stream_id|
+      assert manager.known_stream?(stream_id)
+      raw = [99_000 + stream_id].pack("Q")
+      server.handle_stream_event([connection.handle, 0], stream_id,
+        Quicsilver::Server::STREAM_EVENT_SHUTDOWN_COMPLETE, raw, false)
+      refute manager.known_stream?(stream_id)
+    end
   end
 
   def test_connection_teardown_survives_session_and_connection_callback_errors
