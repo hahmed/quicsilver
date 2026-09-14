@@ -8,13 +8,17 @@ class WebTransportStreamTest < Minitest::Test
   # Records what reaches the transport, so tests assert on what the peer would
   # see rather than on internal flags.
   class RecordingTransport
-    attr_reader :resets
+    attr_reader :resets, :stops, :writes
 
-    def initialize = @resets = []
+    def initialize
+      @resets = []
+      @stops = []
+      @writes = []
+    end
 
     def abort(code) = @resets << code
-    def stop_sending(code) = nil
-    def send(data, fin: false) = nil
+    def stop_sending(code) = @stops << code
+    def send(data, fin: false) = @writes << [data, fin]
     def handle = 99_999
   end
 
@@ -167,10 +171,82 @@ class WebTransportStreamTest < Minitest::Test
     refute stream.open?
   end
 
-  def test_write_on_closed_stream_does_nothing
+  def test_write_on_closed_stream_raises
     stream = build_stream(:closeable)
     stream.close
-    stream.write("ignored")
+    assert_raises(IOError) { stream.write("late") }
+  end
+
+  def test_write_after_close_write_raises
+    stream = build_stream(:closeable)
+    stream.close_write
+
+    assert_raises(IOError) { stream.write("late") }
+  end
+
+  def test_failed_fin_is_reported_and_can_be_retried
+    transport = RecordingTransport.new
+    stream = stream_on(transport)
+    transport.stub(:send, ->(*) { raise IOError, "send failed" }) do
+      assert_raises(IOError) { stream.close_write }
+    end
+
+    stream.close_write
+    assert_equal [["".b, true]], transport.writes
+    assert_empty transport.stops
+  end
+
+  def test_close_sends_fin_and_requests_peer_to_stop_once
+    transport = RecordingTransport.new
+    stream = stream_on(transport)
+    2.times { stream.close }
+
+    assert_equal [["".b, true]], transport.writes
+    assert_equal [WT.application_error_to_http(0)], transport.stops
+  end
+
+  def test_close_stops_receiving_even_when_fin_fails
+    transport = RecordingTransport.new
+    stream = stream_on(transport)
+    stream.receive_data("unread")
+    transport.stub(:send, ->(*) { raise IOError, "send failed" }) do
+      assert_raises(IOError) { stream.close }
+    end
+
+    assert_equal [WT.application_error_to_http(0)], transport.stops
+    assert_nil stream.read
+  end
+
+  def test_close_receive_only_stream_only_requests_peer_to_stop
+    transport = RecordingTransport.new
+    stream = Quicsilver::Server::WebTransportStream.new(
+      session: nil, stream: transport, stream_id: 2, direction: :receive_only
+    )
+    stream.close
+
+    assert_empty transport.writes
+    assert_equal [WT.application_error_to_http(0)], transport.stops
+  end
+
+  def test_close_send_only_stream_only_sends_fin
+    transport = RecordingTransport.new
+    stream = Quicsilver::Server::WebTransportStream.new(
+      session: nil, stream: transport, stream_id: 3, direction: :send_only
+    )
+    stream.close
+
+    assert_equal [["".b, true]], transport.writes
+    assert_empty transport.stops
+  end
+
+  def test_close_after_peer_fin_does_not_request_peer_to_stop
+    transport = RecordingTransport.new
+    stream = stream_on(transport)
+    stream.notify_read_close
+    stream.close
+
+    assert_equal [["".b, true]], transport.writes
+    assert_empty transport.stops
   end
 
   def test_write_sends_raw_bytes
@@ -320,20 +396,9 @@ class WebTransportStreamTest < Minitest::Test
   private
 
   def build_stream(variant = :bidi)
-    session = Minitest::Mock.new
-    stream = Minitest::Mock.new
-
-    case variant
-    when :closeable
-      stream.expect(:send, true, ["".b], fin: true)
-    when :receive_only
-      return Quicsilver::Server::WebTransportStream.new(
-        session: session, stream: stream, stream_id: 4, direction: :receive_only
-      )
-    end
-
     Quicsilver::Server::WebTransportStream.new(
-      session: session, stream: stream, stream_id: 4
+      session: nil, stream: RecordingTransport.new, stream_id: 4,
+      direction: variant == :receive_only ? :receive_only : :bidi
     )
   end
 end

@@ -64,7 +64,7 @@ module Quicsilver
 
       def write(data)
         raise "Cannot write to a receive-only stream" if @direction == :receive_only
-        return unless @write_open
+        raise IOError, "Stream is closed for writing" unless @write_open
 
         @stream.send(data.to_s.b)
       end
@@ -72,9 +72,8 @@ module Quicsilver
       # Finish sending and discard unread input; use close_write to keep reading.
       def close
         close_write
-        @read_open = false
-        @input.close
-        notify_close_callback
+      ensure
+        discard_input
       end
 
       # One application reader; never call from the transport event loop.
@@ -152,11 +151,19 @@ module Quicsilver
       def close_write
         return unless @write_open
 
-        @stream.send("".b, fin: true) rescue nil
+        @stream.send("".b, fin: true)
         @write_open = false
       end
 
       private
+
+      def discard_input
+        @stream.stop_sending(Protocol::WebTransport.application_error_to_http(0)) if @read_open
+      ensure
+        @read_open = false
+        @input.close
+        notify_close_callback
+      end
 
       def notify_close_callback
         return if @close_notified
