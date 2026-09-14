@@ -54,6 +54,10 @@ module Quicsilver
         @stream.handle if @stream.respond_to?(:handle)
       end
 
+      def notify_start(stream_id)
+        @stream_id = stream_id
+      end
+
       def replace_stream_handle(handle)
         @stream = Transport::Stream.new(handle)
       end

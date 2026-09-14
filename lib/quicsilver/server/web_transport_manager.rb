@@ -15,6 +15,7 @@ module Quicsilver
         @sessions = {}
         @pending_streams = {}
         @stream_states = {}
+        @starting_streams = {}
         @pending_uni_streams = {}
       end
 
@@ -65,6 +66,21 @@ module Quicsilver
         nil
       end
 
+      def register_starting_stream(stream)
+        @starting_streams[stream.stream_handle] = stream
+      end
+
+      def discard_starting_stream(handle)
+        @starting_streams.delete(handle)
+      end
+
+      def stream_started(stream_id, handle)
+        return unless stream_id && stream_id.between?(0, (1 << 62) - 1)
+        return unless (stream = @starting_streams.delete(handle))
+
+        stream.session.stream_started(stream, stream_id)
+      end
+
       def register_stream(stream_id)
         @stream_states[stream_id] = :accepted
       end
@@ -85,10 +101,12 @@ module Quicsilver
         nil
       end
 
-      def stream_shutdown_complete(stream_id)
+      def stream_shutdown_complete(stream_id, handle: nil)
+        starting = @starting_streams.delete(handle)
+        starting&.session&.remove_starting_stream(handle)
         @pending_uni_streams.delete(stream_id)
         @pending_streams.delete(stream_id)
-        known = @stream_states.delete(stream_id)
+        known = @stream_states.delete(stream_id) || starting
         if (session = @sessions.delete(stream_id))
           session.notify_close
           return true

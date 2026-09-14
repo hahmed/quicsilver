@@ -369,7 +369,7 @@ module Quicsilver
         # Buffer cleanup handled in C extension
       when STREAM_EVENT_SHUTDOWN_COMPLETE
         return unless (connection = @connections[connection_handle])
-        handle_stream_shutdown(connection, stream_id)
+        handle_stream_shutdown(connection, stream_id, Transport::StreamEvent.new(data, event).handle)
       when STREAM_EVENT_RECEIVE
         return unless (connection = @connections[connection_handle])
         handle_receive(connection, connection_handle, stream_id, data, early_data: early_data)
@@ -409,6 +409,8 @@ module Quicsilver
           cancel_stream(connection, stream_id)
         end
       when STREAM_EVENT_START_COMPLETE
+        return unless @connections.key?(connection_handle)
+        @webtransport.for(connection_handle).stream_started(stream_id, Transport::StreamEvent.new(data, event).handle)
         # peer_accepted=true: stream is flowing. false: queued at peer's limit.
         # Server-side: this fires for outbound streams (control, QPACK).
         # Frequent false here means the client's stream limit is too low.
@@ -464,8 +466,8 @@ module Quicsilver
       end
     end
 
-    def handle_stream_shutdown(connection, stream_id)
-      return unless @webtransport.for(connection.handle).stream_shutdown_complete(stream_id)
+    def handle_stream_shutdown(connection, stream_id, handle)
+      return unless @webtransport.for(connection.handle).stream_shutdown_complete(stream_id, handle: handle)
 
       connection.remove_stream(stream_id)
     rescue StandardError

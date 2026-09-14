@@ -205,6 +205,117 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     assert_empty dispatched
   end
 
+  def test_starting_streams_get_distinct_ids_and_route_browser_replies
+    server, connection = server_with_session
+    first = RecordingOutboundStream.new(nil, 99_001)
+    second = RecordingOutboundStream.new(nil, 99_005)
+    bidi = connection.stub(:open_stream, first) { session.open_stream }
+    other = connection.stub(:open_stream, second) { session.open_stream }
+
+    start_stream(server, connection, first.handle, 1)
+    start_stream(server, connection, second.handle, 5)
+    receive_fin(server, connection, 1, "first reply")
+    receive_fin(server, connection, 5, "second reply")
+
+    assert_equal 1, bidi.stream_id
+    assert_equal 5, other.stream_id
+    assert_equal "first reply", bidi.read
+    assert_nil bidi.read
+    assert_equal "second reply", other.read
+    assert_nil other.read
+  end
+
+  def test_session_close_aborts_every_stream_even_before_startup
+    server, connection = server_with_session
+    first = RecordingOutboundStream.new(nil, 99_001)
+    second = RecordingOutboundStream.new(nil, 99_003)
+    bidi = connection.stub(:open_stream, first) { session.open_stream }
+    uni = connection.stub(:open_stream, second) { session.open_uni_stream }
+    aborted = []
+    first.stub(:abort, ->(code) { aborted << [first.handle, code] }) do
+      second.stub(:abort, ->(code) { aborted << [second.handle, code] }) do
+        session.notify_close
+      end
+    end
+
+    code = Quicsilver::Protocol::WebTransport::SESSION_GONE
+    assert_equal [[first.handle, code], [second.handle, code]], aborted
+    refute bidi.open?
+    refute uni.open?
+    start_stream(server, connection, first.handle, 1)
+    start_stream(server, connection, second.handle, 3)
+    assert_nil session.stream(1)
+    assert_nil session.stream(3)
+    dispatched = []
+    server.stub(:dispatch_request, ->(*) { dispatched << true }) do
+      receive_fin(server, connection, 1, http3_request)
+    end
+    assert_empty dispatched
+  end
+
+  def test_shutdown_before_startup_removes_the_starting_stream
+    server, connection = server_with_session
+    outgoing = RecordingOutboundStream.new(nil, 99_001)
+    stream = connection.stub(:open_stream, outgoing) { session.open_stream }
+    server.handle_stream_event([connection.handle, 0], (1 << 64) - 1,
+      Quicsilver::Server::STREAM_EVENT_SHUTDOWN_COMPLETE, [outgoing.handle].pack("Q"), false)
+
+    refute stream.open?
+    aborted = []
+    outgoing.stub(:abort, ->(code) { aborted << code }) { session.notify_close }
+    assert_empty aborted
+  end
+
+  def test_session_close_during_open_cancels_the_unregistered_stream
+    [:open_stream, :open_uni_stream].each do |method|
+      _, connection = server_with_session
+      outgoing = RecordingOutboundStream.new(nil, 99_001)
+      opening = Queue.new
+      resume = Queue.new
+      aborted = []
+      thread = nil
+      open = ->(**) { opening << true; resume.pop; outgoing }
+
+      outgoing.stub(:abort, ->(code) { aborted << code }) do
+        connection.stub(:open_stream, open) do
+          thread = Thread.new do
+            session.public_send(method)
+          rescue RuntimeError => error
+            error
+          end
+          assert opening.pop(timeout: 3), "Stream open did not start"
+          session.notify_close
+          resume << true
+          assert thread.join(3), "Stream open did not finish"
+          assert_instance_of RuntimeError, thread.value
+          assert_equal "Session not open", thread.value.message
+        end
+      end
+      assert_equal [Quicsilver::Protocol::WebTransport::SESSION_GONE], aborted
+    ensure
+      resume&.close
+      thread&.join(3)
+    end
+  end
+
+  def test_failed_prefix_send_cancels_and_removes_the_stream
+    server, connection = server_with_session
+    outgoing = RecordingOutboundStream.new(nil, 99_001)
+    aborted = []
+    outgoing.stub(:abort, ->(code) { aborted << code }) do
+      outgoing.stub(:send, ->(*) { raise IOError, "Stream closed" }) do
+        connection.stub(:open_stream, outgoing) do
+          assert_raises(IOError) { session.open_stream }
+        end
+      end
+      assert_equal [Quicsilver::Protocol::WebTransport::SESSION_GONE], aborted
+      start_stream(server, connection, outgoing.handle, 1)
+      assert_nil session.stream(1)
+      session.notify_close
+      assert_equal 1, aborted.size
+    end
+  end
+
   def test_server_initiated_stream_ownership_ends_at_native_shutdown
     server, connection = server_with_session
     manager = server.instance_variable_get(:@webtransport).for(connection.handle)
@@ -330,6 +441,12 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     assert_equal 0, connection.active_streams
     registry = server.instance_variable_get(:@webtransport)
     assert_empty registry.for(connection.handle).sessions
+  end
+
+  def start_stream(server, connection, handle, stream_id)
+    data = [handle].pack("Q") + "\x01".b
+    server.handle_stream_event([connection.handle, 0], stream_id,
+      Quicsilver::Server::STREAM_EVENT_START_COMPLETE, data, false)
   end
 
   def receive(server, connection, stream_id, payload)

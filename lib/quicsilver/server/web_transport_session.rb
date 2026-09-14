@@ -131,13 +131,18 @@ module Quicsilver
         @uni_stream_callback = nil
         @close_callback = nil
         @streams = {}  # stream_id => WebTransportStream
+        @starting_streams = {}
+        @streams_mutex = Mutex.new
         @connect_buffer = "".b
         @closed = false
       end
 
       def stream_manager=(manager)
-        @stream_manager = manager
-        @streams.each_key { |stream_id| manager.register_stream(stream_id) }
+        @streams_mutex.synchronize do
+          @stream_manager = manager
+          @streams.each_key { |stream_id| manager.register_stream(stream_id) }
+          @starting_streams.each_value { |stream| manager.register_starting_stream(stream) }
+        end
       end
 
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
@@ -170,18 +175,7 @@ module Quicsilver
 
       # Open a server-initiated bidirectional stream to the client.
       def open_stream
-        raise "Session not accepted" unless @accepted
-        raise "Session not open" unless accepts_new_streams?
-        stream = @connection.open_stream
-        prefix = Protocol.encode_varint(WT_STREAM_BIDI) +
-                 Protocol.encode_varint(@stream_id)
-        stream.send(prefix)
-
-        wt_stream = WebTransportStream.new(
-          session: self, stream: stream, stream_id: stream.stream_id
-        )
-        register_stream(wt_stream)
-        wt_stream
+        open_outgoing_stream(unidirectional: false)
       end
 
       # Register a callback for incoming unidirectional streams (client → server, read-only).
@@ -191,19 +185,7 @@ module Quicsilver
 
       # Open a server-initiated unidirectional stream to the client (write-only).
       def open_uni_stream
-        raise "Session not accepted" unless @accepted
-        raise "Session not open" unless accepts_new_streams?
-        stream = @connection.open_stream(unidirectional: true)
-        prefix = Protocol.encode_varint(WT_STREAM_UNI) +
-                 Protocol.encode_varint(@stream_id)
-        stream.send(prefix)
-
-        wt_stream = WebTransportStream.new(
-          session: self, stream: stream, stream_id: stream.stream_id,
-          direction: :send_only
-        )
-        register_stream(wt_stream)
-        wt_stream
+        open_outgoing_stream(unidirectional: true)
       end
 
       # Register a callback for session close.
@@ -269,8 +251,11 @@ module Quicsilver
       # Sends a WT_CLOSE_SESSION capsule (RFC draft-ietf-webtrans-http3)
       # on the CONNECT stream before closing.
       def close(code: 0, reason: "")
-        was_open = @open
-        @open = false
+        was_open = @streams_mutex.synchronize do
+          was_open = @open
+          @open = false
+          was_open
+        end
 
         if was_open
           write_close_reason(code, reason)
@@ -311,13 +296,19 @@ module Quicsilver
       # capsule followed by FIN would otherwise fire @close_callback twice and
       # re-walk an already-cleared @streams map.
       def notify_close(code: 0, reason: "", remote: true) # :nodoc:
-        return if @closed
-        @closed = true
+        streams = @streams_mutex.synchronize do
+          return if @closed
+          @closed = true
+          @open = false
+          streams = @streams.values + @starting_streams.values
+          @streams.clear
+          @starting_streams.clear
+          streams
+        end
 
         Quicsilver.logger.debug("WebTransport session #{@stream_id} notify_close")
-        @open = false
         begin
-          terminate_streams
+          terminate_streams(streams)
         ensure
           @close_callback&.call(CloseInfo.new(code: code, reason: reason, remote: remote))
         end
@@ -329,7 +320,7 @@ module Quicsilver
         wt_stream = WebTransportStream.new(
           session: self, stream: stream, stream_id: stream_id
         )
-        register_stream(wt_stream)
+        return wt_stream unless register_stream(wt_stream)
         @stream_callback&.call(wt_stream)
         wt_stream
       end
@@ -346,9 +337,23 @@ module Quicsilver
           session: self, stream: stream, stream_id: stream_id,
           direction: :receive_only
         )
-        register_stream(wt_stream)
+        return wt_stream unless register_stream(wt_stream)
         @uni_stream_callback&.call(wt_stream)
         wt_stream
+      end
+
+      def stream_started(stream, stream_id)
+        @streams_mutex.synchronize do
+          starting = @starting_streams.delete(stream.stream_handle)
+          stream.notify_start(stream_id)
+          @stream_manager&.register_stream(stream_id)
+          @streams[stream_id] = stream if starting && !@closed
+        end
+      end
+
+      def remove_starting_stream(handle)
+        stream = @streams_mutex.synchronize { @starting_streams.delete(handle) }
+        stream&.notify_close
       end
 
       # Called when a stream within this session is reset.
@@ -356,7 +361,7 @@ module Quicsilver
       # stream can report it to the application (§4.4). nil for an ordinary
       # close, where there is no code to deliver.
       def remove_stream(stream_id, error_code: nil) # :nodoc:
-        stream = @streams.delete(stream_id)
+        stream = @streams_mutex.synchronize { @streams.delete(stream_id) }
         return unless stream
 
         error_code ? stream.notify_reset(error_code) : stream.notify_close
@@ -364,14 +369,56 @@ module Quicsilver
 
       private
 
-      def register_stream(stream)
-        @stream_manager&.register_stream(stream.stream_id)
-        @streams[stream.stream_id] = stream
+      def open_outgoing_stream(unidirectional:)
+        raise "Session not accepted" unless @accepted
+        raise "Session not open" unless accepts_new_streams?
+
+        stream = @connection.open_stream(unidirectional: unidirectional)
+        wt_stream = WebTransportStream.new(
+          session: self, stream: stream, stream_id: stream.stream_id,
+          direction: unidirectional ? :send_only : :bidi
+        )
+        raise "Session not open" unless register_stream(wt_stream, outgoing: true)
+
+        type = unidirectional ? WT_STREAM_UNI : WT_STREAM_BIDI
+        stream.send(Protocol.encode_varint(type) + Protocol.encode_varint(@stream_id))
+        @stream_manager&.stream_started(stream.stream_id, stream.handle)
+        wt_stream
+      rescue StandardError
+        discard_outgoing_stream(wt_stream) if wt_stream
+        raise
       end
 
-      def terminate_streams
-        streams = @streams.values
-        @streams.clear
+      def discard_outgoing_stream(stream)
+        @streams_mutex.synchronize do
+          @streams.delete(stream.stream_id)
+          @starting_streams.delete(stream.stream_handle)
+          @stream_manager&.discard_starting_stream(stream.stream_handle)
+        end
+        stream.abort(Protocol::WebTransport::SESSION_GONE) if stream.open?
+      end
+
+      def register_stream(stream, outgoing: false)
+        registered = @streams_mutex.synchronize do
+          if stream.stream_id
+            @stream_manager&.register_stream(stream.stream_id)
+          else
+            @stream_manager&.register_starting_stream(stream)
+          end
+          next false if @closed || (outgoing && !@open)
+
+          if stream.stream_id
+            @streams[stream.stream_id] = stream
+          else
+            @starting_streams[stream.stream_handle] = stream
+          end
+          true
+        end
+        stream.abort(Protocol::WebTransport::SESSION_GONE) unless registered
+        registered
+      end
+
+      def terminate_streams(streams)
         failure = nil
         streams.each do |stream|
           stream.abort(Protocol::WebTransport::SESSION_GONE)

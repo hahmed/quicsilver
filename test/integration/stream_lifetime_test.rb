@@ -36,12 +36,14 @@ class StreamLifetimeTest < Minitest::Test
       end
 
       if @test_streams[key]
-        @events << [stream_id, event, data]
+        @events << [stream_id, event, data, connection.first]
         return
       end
 
-      @events << [stream_id, event, data] if event == "CONNECTION_CLOSED"
       super
+      if %w[CONNECTION_CLOSED STREAM_START_COMPLETE STREAM_SHUTDOWN_COMPLETE].include?(event)
+        @events << [stream_id, event, data, connection.first]
+      end
     end
   end
 
@@ -122,7 +124,7 @@ class StreamLifetimeTest < Minitest::Test
     outgoing, incoming, = open_stream
     @client.disconnect
     @server_connection.shutdown
-    await_event(@server, "CONNECTION_CLOSED")
+    await_event(@server, "CONNECTION_CLOSED", connection: @server_connection.handle)
 
     assert_retired(outgoing)
     assert_retired(incoming)
@@ -149,6 +151,33 @@ class StreamLifetimeTest < Minitest::Test
 
     assert_delivers(outgoing, @server, id, "still receiving")
     assert_delivers(incoming, @client, id, "still sending")
+  end
+
+  def test_closing_one_connection_leaves_another_connections_stream_usable
+    first_client = @client
+    first_connection = @server_connection
+    first_outgoing, first_incoming, first_id = open_stream
+    closed = Queue.new
+    @server.on_connection_closed { |connection| closed << connection.handle }
+
+    connect_client
+    outgoing, incoming, id = open_stream
+    assert_equal first_id, id
+
+    first_connection.shutdown
+    assert_equal first_connection.handle, closed.pop(timeout: 3)
+    assert_retired(first_incoming)
+    assert_delivers(outgoing, @server, id, "still receiving")
+    assert_delivers(incoming, @client, id, "still sending")
+
+    @server_connection.shutdown
+    event = await_event(@server, "CONNECTION_CLOSED", connection: @server_connection.handle)
+    assert_equal @server_connection.handle, event[3]
+    assert_retired(incoming)
+    first_client.disconnect
+    assert_retired(first_outgoing)
+  ensure
+    first_client&.disconnect
   end
 
   def test_send_fails_safely_when_argument_conversion_closes_stream
@@ -197,6 +226,50 @@ class StreamLifetimeTest < Minitest::Test
     assert_nil session.stream(uni_id)
   end
 
+  def test_streams_opened_in_a_native_callback_get_ids_and_close_while_peer_blocked
+    _, connect_stream, = open_stream
+    session = Quicsilver::Server::WebTransportSession.new(
+      connection: @server_connection, stream: connect_stream, headers: {}
+    )
+    manager = @server.instance_variable_get(:@webtransport).for(@server_connection.handle)
+    manager.register(session)
+    session.accept!
+    opened = Queue.new
+    @server.on_datagram do |_connection, _data|
+      opened << [session.open_stream, session.open_uni_stream]
+    end
+
+    @client.datagram_send("open server streams")
+    streams = opened.pop(timeout: 3)
+    refute_nil streams, "Server did not open the streams"
+    waiting = streams.map(&:stream_handle)
+    until waiting.empty?
+      event = await_event(@server, "STREAM_START_COMPLETE", connection: @server_connection.handle)
+      started = decode_event(event)
+      next unless waiting.delete(started.handle)
+
+      assert_equal 0, event[2].getbyte(8), "Peer unexpectedly accepted the stream"
+    end
+
+    bidi, uni = streams
+    refute_nil bidi.stream_id
+    refute_nil uni.stream_id
+    refute_equal bidi.stream_id, uni.stream_id
+    session.notify_close
+
+    streams.each do |stream|
+      refute stream.open?
+      assert_nil session.stream(stream.stream_id)
+    end
+
+    @server_connection.shutdown
+    await_event(@server, "CONNECTION_CLOSED", connection: @server_connection.handle)
+
+    streams.each do |stream|
+      assert_retired(Quicsilver::Transport::Stream.new(stream.stream_handle))
+    end
+  end
+
   def test_unknown_session_rejection_reaches_the_peer
     _, incoming, id = open_stream
     manager = Quicsilver::Server::WebTransportManager.new
@@ -209,6 +282,24 @@ class StreamLifetimeTest < Minitest::Test
       assert_equal REJECTION, decode_event(event).error_code
     end
     assert_equal 200, @client.get("/").status
+  end
+
+  def test_failed_async_start_retires_the_stream
+    opened = Queue.new
+    @server.on_datagram do |_connection, _data|
+      @server_connection.shutdown
+      opened << @server_connection.open_stream
+    end
+
+    @client.datagram_send("open while shutting down")
+    stream = opened.pop(timeout: 3)
+    refute_nil stream, "Stream was not opened"
+    failed_id = (1 << 64) - 1
+    started = await_event(@server, "STREAM_START_COMPLETE", failed_id, connection: @server_connection.handle)
+    assert_equal stream.handle, decode_event(started).handle
+    shutdown = await_event(@server, "STREAM_SHUTDOWN_COMPLETE", failed_id, connection: @server_connection.handle)
+    assert_equal stream.handle, decode_event(shutdown).handle
+    assert_retired(stream)
   end
 
   private
@@ -230,7 +321,7 @@ class StreamLifetimeTest < Minitest::Test
   end
 
   def decode_event(event)
-    Quicsilver::Transport::StreamEvent.new(event.last, event[1])
+    Quicsilver::Transport::StreamEvent.new(event[2], event[1])
   end
 
   def assert_delivers(stream, peer, id, payload)
@@ -253,12 +344,16 @@ class StreamLifetimeTest < Minitest::Test
     assert_raises(IOError) { stream.send("late") }
   end
 
-  def await_event(endpoint, type, id = nil)
+  def await_event(endpoint, type, id = nil, connection: nil)
+    connection ||= @server_connection.handle if endpoint.equal?(@server)
     inbox = @inbox[endpoint]
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
     types = Array(type)
     loop do
-      index = inbox.index { |event| types.include?(event[1]) && (id.nil? || event[0] == id) }
+      index = inbox.index do |event|
+        types.include?(event[1]) && (id.nil? || event[0] == id) &&
+          (connection.nil? || event[3] == connection)
+      end
       return inbox.delete_at(index) if index
 
       remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)

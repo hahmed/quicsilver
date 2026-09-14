@@ -10,8 +10,7 @@ module Quicsilver
         @handle = handle
       end
 
-      # Returns the QUIC stream ID. Only available after data has been sent
-      # (MsQuic defers ID assignment until data flows on the wire).
+      # Returns nil until asynchronous stream startup completes, or after shutdown.
       def stream_id
         Quicsilver.get_stream_id(@handle)
       end

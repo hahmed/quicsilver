@@ -371,13 +371,13 @@ app = lambda do |env|
         message = "hello from server bidi #{Time.now.to_f}"
         stream.write(message)
         stream.close
-        puts "WT server bidi stream #{stream.stream_id} wrote #{message.bytesize} bytes"
+        puts "WT server bidi stream #{stream.stream_id || "pending (token #{stream.stream_handle})"} wrote #{message.bytesize} bytes"
       when "__open_server_uni__"
         stream = session.open_uni_stream
         message = "hello from server uni #{Time.now.to_f}"
         stream.write(message)
         stream.close
-        puts "WT server uni stream #{stream.stream_id} wrote #{message.bytesize} bytes"
+        puts "WT server uni stream #{stream.stream_id || "pending (token #{stream.stream_handle})"} wrote #{message.bytesize} bytes"
       else
         response = "echo: #{datagram}"
         session.send_datagram(response)

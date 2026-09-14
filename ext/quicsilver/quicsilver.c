@@ -1698,7 +1698,8 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
     // Start the stream. INDICATE_PEER_ACCEPT gives us visibility into
     // stream flow control — fires PEER_ACCEPTED event when the peer
     // raises MAX_STREAMS if the stream was initially queued.
-    Status = MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_INDICATE_PEER_ACCEPT);
+    Status = MsQuic->StreamStart(Stream,
+        QUIC_STREAM_START_FLAG_INDICATE_PEER_ACCEPT | QUIC_STREAM_START_FLAG_SHUTDOWN_ON_FAIL);
     if (QUIC_FAILED(Status)) {
         unregister_stream(token);
         // StreamClose fires SHUTDOWN_COMPLETE synchronously which frees ctx
