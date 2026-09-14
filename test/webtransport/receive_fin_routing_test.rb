@@ -96,7 +96,7 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
 
     stop_sending(server, connection, COMMAND_STREAM, Quicsilver::Protocol::H3_REQUEST_CANCELLED)
 
-    refute server.cancelled_stream?(COMMAND_STREAM),
+    refute server.cancelled_stream?(COMMAND_STREAM, connection.handle),
       "a WebTransport stream is not a cancelled HTTP/3 request"
   end
 
@@ -110,7 +110,7 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
       stop_sending(server, connection, 20, Quicsilver::Protocol::H3_REQUEST_CANCELLED)
     end
 
-    assert server.cancelled_stream?(20)
+    assert server.cancelled_stream?(20, connection.handle)
   end
 
   def test_unknown_session_is_rejected_without_http_dispatch
@@ -254,6 +254,82 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     assert_equal 0, registry.connection_count
     assert_equal [connection.handle], closed_handles
     assert_includes @log.string, "session callback failed"
+  end
+
+  def test_late_cancellation_after_session_close_stays_out_of_http
+    ["STREAM_RESET", "STOP_SENDING"].each do |event|
+      server, connection = server_with_session
+      receive(server, connection, 4, bidi_payload("hello"))
+      session.notify_close
+      resets = []
+      data = [99_004, Quicsilver::Protocol::WebTransport::SESSION_GONE].pack("QQ")
+
+      Quicsilver.stub(:stream_reset, ->(*args) { resets << args }) do
+        server.handle_stream_event([connection.handle, 0], 4, event, data, false)
+      end
+
+      refute server.cancelled_stream?(4, connection.handle)
+      assert_empty resets
+    end
+  end
+
+  def test_rejected_stream_cancellation_stays_out_of_http
+    server, connection = server_with_session
+    Quicsilver.stub(:stream_abort, true) do
+      receive(server, connection, 4, bidi_payload("hello", session_id: 64))
+    end
+    resets = []
+    data = [99_004, Quicsilver::Protocol::WebTransport::BUFFERED_STREAM_REJECTED].pack("QQ")
+    Quicsilver.stub(:stream_reset, ->(*args) { resets << args }) do
+      ["STOP_SENDING", "STREAM_RESET"].each do |event|
+        server.handle_stream_event([connection.handle, 0], 4, event, data, false)
+      end
+    end
+
+    refute server.cancelled_stream?(4, connection.handle)
+    assert_empty resets
+  end
+
+  def test_shutdown_after_connection_close_does_not_recreate_its_manager
+    server, connection = server_with_session
+    Quicsilver.stub(:close_server_connection, true) do
+      server.handle_stream_event([connection.handle, 0], 0, "CONNECTION_CLOSED", "".b, false)
+    end
+    server.handle_stream_event([connection.handle, 0], 4,
+      Quicsilver::Server::STREAM_EVENT_SHUTDOWN_COMPLETE, [99_004].pack("Q"), false)
+
+    registry = server.instance_variable_get(:@webtransport)
+    assert_equal 0, registry.connection_count
+  end
+
+  def test_clean_connect_shutdown_removes_session_and_connection_tracking
+    server, connection = server_with_session
+    connection.track_client_stream(SESSION_ID)
+    receive_fin(server, connection, SESSION_ID, "".b)
+    server.handle_stream_event([connection.handle, 0], SESSION_ID,
+      Quicsilver::Server::STREAM_EVENT_SHUTDOWN_COMPLETE, [99_999].pack("Q"), false)
+
+    assert session.closed?
+    assert_equal 0, connection.active_streams
+    registry = server.instance_variable_get(:@webtransport)
+    assert_empty registry.for(connection.handle).sessions
+  end
+
+  def test_connect_shutdown_cleans_tracking_when_close_callback_raises
+    server, connection = server_with_session
+    connection.track_client_stream(SESSION_ID)
+    session.on_close { raise "close callback failed" }
+
+    error = assert_raises(RuntimeError) do
+      server.handle_stream_event([connection.handle, 0], SESSION_ID,
+        Quicsilver::Server::STREAM_EVENT_SHUTDOWN_COMPLETE, [99_999].pack("Q"), false)
+    end
+
+    assert_equal "close callback failed", error.message
+    assert session.closed?
+    assert_equal 0, connection.active_streams
+    registry = server.instance_variable_get(:@webtransport)
+    assert_empty registry.for(connection.handle).sessions
   end
 
   def receive(server, connection, stream_id, payload)

@@ -3,6 +3,20 @@
 require "test_helper"
 
 class StreamControlIntegrationTest < Minitest::Test
+  class RecordingServer < Quicsilver::Server
+    attr_reader :cancellations
+
+    def initialize(...)
+      @cancellations = Queue.new
+      super
+    end
+
+    def handle_stream_event(connection, stream_id, event, data, early_data)
+      super
+      @cancellations << stream_id if %w[STREAM_RESET STOP_SENDING].include?(event)
+    end
+  end
+
   def setup
     @port = find_available_port
     @client = nil
@@ -264,10 +278,80 @@ class StreamControlIntegrationTest < Minitest::Test
     assert @server.request_registry.empty?, "Request registry should be cleaned up"
   end
 
+  def test_cancelling_one_connection_does_not_suppress_another_streaming_response
+    assert_response_survives_cancellation(streaming: true)
+  end
+
+  def test_cancelling_one_connection_does_not_suppress_another_get_response
+    assert_response_survives_cancellation(streaming: false)
+  end
+
   private
 
-  def start_server_and_client(app)
-    @server = Quicsilver::Server.new(@port, server_configuration: default_server_config, app: app)
+  def assert_response_survives_cancellation(streaming:)
+    arrivals = Queue.new
+    release_alice = Queue.new
+    release_bob = Queue.new
+    app = ->(env) do
+      name = env["PATH_INFO"]
+      case name
+      when "/alice"
+        arrivals << [name, env["quicsilver.stream_id"]]
+        release_alice.pop
+        [200, {}, ["alice"]]
+      when "/bob"
+        arrivals << [name, env["quicsilver.stream_id"]]
+        release_bob.pop
+        body = env["REQUEST_METHOD"] == "POST" ? env["rack.input"].read : "get"
+        [200, {}, ["bob:#{body}"]]
+      else
+        [200, {}, ["still connected"]]
+      end
+    end
+    start_server_and_client(app, server_class: RecordingServer)
+    alice = @client
+    bob = Quicsilver::Client.new("localhost", @port, unsecure: true)
+    options = streaming ? {body: :stream} : {}
+    method = streaming ? "POST" : "GET"
+
+    request = alice.build_request(method, "/alice", **options)
+    name, alice_stream_id = await(arrivals)
+    assert_equal "/alice", name
+    assert request.cancel
+    assert_equal alice_stream_id, await(@server.cancellations)
+
+    other = bob.build_request(method, "/bob", **options)
+    name, bob_stream_id = await(arrivals)
+    assert_equal "/bob", name
+    assert_equal alice_stream_id, bob_stream_id
+    other.stream_body { |writer| writer.write("payload") } if streaming
+    release_bob << true
+
+    response = other.response(timeout: 3)
+    assert_equal 200, response.status
+    assert_equal streaming ? "bob:payload" : "bob:get", response.body
+    release_alice << true
+
+    [alice, bob].each do |client|
+      response = client.get("/next", timeout: 3)
+      assert_equal 200, response.status
+      assert_equal "still connected", response.body
+    end
+  ensure
+    release_alice&.close
+    release_bob&.close
+    bob&.disconnect
+  end
+
+  def await(queue)
+    value = queue.pop(timeout: 3)
+    refute_nil value, "Timed out waiting for the peer"
+    value
+  end
+
+  def start_server_and_client(app, server_class: Quicsilver::Server)
+    @server = server_class.new(@port, server_configuration: default_server_config, app: app)
+    Quicsilver::Server.instance = @server
     @server_thread = Thread.new { @server.start }
     wait_for_server(@server)
 

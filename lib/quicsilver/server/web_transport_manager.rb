@@ -35,7 +35,6 @@ module Quicsilver
         session = @sessions[stream_id]
         return session if session&.routable?
 
-        @sessions.delete(stream_id) if session&.closed?
         nil
       end
 
@@ -86,10 +85,14 @@ module Quicsilver
         nil
       end
 
-      def shutdown_stream(stream_id)
+      def stream_shutdown_complete(stream_id)
         @pending_uni_streams.delete(stream_id)
         @pending_streams.delete(stream_id)
         known = @stream_states.delete(stream_id)
+        if (session = @sessions.delete(stream_id))
+          session.notify_close
+          return true
+        end
         return !!known unless (session = session_for_stream(stream_id))
 
         session.remove_stream(stream_id)
@@ -133,7 +136,7 @@ module Quicsilver
         WebTransportSession.accept_stream(@sessions, stream_id, stream_handle, payload)
       end
 
-      def accept_uni_stream(stream_id, stream_handle, payload, fin: false)
+      def route_unidirectional_stream(stream_id, stream_handle, payload, fin: false)
         if (stream = active_stream(stream_id))
           stream.receive_data(payload)
           return stream

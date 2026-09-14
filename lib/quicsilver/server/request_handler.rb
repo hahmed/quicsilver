@@ -36,7 +36,7 @@ module Quicsilver
         connection.send_error(stream, 500, "Internal Server Error") if stream.writable?
       ensure
         @request_registry.complete(stream.stream_id, connection&.handle) if @request_registry.include?(stream.stream_id, connection&.handle)
-        @cancelled_mutex.synchronize { @cancelled_streams.delete(stream.stream_id) }
+        @cancelled_mutex.synchronize { @cancelled_streams.delete([connection.handle, stream.stream_id]) }
         connection.remove_stream(stream.stream_id) if connection
       end
 
@@ -100,7 +100,7 @@ module Quicsilver
       end
 
       def send_response(connection, stream, request, response)
-        if cancelled_stream?(stream.stream_id)
+        if cancelled_stream?(stream.stream_id, connection.handle)
           Quicsilver.logger.debug("Skipping response for cancelled stream #{stream.stream_id}")
           return
         end
@@ -137,8 +137,8 @@ module Quicsilver
         connection.remove_stream(stream.stream_id)
       end
 
-      def cancelled_stream?(stream_id)
-        @cancelled_mutex.synchronize { @cancelled_streams.include?(stream_id) }
+      def cancelled_stream?(stream_id, connection_handle)
+        @cancelled_mutex.synchronize { @cancelled_streams.include?([connection_handle, stream_id]) }
       end
     end
   end

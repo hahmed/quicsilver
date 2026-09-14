@@ -55,14 +55,14 @@ class WebTransportManagerTest < Minitest::Test
     assert_same session, manager.session_for_stream(4)
   end
 
-  def test_shutdown_stream_removes_stream_from_owner
+  def test_stream_shutdown_complete_removes_stream_from_owner
     manager = Quicsilver::Server::WebTransportManager.new
     session = build_session(stream_id: 0)
     stream = session.add_stream(99999, 4)
 
     manager.register(session)
 
-    assert manager.shutdown_stream(4)
+    assert manager.stream_shutdown_complete(4)
     assert_nil session.stream(4)
     refute stream.open?
   end
@@ -198,7 +198,7 @@ class WebTransportManagerTest < Minitest::Test
     assert_nil manager.accept_bidi_stream(4, 99999, payload)
   end
 
-  def test_accept_uni_stream_routes_to_session
+  def test_route_unidirectional_stream_routes_to_session
     manager = Quicsilver::Server::WebTransportManager.new
     session = build_session(stream_id: 0)
     accept_webtransport_session(session)
@@ -208,16 +208,16 @@ class WebTransportManagerTest < Minitest::Test
 
     payload = Quicsilver::Protocol.encode_varint(0) + "hello"
 
-    stream = manager.accept_uni_stream(8, 99999, payload)
+    stream = manager.route_unidirectional_stream(8, 99999, payload)
 
     assert_equal [stream], accepted
   end
 
-  def test_accept_uni_stream_returns_nil_for_unknown_session
+  def test_route_unidirectional_stream_returns_nil_for_unknown_session
     manager = Quicsilver::Server::WebTransportManager.new
     payload = Quicsilver::Protocol.encode_varint(99) + "hello"
 
-    assert_nil manager.accept_uni_stream(8, 99999, payload)
+    assert_nil manager.route_unidirectional_stream(8, 99999, payload)
   end
 
   def test_receive_datagram_routes_by_quarter_stream_id
@@ -317,7 +317,7 @@ class WebTransportManagerTest < Minitest::Test
 
     assert_equal [[99999, Quicsilver::Protocol::WebTransport::BUFFERED_STREAM_REJECTED]], rejected
     assert manager.rejected_stream?(4)
-    assert manager.shutdown_stream(4)
+    assert manager.stream_shutdown_complete(4)
     refute manager.rejected_stream?(4)
   end
 

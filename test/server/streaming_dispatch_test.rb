@@ -119,7 +119,74 @@ class StreamingDispatchTest < Minitest::Test
     assert sent[-1][1], "last frame should have FIN"
   end
 
+  def test_receiving_on_another_connection_does_not_feed_an_existing_request
+    with_streaming_connections do |server, alice, bob, requests|
+      receive_headers(server, alice)
+      receive_event(server, bob, "RECEIVE", "\x00\x05hello".b)
+
+      refute requests.fetch(0).body.ready?
+    end
+  end
+
+  def test_same_stream_id_on_two_connections_keeps_bodies_and_fin_separate
+    with_streaming_connections do |server, alice, bob, requests|
+      receive_headers(server, alice)
+      receive_headers(server, bob)
+      assert_equal 2, requests.size
+
+      receive_event(server, alice, "RECEIVE_FIN", "\x00\x05alice".b)
+      receive_event(server, bob, "RECEIVE_FIN", "\x00\x03bob".b)
+
+      assert_equal "alice", requests[0].body.read
+      assert_nil requests[0].body.read
+      assert_equal "bob", requests[1].body.read
+      assert_nil requests[1].body.read
+      assert_equal alice.handle + 8, requests[0].stream_handle
+      assert_equal bob.handle + 8, requests[1].stream_handle
+    end
+  end
+
+  def test_reset_on_another_connection_does_not_cancel_an_existing_body
+    with_streaming_connections do |server, alice, bob, requests|
+      receive_headers(server, alice)
+      receive_event(server, bob, "STREAM_RESET", [42].pack("Q"))
+      receive_event(server, alice, "RECEIVE_FIN", "\x00\x05hello".b)
+
+      assert_equal "hello", requests.fetch(0).body.read
+      assert_nil requests.fetch(0).body.read
+    end
+  end
+
   private
+
+  def with_streaming_connections
+    config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
+    server = Quicsilver::Server.new(find_available_port, server_configuration: config)
+    alice, bob = [12_345, 54_321].map do |handle|
+      connection = Quicsilver::Transport::Connection.new(handle, [handle, 0])
+      server.connections[handle] = connection
+      connection
+    end
+    requests = []
+    scheduler = server.instance_variable_get(:@scheduler)
+    scheduler.stub(:enqueue, ->(work) { requests << work.fetch(1) }) do
+      yield server, alice, bob, requests
+    end
+  end
+
+  def receive_headers(server, connection)
+    headers = Quicsilver::Protocol.build_headers_frame([
+      [":method", "POST"], [":scheme", "https"],
+      [":authority", "localhost"], [":path", "/upload"]
+    ])
+    receive_event(server, connection, "RECEIVE", headers)
+  end
+
+  def receive_event(server, connection, type, payload)
+    data = [connection.handle + 8].pack("Q") + payload
+    server.handle_stream_event([connection.handle, 0], 8, type, data, false)
+  end
+
 
   def build_post_request(body_str)
     encoder = Quicsilver::Protocol::RequestEncoder.new(

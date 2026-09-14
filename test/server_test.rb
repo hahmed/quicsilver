@@ -196,7 +196,7 @@ class ServerTest < Minitest::Test
       Quicsilver::Server.handle_stream(connection_data, stream_id, "STOP_SENDING", packed_data, false)
     end
 
-    assert server.cancelled_stream?(stream_id), "Stream should be marked as cancelled after STOP_SENDING"
+    assert server.cancelled_stream?(stream_id, connection_handle), "Stream should be marked as cancelled after STOP_SENDING"
   end
 
   # STOP_SENDING compliance: server resets the send side of the stream

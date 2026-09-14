@@ -91,7 +91,7 @@ module Quicsilver
       @max_connections = max_connections
       @cancelled_streams = Set.new
       @cancelled_mutex = Mutex.new
-      @pending_streams = {}  # stream_id => PendingStream (for streaming dispatch)
+      @pending_streams = {}
       @pending_mutex = Mutex.new
       @datagram_callback = nil
       @connection_callback = nil
@@ -284,8 +284,8 @@ module Quicsilver
       @connections.values.map(&:to_h)
     end
 
-    def cancelled_stream?(stream_id)
-      @cancelled_mutex.synchronize { @cancelled_streams.include?(stream_id) }
+    def cancelled_stream?(stream_id, connection_handle)
+      @cancelled_mutex.synchronize { @cancelled_streams.include?([connection_handle, stream_id]) }
     end
 
     # Wait for work queue to drain, then shut down the scheduler
@@ -368,9 +368,8 @@ module Quicsilver
       when STREAM_EVENT_SEND_COMPLETE
         # Buffer cleanup handled in C extension
       when STREAM_EVENT_SHUTDOWN_COMPLETE
-        if @webtransport.for(connection_handle).shutdown_stream(stream_id)
-          connection.remove_stream(stream_id) if connection
-        end
+        return unless (connection = @connections[connection_handle])
+        handle_stream_shutdown(connection, stream_id)
       when STREAM_EVENT_RECEIVE
         return unless (connection = @connections[connection_handle])
         handle_receive(connection, connection_handle, stream_id, data, early_data: early_data)
@@ -391,7 +390,7 @@ module Quicsilver
           connection.remove_stream(stream_id)
         elsif (wt_session = @webtransport.for(connection_handle).session_for_stream(stream_id))
           wt_session.remove_stream(stream_id, error_code: event.error_code)
-        else
+        elsif !@webtransport.for(connection_handle).known_stream?(stream_id)
           cancel_stream(connection, stream_id)
         end
       when STREAM_EVENT_STOP_SENDING
@@ -405,7 +404,7 @@ module Quicsilver
         # request bookkeeping for a stream that is not a request.
         if (wt_session = @webtransport.for(connection_handle).session_for_stream(stream_id))
           wt_session.remove_stream(stream_id, error_code: event.error_code)
-        else
+        elsif !@webtransport.for(connection_handle).known_stream?(stream_id)
           Quicsilver.stream_reset(event.handle, Protocol::H3_REQUEST_CANCELLED)
           cancel_stream(connection, stream_id)
         end
@@ -465,6 +464,15 @@ module Quicsilver
       end
     end
 
+    def handle_stream_shutdown(connection, stream_id)
+      return unless @webtransport.for(connection.handle).stream_shutdown_complete(stream_id)
+
+      connection.remove_stream(stream_id)
+    rescue StandardError
+      connection.remove_stream(stream_id)
+      raise
+    end
+
     def handle_connection_closed(connection_handle)
       connection = @connections.delete(connection_handle)
       begin
@@ -511,8 +519,8 @@ module Quicsilver
     end
 
     def cancel_stream(connection, stream_id)
-      @cancelled_mutex.synchronize { @cancelled_streams.add(stream_id) }
-      pending = @pending_mutex.synchronize { @pending_streams.delete(stream_id) }
+      @cancelled_mutex.synchronize { @cancelled_streams.add([connection.handle, stream_id]) }
+      pending = @pending_mutex.synchronize { @pending_streams.delete([connection.handle, stream_id]) }
       pending&.body&.close(RuntimeError.new("Stream #{stream_id} cancelled"))
       @request_registry.complete(stream_id, connection.handle)
       connection.remove_stream(stream_id)
@@ -560,7 +568,6 @@ module Quicsilver
     # RECEIVE data is always [stream_handle(8)][payload...] from C.
     HANDLE_SIZE = 8
 
-    # Runs on the MsQuic poll thread: never wait here for application reads.
     def handle_receive(connection, connection_handle, stream_id, data, early_data: false)
       stream_handle = data.byteslice(0, HANDLE_SIZE)&.unpack1("Q<")
       payload = data.byteslice(HANDLE_SIZE..-1) || "".b
@@ -586,7 +593,7 @@ module Quicsilver
       manager = @webtransport.for(connection_handle)
       return if manager.rejected_stream?(stream_id)
 
-      pending = @pending_mutex.synchronize { @pending_streams[stream_id] }
+      pending = @pending_mutex.synchronize { @pending_streams[[connection_handle, stream_id]] }
       if (wt_stream = manager.active_stream(stream_id))
         wt_stream.receive_data(payload)
       elsif manager.known_stream?(stream_id)
@@ -629,12 +636,12 @@ module Quicsilver
       return if manager.known_stream?(stream_id)
 
       if connection.uni_stream_type(stream_id) == :webtransport_uni
-        stream = manager.accept_uni_stream(stream_id, event.handle, event.data, fin: true)
+        stream = manager.route_unidirectional_stream(stream_id, event.handle, event.data, fin: true)
         stream&.notify_read_close
         return
       end
 
-      pending = @pending_mutex.synchronize { @pending_streams[stream_id] }
+      pending = @pending_mutex.synchronize { @pending_streams[[connection_handle, stream_id]] }
       if pending
         complete_streaming_request(pending, event)
       elsif Transport::StreamId.bidirectional?(stream_id) &&
@@ -801,7 +808,7 @@ module Quicsilver
         pending.frame_buffer << remainder
         drain_data_frames(pending)
       end
-      @pending_mutex.synchronize { @pending_streams[stream_id] = pending }
+      @pending_mutex.synchronize { @pending_streams[[connection_handle, stream_id]] = pending }
 
       connection.track_client_stream(stream_id)
       @request_registry.track(stream_id, connection_handle,
@@ -827,7 +834,7 @@ module Quicsilver
         return
       end
 
-      return if cancelled_stream?(pending.stream_id)
+      return if cancelled_stream?(pending.stream_id, pending.connection.handle)
 
       headers = response.headers
 
@@ -863,8 +870,8 @@ module Quicsilver
         pending.connection.send_error(stream, 500, "Internal Server Error") if stream.writable?
       end
     ensure
-      @pending_mutex.synchronize { @pending_streams.delete(pending.stream_id) }
-      @cancelled_mutex.synchronize { @cancelled_streams.delete(pending.stream_id) }
+      @pending_mutex.synchronize { @pending_streams.delete([pending.connection.handle, pending.stream_id]) }
+      @cancelled_mutex.synchronize { @cancelled_streams.delete([pending.connection.handle, pending.stream_id]) }
       @request_registry.complete(pending.stream_id, pending.connection.handle)
       pending.connection.remove_stream(pending.stream_id)
     end
@@ -977,7 +984,7 @@ module Quicsilver
       # After Connection strips the 0x54 stream type, payload is:
       # [session_id varint][data...]
       # Reuse the same prefix parser — format is identical minus the type byte.
-      @webtransport.for(connection_handle).accept_uni_stream(stream_id, stream_handle, payload, fin: fin)
+      @webtransport.for(connection_handle).route_unidirectional_stream(stream_id, stream_handle, payload, fin: fin)
     rescue => e
       Quicsilver.logger.error("WebTransport uni stream error: #{e.class} - #{e.message}")
     end
