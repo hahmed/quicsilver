@@ -310,6 +310,14 @@ HTML = <<~HTML
   </script>
 HTML
 
+close_stream = lambda do |stream|
+  stream.close
+  true
+rescue StandardError => error
+  warn "WT stream #{stream.stream_id} cleanup error: #{error.class}: #{error.message}"
+  false
+end
+
 app = lambda do |env|
   path = env["PATH_INFO"]
   method = env["REQUEST_METHOD"]
@@ -342,7 +350,7 @@ app = lambda do |env|
         warn "WT stream #{stream.stream_id} error: #{error.class}: #{error.message}"
         warn error.backtrace&.first(5)&.join("\n")
       ensure
-        stream.close
+        close_stream.call(stream)
       end
     end
 
@@ -357,8 +365,7 @@ app = lambda do |env|
         warn "WT uni stream #{stream.stream_id} error: #{error.class}: #{error.message}"
         warn error.backtrace&.first(5)&.join("\n")
       ensure
-        stream.close
-        puts "WT uni stream #{stream.stream_id} closed"
+        puts "WT uni stream #{stream.stream_id} closed" if close_stream.call(stream)
       end
     end
 
