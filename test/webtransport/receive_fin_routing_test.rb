@@ -33,7 +33,7 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     sends = []
     resets = []
     Quicsilver.stub(:send_stream, ->(handle, data, fin) { sends << [data, fin] }) do
-      Quicsilver.stub(:stream_reset, ->(handle, code) { resets << code }) do
+      Quicsilver.stub(:stream_abort, ->(handle, code) { resets << code }) do
         wire.each_byte { |byte| receive(server, connection, SESSION_ID, byte.chr.b) }
         assert_equal [["", true]], sends
         assert_equal [7], notifications.map(&:code)

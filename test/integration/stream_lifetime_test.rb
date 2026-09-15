@@ -251,6 +251,33 @@ class StreamLifetimeTest < Minitest::Test
     assert_equal 200, @client.get("/").status
   end
 
+  def test_trailing_connect_data_after_response_fin_stops_peer_and_retires_stream
+    connection = @client.instance_variable_get(:@connection_data)
+    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
+    headers = Quicsilver::Protocol.build_headers_frame([
+      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
+      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
+    ])
+    capsule = Quicsilver::Protocol::Capsule.encode(
+      Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE, [0].pack("N")
+    )
+    outgoing.send(headers + Quicsilver::Protocol.build_frame(0, capsule))
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session
+    await_event(@client, "RECEIVE_FIN", session.stream_id)
+
+    # Keep the request direction open after receiving the server's FIN.
+    # A separate request exercises the connection before sending late data.
+    assert_equal 200, @client.get("/").status
+    outgoing.send(Quicsilver::Protocol.build_frame(0, "forbidden"))
+    stopped = await_event(@client, "STOP_SENDING", session.stream_id)
+    assert_equal Quicsilver::Protocol::H3_MESSAGE_ERROR, decode_event(stopped).error_code
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
+    await_event(@client, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
+    assert_retired(outgoing)
+    assert_equal 200, @client.get("/").status
+  end
+
   def test_session_close_delivers_capsule_and_fin_to_native_peer
     outgoing, incoming, id = open_stream
     session = Quicsilver::Server::WebTransportSession.new(

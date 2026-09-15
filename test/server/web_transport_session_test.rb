@@ -78,7 +78,7 @@ class WebTransportSessionTest < Minitest::Test
     session.close(code: 99, reason: "duplicate")
 
     assert_equal [[data_frame(close_capsule(42, "maintenance")), true]], stream.sends.drop(1)
-    assert_empty stream.resets
+    assert_empty stream.aborts
     assert_equal [42], notifications.map(&:code)
     refute session.open?
   end
@@ -94,7 +94,7 @@ class WebTransportSessionTest < Minitest::Test
     session.receive_connect_fin("")
 
     assert_equal [["", true]], stream.sends.drop(1)
-    assert_empty stream.resets
+    assert_empty stream.aborts
     assert_equal 1, notifications.size
     assert_equal 7, notifications.first.code
     assert_equal "bye", notifications.first.reason
@@ -114,7 +114,7 @@ class WebTransportSessionTest < Minitest::Test
 
     assert session.closed?
     assert_equal [7], notifications.map(&:code)
-    assert_equal [Quicsilver::Protocol::H3_INTERNAL_ERROR], stream.resets
+    assert_equal [Quicsilver::Protocol::H3_INTERNAL_ERROR], stream.aborts
   end
 
   def test_receiving_close_finishes_connect_before_a_raising_callback
@@ -144,14 +144,14 @@ class WebTransportSessionTest < Minitest::Test
     assert_equal [data_frame(close_capsule(7, "valid")), true], stream.sends.last
   end
 
-  def test_failed_fin_and_failed_reset_still_clean_up
+  def test_failed_fin_and_failed_abort_still_clean_up
     stream = RecordingConnectStream.new
     session = session_with(stream)
     session.accept!
     notified = false
     session.on_close { notified = true }
     stream.stub(:send, ->(*) { raise RuntimeError, "StreamSend failed" }) do
-      stream.stub(:reset, ->(*) { raise IOError, "gone" }) { session.close }
+      stream.stub(:abort, ->(*) { raise IOError, "gone" }) { session.close }
     end
     assert session.closed?
     assert notified
@@ -163,7 +163,7 @@ class WebTransportSessionTest < Minitest::Test
       session = session_with(stream)
       session.accept!
       session.receive_connect_data(Quicsilver::Protocol::Capsule.encode(Session::WT_CLOSE_SESSION, payload))
-      assert_equal [Quicsilver::Protocol::H3_MESSAGE_ERROR], stream.resets
+      assert_equal [Quicsilver::Protocol::H3_MESSAGE_ERROR], stream.aborts
       assert_empty stream.sends.drop(1)
       assert session.closed?
     end
@@ -177,7 +177,7 @@ class WebTransportSessionTest < Minitest::Test
     session.on_close { |value| info = value }
     session.receive_connect_data(close_capsule(7, "a" * 1024))
     assert_equal "a" * 1024, info.reason
-    assert_empty stream.resets
+    assert_empty stream.aborts
   end
 
   def test_data_after_close_is_an_error_even_in_the_same_chunk
@@ -188,7 +188,7 @@ class WebTransportSessionTest < Minitest::Test
       capsule = close_capsule(7, "bye")
       session.receive_connect_data(together ? capsule + "x" : capsule)
       session.receive_connect_data("x") unless together
-      assert_equal [Quicsilver::Protocol::H3_MESSAGE_ERROR], stream.resets
+      assert_equal [Quicsilver::Protocol::H3_MESSAGE_ERROR], stream.aborts
     end
   end
 
@@ -197,7 +197,7 @@ class WebTransportSessionTest < Minitest::Test
     session = session_with(stream)
     session.receive_connect_data(close_capsule(7, "bye"))
     assert session.closed?
-    assert_equal [Quicsilver::Protocol::H3_REQUEST_REJECTED], stream.resets
+    assert_equal [Quicsilver::Protocol::H3_REQUEST_REJECTED], stream.aborts
     assert_raises(IOError) { session.accept! }
     assert_empty stream.writes
   end
@@ -212,7 +212,7 @@ class WebTransportSessionTest < Minitest::Test
     wire.each_byte { |byte| session.receive_connect_stream_data(byte.chr.b) }
     assert session.closed?
     assert_equal [["", true]], stream.sends.drop(1)
-    assert_empty stream.resets
+    assert_empty stream.aborts
   end
 
   def test_connect_decoder_rejects_truncated_frame_header_and_payload
@@ -893,12 +893,12 @@ class WebTransportSessionTest < Minitest::Test
   # Records what reaches the CONNECT stream, so tests assert on the bytes the
   # peer would receive rather than on mock expectations.
   class RecordingConnectStream
-    attr_reader :writes, :sends, :resets
+    attr_reader :writes, :sends, :aborts
 
     def initialize
       @writes = []
       @sends = []
-      @resets = []
+      @aborts = []
     end
 
     def send(data, fin: false)
@@ -906,7 +906,7 @@ class WebTransportSessionTest < Minitest::Test
       @sends << [data, fin]
     end
 
-    def reset(code = nil) = @resets << code
+    def abort(code = nil) = @aborts << code
     def stream_id = 0
     def stream_handle = 99_999
   end
@@ -927,7 +927,7 @@ class WebTransportSessionTest < Minitest::Test
   end
 
   def expect_capsule_error_reset(session)
-    session_stream(session).expect(:reset, true, [Quicsilver::Protocol::H3_MESSAGE_ERROR])
+    session_stream(session).expect(:abort, true, [Quicsilver::Protocol::H3_MESSAGE_ERROR])
   end
 
   def session_stream(session)

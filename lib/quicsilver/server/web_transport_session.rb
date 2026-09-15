@@ -517,7 +517,7 @@ module Quicsilver
           if @accepted
             finish_connect
           else
-            reset_connect(Protocol::H3_REQUEST_REJECTED)
+            abort_connect(Protocol::H3_REQUEST_REJECTED)
           end
           notify_close(**closed_with.to_h)
         when WT_DRAIN_SESSION
@@ -536,12 +536,14 @@ module Quicsilver
         Quicsilver.logger.debug("WebTransport session #{@stream_id} capsule error: #{error.message}")
         @connect_buffer.clear
         @connect_frame_buffer.clear
-        reset_connect(Protocol::H3_MESSAGE_ERROR)
+        abort_connect(Protocol::H3_MESSAGE_ERROR)
         notify_close
       end
 
-      def reset_connect(code)
-        @stream.reset(code)
+      def abort_connect(code)
+        # FIN may already be acknowledged, making a send-only RESET a no-op.
+        # Also stop receiving so a peer cannot hold failed CONNECT streams open.
+        @stream.abort(code)
       rescue StandardError
         # The native stream may already have gone; still clean up locally.
       end
@@ -553,10 +555,10 @@ module Quicsilver
         end
 
         # Successful submission preserves queued bytes and sends FIN. If native
-        # submission fails on a live stream, RESET is the fallback termination.
+        # submission fails on a live stream, abort both directions as a fallback.
         @stream.send(data, fin: true)
       rescue StandardError
-        reset_connect(Protocol::H3_INTERNAL_ERROR)
+        abort_connect(Protocol::H3_INTERNAL_ERROR)
       end
     end
   end
