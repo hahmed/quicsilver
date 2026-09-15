@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "../protocol/connect_stream_decoder"
+
 module Quicsilver
   class Server
     # A WebTransport session opened via Extended CONNECT (RFC 9220).
@@ -130,8 +132,7 @@ module Quicsilver
         @starting_streams = {}
         @streams_mutex = Mutex.new
         @connect_buffer = "".b
-        @connect_frame_buffer = "".b
-        @connect_frame_remaining = nil
+        @connect_decoder = Protocol::ConnectStreamDecoder.new
         @connect_send_finished = false
         @received_close = false
         @connect_failed = false
@@ -271,60 +272,32 @@ module Quicsilver
         notify_close(code: code, reason: reason, remote: false)
       end
 
-      # Decode the HTTP/3 body before parsing capsules. DATA frame boundaries
-      # and QUIC receive boundaries need not align with capsule boundaries.
-      # Unknown frame payloads are skipped incrementally, without retaining them.
+      # Decode CONNECT body bytes, then apply session-close policy.
       def receive_connect_stream_data(data, fin: false)
         return if @connect_failed
         if @received_close
           if data && !data.empty?
             return handle_capsule_error(Protocol::Capsule::ParseError.new("Stream data after close capsule"))
-          elsif fin && @connect_frame_remaining
-            raise Protocol::FrameError.new("Truncated HTTP/3 frame", error_code: Protocol::H3_FRAME_ERROR)
           end
+          @connect_decoder.finish! if fin
         end
         return if closed?
-        @connect_frame_buffer << data if data
-        until @connect_frame_buffer.empty?
-          unless @connect_frame_remaining
-            type, type_length = Protocol.decode_varint_str(@connect_frame_buffer, 0)
-            break if type_length == 0
-            length, length_length = Protocol.decode_varint_str(@connect_frame_buffer, type_length)
-            break if length_length == 0
-            # RFC 9114 §4.4 forbids known non-DATA frames after CONNECT,
-            # including HEADERS trailers; these are connection errors.
-            if Protocol::FrameParser::CONTROL_ONLY_SET.key?(type) ||
-                Protocol::FrameParser::HTTP2_RESERVED_FRAMES.key?(type) ||
-                [Protocol::FRAME_HEADERS, Protocol::FRAME_PUSH_PROMISE, Protocol::FRAME_PRIORITY_UPDATE].include?(type)
-              raise Protocol::FrameError, "Frame not allowed on CONNECT"
-            end
-            @connect_frame_type = type
-            @connect_frame_remaining = length
-            @connect_frame_buffer = @connect_frame_buffer.byteslice(type_length + length_length..) || "".b
-          end
-          count = [@connect_frame_remaining, @connect_frame_buffer.bytesize].min
-          chunk = @connect_frame_buffer.byteslice(0, count)
-          @connect_frame_buffer = @connect_frame_buffer.byteslice(count..) || "".b
-          @connect_frame_remaining -= count
-          @connect_frame_remaining = nil if @connect_frame_remaining.zero?
-          receive_connect_data(chunk) if @connect_frame_type == Protocol::FRAME_DATA
-          return if @connect_failed
-          if @received_close
-            unless @connect_frame_buffer.empty?
-              handle_capsule_error(Protocol::Capsule::ParseError.new("Stream data after close capsule"))
-            end
-            break
-          end
+
+        @connect_decoder.each(data) do |chunk|
+          receive_connect_data(chunk)
+          break if @connect_failed || @received_close
+        end
+        return if @connect_failed
+        if @received_close && @connect_decoder.buffered?
+          return handle_capsule_error(Protocol::Capsule::ParseError.new("Stream data after close capsule"))
         end
         if fin
-          unless @connect_frame_buffer.empty? && @connect_frame_remaining.nil?
-            raise Protocol::FrameError.new("Truncated HTTP/3 frame", error_code: Protocol::H3_FRAME_ERROR)
-          end
+          @connect_decoder.finish!
           receive_connect_fin("")
         end
       rescue Protocol::FrameError => error
         @connect_failed = true
-        @connect_frame_buffer.clear
+        @connect_decoder.clear
         begin
           @connection.shutdown(error.error_code)
         ensure
@@ -537,7 +510,7 @@ module Quicsilver
         @connect_failed = true
         Quicsilver.logger.debug("WebTransport session #{@stream_id} capsule error: #{error.message}")
         @connect_buffer.clear
-        @connect_frame_buffer.clear
+        @connect_decoder.clear
         abort_connect(Protocol::H3_MESSAGE_ERROR)
         notify_close
       end
