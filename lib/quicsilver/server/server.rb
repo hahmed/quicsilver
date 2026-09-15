@@ -734,7 +734,17 @@ module Quicsilver
       # WebTransport: intercept before normal request dispatch.
       # The CONNECT stream stays open (no FIN) — it becomes the session.
       if method == "CONNECT" && Protocol::WebTransport.protocol?(headers[":protocol"])
-        accept_webtransport(connection, connection_handle, stream_id, stream_handle, headers, early_data: early_data)
+        session = accept_webtransport(connection, connection_handle, stream_id, stream_handle, headers, early_data: early_data)
+        if session
+          # Initial CONNECT headers and capsule DATA can share a receive event.
+          # Preserve even a partial following frame for the session decoder.
+          header_end = catch(:headers_end) do
+            Protocol::FrameReader.each(data) do |type, _payload, offset|
+              throw :headers_end, offset if type == Protocol::FRAME_HEADERS
+            end
+          end
+          session.receive_connect_stream_data(data.byteslice(header_end..))
+        end
         return
       end
 
@@ -917,8 +927,10 @@ module Quicsilver
       )
 
       dispatch_webtransport_to_rack(connection, connection_handle, stream_id, headers, session, early_data: early_data)
+      session if session.accepted?
     rescue => e
       Quicsilver.logger.error("WebTransport error: #{e.class} - #{e.message}")
+      nil
     end
 
     def dispatch_webtransport_to_rack(connection, connection_handle, stream_id, headers, session, early_data: false)

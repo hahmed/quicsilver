@@ -67,6 +67,200 @@ class WebTransportSessionTest < Minitest::Test
     refute session.open?
   end
 
+  def test_close_delivers_reason_with_fin_without_reset
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    notifications = []
+    session.on_close { |info| notifications << info }
+
+    session.close(code: 42, reason: "maintenance")
+    session.close(code: 99, reason: "duplicate")
+
+    assert_equal [[data_frame(close_capsule(42, "maintenance")), true]], stream.sends.drop(1)
+    assert_empty stream.resets
+    assert_equal [42], notifications.map(&:code)
+    refute session.open?
+  end
+
+  def test_receiving_close_finishes_connect_and_preserves_peer_reason
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    notifications = []
+    session.on_close { |info| notifications << info }
+
+    session.receive_connect_data(close_capsule(7, "bye"))
+    session.receive_connect_fin("")
+
+    assert_equal [["", true]], stream.sends.drop(1)
+    assert_empty stream.resets
+    assert_equal 1, notifications.size
+    assert_equal 7, notifications.first.code
+    assert_equal "bye", notifications.first.reason
+    assert notifications.first.remote?
+  end
+
+  def test_close_still_notifies_when_connect_send_fails
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    notifications = []
+    session.on_close { |info| notifications << info }
+
+    stream.stub(:send, ->(*) { raise IOError, "connection gone" }) do
+      session.close(code: 7, reason: "bye")
+    end
+
+    assert session.closed?
+    assert_equal [7], notifications.map(&:code)
+    assert_equal [Quicsilver::Protocol::H3_INTERNAL_ERROR], stream.resets
+  end
+
+  def test_receiving_close_finishes_connect_before_a_raising_callback
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    session.on_close { raise "callback failed" }
+
+    assert_raises(RuntimeError) { session.receive_connect_data(close_capsule(7, "bye")) }
+
+    assert_equal [["", true]], stream.sends.drop(1)
+    assert session.closed?
+  end
+
+  def test_invalid_local_close_leaves_session_usable
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    [nil, -1, 1 << 32].each do |code|
+      assert_raises(ArgumentError) { session.close(code: code) }
+      assert session.open?
+      refute session.closed?
+    end
+    assert_raises(ArgumentError) { session.close(reason: "\xff".b) }
+    assert session.open?
+    session.close(code: 7, reason: "valid")
+    assert_equal [data_frame(close_capsule(7, "valid")), true], stream.sends.last
+  end
+
+  def test_failed_fin_and_failed_reset_still_clean_up
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    notified = false
+    session.on_close { notified = true }
+    stream.stub(:send, ->(*) { raise RuntimeError, "StreamSend failed" }) do
+      stream.stub(:reset, ->(*) { raise IOError, "gone" }) { session.close }
+    end
+    assert session.closed?
+    assert notified
+  end
+
+  def test_malformed_close_reasons_reset_without_fin
+    ["", "\x00\x01".b, [7].pack("N") + "\xff".b, [7].pack("N") + "a" * 1025].each do |payload|
+      stream = RecordingConnectStream.new
+      session = session_with(stream)
+      session.accept!
+      session.receive_connect_data(Quicsilver::Protocol::Capsule.encode(Session::WT_CLOSE_SESSION, payload))
+      assert_equal [Quicsilver::Protocol::H3_MESSAGE_ERROR], stream.resets
+      assert_empty stream.sends.drop(1)
+      assert session.closed?
+    end
+  end
+
+  def test_maximum_valid_close_reason_is_accepted
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    info = nil
+    session.on_close { |value| info = value }
+    session.receive_connect_data(close_capsule(7, "a" * 1024))
+    assert_equal "a" * 1024, info.reason
+    assert_empty stream.resets
+  end
+
+  def test_data_after_close_is_an_error_even_in_the_same_chunk
+    [true, false].each do |together|
+      stream = RecordingConnectStream.new
+      session = session_with(stream)
+      session.accept!
+      capsule = close_capsule(7, "bye")
+      session.receive_connect_data(together ? capsule + "x" : capsule)
+      session.receive_connect_data("x") unless together
+      assert_equal [Quicsilver::Protocol::H3_MESSAGE_ERROR], stream.resets
+    end
+  end
+
+  def test_close_before_accept_terminates_connect_and_cannot_be_accepted_later
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.receive_connect_data(close_capsule(7, "bye"))
+    assert session.closed?
+    assert_equal [Quicsilver::Protocol::H3_REQUEST_REJECTED], stream.resets
+    assert_raises(IOError) { session.accept! }
+    assert_empty stream.writes
+  end
+
+  def test_connect_decoder_handles_unknown_frames_and_capsules_split_across_data_frames
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    capsule = close_capsule(7, "bye")
+    wire = Quicsilver::Protocol.build_frame(0x21, "ignored") +
+      data_frame(capsule.byteslice(0, 3)) + data_frame(capsule.byteslice(3..))
+    wire.each_byte { |byte| session.receive_connect_stream_data(byte.chr.b) }
+    assert session.closed?
+    assert_equal [["", true]], stream.sends.drop(1)
+    assert_empty stream.resets
+  end
+
+  def test_connect_decoder_rejects_truncated_frame_header_and_payload
+    ["\x00".b, "\x00\x05x".b].each do |wire|
+      stream = RecordingConnectStream.new
+      connection = Minitest::Mock.new
+      connection.expect(:shutdown, true, [Quicsilver::Protocol::H3_FRAME_ERROR])
+      session = Session.new(connection: connection, stream: stream, headers: {})
+      session.accept!
+      session.receive_connect_stream_data(wire, fin: true)
+      connection.verify
+      assert session.closed?
+    end
+  end
+
+  def test_fin_after_close_still_checks_the_enclosing_data_frame_length
+    stream = RecordingConnectStream.new
+    connection = Minitest::Mock.new
+    connection.expect(:shutdown, true, [Quicsilver::Protocol::H3_FRAME_ERROR])
+    session = Session.new(connection: connection, stream: stream, headers: {})
+    session.accept!
+    capsule = close_capsule(7, "bye")
+    wire = "\x00".b + Quicsilver::Protocol.encode_varint(capsule.bytesize + 1) + capsule
+    session.receive_connect_stream_data(wire)
+    session.receive_connect_stream_data("", fin: true)
+    connection.verify
+  end
+
+  def test_known_non_data_frame_on_connect_closes_connection
+    connection = Minitest::Mock.new
+    connection.expect(:shutdown, true, [Quicsilver::Protocol::H3_FRAME_UNEXPECTED])
+    stream = RecordingConnectStream.new
+    session = Session.new(connection: connection, stream: stream, headers: {})
+    session.accept!
+    session.receive_connect_stream_data(Quicsilver::Protocol.build_headers_frame([[":status", "200"]]))
+    connection.verify
+    assert session.closed?
+  end
+
+  def test_clean_peer_fin_finishes_response
+    stream = RecordingConnectStream.new
+    session = session_with(stream)
+    session.accept!
+    session.receive_connect_stream_data("", fin: true)
+    assert_equal [["", true]], stream.sends.drop(1)
+    assert session.closed?
+  end
+
   def test_close_truncates_long_reason
     session = build_session_accepted
     long_reason = "x" * 2000
@@ -79,33 +273,22 @@ class WebTransportSessionTest < Minitest::Test
   # reset the stream with H3_MESSAGE_ERROR, so cutting mid-character makes a
   # conformant peer tear down our stream.
 
-  # A short or absent payload is a clean close: code 0, empty reason (§6).
-
   def test_parse_close_payload_reads_code_and_reason
     info = Session.parse_close_payload([7].pack("N") + "bye")
-
     assert_equal 7, info.code
     assert_equal "bye", info.reason
   end
 
   def test_parse_close_payload_handles_a_code_with_no_reason
     info = Session.parse_close_payload([7].pack("N"))
-
     assert_equal 7, info.code
     assert_equal "", info.reason
   end
 
-  def test_parse_close_payload_handles_an_empty_payload
-    info = Session.parse_close_payload("")
-
-    assert_equal 0, info.code
-    assert_equal "", info.reason
-  end
-
-  def test_parse_close_payload_handles_a_truncated_code
-    info = Session.parse_close_payload("\x00\x07".b)
-
-    assert_equal 0, info.code
+  def test_parse_close_payload_rejects_missing_or_truncated_code
+    ["", "\x00\x07".b].each do |payload|
+      assert_raises(Quicsilver::Protocol::Capsule::ParseError) { Session.parse_close_payload(payload) }
+    end
   end
 
   def test_parse_close_payload_tags_the_reason_as_utf8
@@ -496,7 +679,7 @@ class WebTransportSessionTest < Minitest::Test
 
     session.drain!
 
-    assert_includes stream.writes, drain_capsule
+    assert_includes stream.writes, data_frame(drain_capsule)
   end
 
   def test_drain_leaves_the_session_usable
@@ -536,10 +719,11 @@ class WebTransportSessionTest < Minitest::Test
     assert closed
   end
 
-  def test_receive_connect_data_handles_empty_close_session_capsule
+  def test_receive_connect_data_rejects_empty_close_session_capsule
     session = build_session
     accept_webtransport_session(session)
     closed = false
+    expect_capsule_error_reset(session)
     capsule = Quicsilver::Protocol::Capsule.encode(
       Quicsilver::Server::WebTransportSession::WT_CLOSE_SESSION,
       ""
@@ -641,6 +825,8 @@ class WebTransportSessionTest < Minitest::Test
 
   private
 
+  def data_frame(payload) = Quicsilver::Protocol.build_frame(0, payload)
+
   def close_session_capsule(code:, reason:)
     payload = [code].pack("N") + reason.b
     Quicsilver::Protocol::Capsule.encode(
@@ -677,13 +863,13 @@ class WebTransportSessionTest < Minitest::Test
     session = build_session
     expect_successful_connect_response(session)
     expect_close_session_capsule(session)
-    expect_stream_reset(session)
     session.accept!
     session
   end
 
   def accept_webtransport_session(session)
     expect_successful_connect_response(session)
+    session_stream(session).expect(:send, true, [String], fin: true)
     session.accept!
   end
 
@@ -707,12 +893,20 @@ class WebTransportSessionTest < Minitest::Test
   # Records what reaches the CONNECT stream, so tests assert on the bytes the
   # peer would receive rather than on mock expectations.
   class RecordingConnectStream
-    attr_reader :writes
+    attr_reader :writes, :sends, :resets
 
-    def initialize = @writes = []
+    def initialize
+      @writes = []
+      @sends = []
+      @resets = []
+    end
 
-    def send(data, fin: false) = @writes << data
-    def reset(code = nil) = nil
+    def send(data, fin: false)
+      @writes << data
+      @sends << [data, fin]
+    end
+
+    def reset(code = nil) = @resets << code
     def stream_id = 0
     def stream_handle = 99_999
   end
@@ -729,15 +923,11 @@ class WebTransportSessionTest < Minitest::Test
   end
 
   def expect_close_session_capsule(session)
-    session_stream(session).expect(:send, true, [String], fin: false)
-  end
-
-  def expect_stream_reset(session)
-    session_stream(session).expect(:reset, true, [Integer])
+    session_stream(session).expect(:send, true, [String], fin: true)
   end
 
   def expect_capsule_error_reset(session)
-    session_stream(session).expect(:reset, true, [Quicsilver::Protocol::H3_DATAGRAM_ERROR])
+    session_stream(session).expect(:reset, true, [Quicsilver::Protocol::H3_MESSAGE_ERROR])
   end
 
   def session_stream(session)

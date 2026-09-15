@@ -72,35 +72,31 @@ module Quicsilver
         wt_stream
       end
 
-      # Parse uni stream data after Connection strips the 0x54 type byte.
-      # Payload is [session_id varint][data...]
-      # Cut a close reason to at most `limit` bytes without splitting a
-      # character. draft-ietf-webtrans-http3-16 §6 requires truncation on a
-      # UTF-8 boundary; a receiver seeing invalid UTF-8 MUST reset the stream
-      # with H3_MESSAGE_ERROR.
-      # Read a WT_CLOSE_SESSION payload. A short or absent payload counts as a
-      # clean close: §6 makes a bare stream close equivalent to code 0 with an
-      # empty reason. Always remote — a payload only exists because a peer sent
-      # one.
+      # A bare FIN means a clean close; a CLOSE capsule must contain its
+      # four-byte code and a valid, bounded UTF-8 reason (draft-16 §6).
       def self.parse_close_payload(payload)
-        code = payload.byteslice(0, ERROR_CODE_BYTES)&.unpack1("N") || 0
-        # +"" because nil.to_s is frozen and force_encoding mutates.
-        reason = +payload.byteslice(ERROR_CODE_BYTES..-1).to_s
-
-        CloseInfo.new(
-          code: code,
-          reason: reason.force_encoding(Encoding::UTF_8),
-          remote: true
-        )
+        raise Protocol::Capsule::ParseError, "Truncated close code" if payload.bytesize < ERROR_CODE_BYTES
+        code = payload.unpack1("N")
+        reason = payload.byteslice(ERROR_CODE_BYTES..).dup.force_encoding(Encoding::UTF_8)
+        unless reason.bytesize <= MAX_CLOSE_MESSAGE_LENGTH && reason.valid_encoding?
+          raise Protocol::Capsule::ParseError, "Invalid close reason"
+        end
+        CloseInfo.new(code: code, reason: reason, remote: true)
       end
 
-      # Inverse of parse_close_payload, so the layout is defined in one place.
       def self.build_close_payload(code, reason)
+        unless code.is_a?(Integer) && code.between?(0, 0xffff_ffff)
+          raise ArgumentError, "Close code must be an unsigned 32-bit integer"
+        end
         [code].pack("N") + truncate_reason(reason).b
       end
 
+      # Truncate only at a UTF-8 character boundary (draft-16 §6).
       def self.truncate_reason(reason, limit = MAX_CLOSE_MESSAGE_LENGTH)
         reason = reason.to_s
+        reason = reason.b.dup.force_encoding(Encoding::UTF_8) if reason.encoding == Encoding::ASCII_8BIT
+        reason = reason.encode(Encoding::UTF_8)
+        raise ArgumentError, "Close reason must be valid UTF-8" unless reason.valid_encoding?
         return reason if reason.bytesize <= limit
 
         truncated = reason.byteslice(0, limit)
@@ -134,6 +130,11 @@ module Quicsilver
         @starting_streams = {}
         @streams_mutex = Mutex.new
         @connect_buffer = "".b
+        @connect_frame_buffer = "".b
+        @connect_frame_remaining = nil
+        @connect_send_finished = false
+        @received_close = false
+        @connect_failed = false
         @closed = false
       end
 
@@ -147,6 +148,7 @@ module Quicsilver
 
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
       def accept!
+        raise IOError, "Session closed" if @closed
         return if @accepted
 
         frame = Protocol.build_headers_frame([[:":status", "200"]])
@@ -203,7 +205,7 @@ module Quicsilver
 
       # Ask the peer to wind the session down. Does not close it.
       def drain!
-        @stream.send(Protocol::Capsule.encode(WT_DRAIN_SESSION, ""), fin: false)
+        @stream.send(Protocol.build_frame(Protocol::FRAME_DATA, Protocol::Capsule.encode(WT_DRAIN_SESSION, "")), fin: false)
       rescue
         # Best-effort — connection may already be gone
       end
@@ -251,6 +253,10 @@ module Quicsilver
       # Sends a WT_CLOSE_SESSION capsule (RFC draft-ietf-webtrans-http3)
       # on the CONNECT stream before closing.
       def close(code: 0, reason: "")
+        return if closed?
+        # Conversion can invoke application code or raise. Do it before
+        # changing lifecycle state so invalid input leaves the session usable.
+        payload = self.class.build_close_payload(code, reason)
         was_open = @streams_mutex.synchronize do
           was_open = @open
           @open = false
@@ -258,20 +264,88 @@ module Quicsilver
         end
 
         if was_open
-          write_close_reason(code, reason)
-          @stream.reset(Protocol::H3_NO_ERROR)
+          capsule = Protocol::Capsule.encode(WT_CLOSE_SESSION, payload)
+          finish_connect(Protocol.build_frame(Protocol::FRAME_DATA, capsule))
         end
 
         notify_close(code: code, reason: reason, remote: false)
       end
 
-      # Called by Server when data arrives on the CONNECT/session stream. :nodoc:
+      # Decode the HTTP/3 body before parsing capsules. DATA frame boundaries
+      # and QUIC receive boundaries need not align with capsule boundaries.
+      # Unknown frame payloads are skipped incrementally, without retaining them.
+      def receive_connect_stream_data(data, fin: false)
+        return if @connect_failed
+        if @received_close
+          if data && !data.empty?
+            return handle_capsule_error(Protocol::Capsule::ParseError.new("Stream data after close capsule"))
+          elsif fin && @connect_frame_remaining
+            raise Protocol::FrameError.new("Truncated HTTP/3 frame", error_code: Protocol::H3_FRAME_ERROR)
+          end
+        end
+        return if closed?
+        @connect_frame_buffer << data if data
+        until @connect_frame_buffer.empty?
+          unless @connect_frame_remaining
+            type, type_length = Protocol.decode_varint_str(@connect_frame_buffer, 0)
+            break if type_length == 0
+            length, length_length = Protocol.decode_varint_str(@connect_frame_buffer, type_length)
+            break if length_length == 0
+            if Protocol::FrameParser::CONTROL_ONLY_SET.key?(type) ||
+                Protocol::FrameParser::HTTP2_RESERVED_FRAMES.key?(type) ||
+                [Protocol::FRAME_HEADERS, Protocol::FRAME_PUSH_PROMISE, Protocol::FRAME_PRIORITY_UPDATE].include?(type)
+              raise Protocol::FrameError, "Frame not allowed on CONNECT"
+            end
+            @connect_frame_type = type
+            @connect_frame_remaining = length
+            @connect_frame_buffer = @connect_frame_buffer.byteslice(type_length + length_length..) || "".b
+          end
+          count = [@connect_frame_remaining, @connect_frame_buffer.bytesize].min
+          chunk = @connect_frame_buffer.byteslice(0, count)
+          @connect_frame_buffer = @connect_frame_buffer.byteslice(count..) || "".b
+          @connect_frame_remaining -= count
+          @connect_frame_remaining = nil if @connect_frame_remaining.zero?
+          receive_connect_data(chunk) if @connect_frame_type == Protocol::FRAME_DATA
+          return if @connect_failed
+          if @received_close
+            unless @connect_frame_buffer.empty?
+              handle_capsule_error(Protocol::Capsule::ParseError.new("Stream data after close capsule"))
+            end
+            break
+          end
+        end
+        if fin
+          unless @connect_frame_buffer.empty? && @connect_frame_remaining.nil?
+            raise Protocol::FrameError.new("Truncated HTTP/3 frame", error_code: Protocol::H3_FRAME_ERROR)
+          end
+          receive_connect_fin("")
+        end
+      rescue Protocol::FrameError => error
+        @connect_failed = true
+        @connect_frame_buffer.clear
+        begin
+          @connection.shutdown(error.error_code)
+        ensure
+          notify_close
+        end
+      end
+
+      # Capsule bytes extracted from the CONNECT HTTP message body. :nodoc:
       def receive_connect_data(data)
+        return if @connect_failed
+        if @received_close && data && !data.empty?
+          return handle_capsule_error(Protocol::Capsule::ParseError.new("Data after close capsule"))
+        end
+        return if closed?
         @connect_buffer << data if data && !data.empty?
 
         while (capsule = Protocol::Capsule.parse(@connect_buffer))
           type, payload, @connect_buffer = capsule
           handle_capsule(type, payload)
+          if @received_close
+            handle_capsule_error(Protocol::Capsule::ParseError.new("Data after close capsule")) unless @connect_buffer.empty?
+            break
+          end
         end
       rescue Protocol::Capsule::ParseError => error
         handle_capsule_error(error)
@@ -281,6 +355,7 @@ module Quicsilver
       def receive_connect_fin(data)
         receive_connect_data(data)
         handle_capsule_error(Protocol::Capsule::ParseError.new("Truncated capsule")) unless @connect_buffer.empty?
+        finish_connect if @accepted && !@connect_failed
         notify_close
       end
 
@@ -436,6 +511,14 @@ module Quicsilver
             "WebTransport session #{@stream_id} received close capsule " \
             "code=#{closed_with.code} reason=#{closed_with.reason.inspect}"
           )
+          # draft-16 §6 requires the recipient to close or reset CONNECT.
+          # Finish our send side without discarding any queued response bytes.
+          @received_close = true
+          if @accepted
+            finish_connect
+          else
+            reset_connect(Protocol::H3_REQUEST_REJECTED)
+          end
           notify_close(**closed_with.to_h)
         when WT_DRAIN_SESSION
           # Advisory only. The session stays open and usable; it is up to the
@@ -448,17 +531,32 @@ module Quicsilver
       end
 
       def handle_capsule_error(error)
+        return if @connect_failed
+        @connect_failed = true
         Quicsilver.logger.debug("WebTransport session #{@stream_id} capsule error: #{error.message}")
-        @connect_buffer = "".b
-        @stream.reset(Protocol::H3_DATAGRAM_ERROR)
+        @connect_buffer.clear
+        @connect_frame_buffer.clear
+        reset_connect(Protocol::H3_MESSAGE_ERROR)
         notify_close
       end
 
-      def write_close_reason(code, reason)
-        payload = self.class.build_close_payload(code, reason)
-        @stream.send(Protocol::Capsule.encode(WT_CLOSE_SESSION, payload), fin: false)
-      rescue
-        # Best-effort — connection may already be gone
+      def reset_connect(code)
+        @stream.reset(code)
+      rescue StandardError
+        # The native stream may already have gone; still clean up locally.
+      end
+
+      def finish_connect(data = "")
+        @streams_mutex.synchronize do
+          return if @connect_send_finished
+          @connect_send_finished = true
+        end
+
+        # Successful submission preserves queued bytes and sends FIN. If native
+        # submission fails on a live stream, RESET is the fallback termination.
+        @stream.send(data, fin: true)
+      rescue StandardError
+        reset_connect(Protocol::H3_INTERNAL_ERROR)
       end
     end
   end

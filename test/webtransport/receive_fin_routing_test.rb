@@ -22,6 +22,28 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
   SESSION_ID = 0
   COMMAND_STREAM = 4
 
+  def test_connect_data_frames_route_fragmented_capsules_and_reject_trailing_data
+    server, connection = server_with_session
+    notifications = []
+    session.on_close { |info| notifications << info }
+    capsule = Quicsilver::Protocol::Capsule.encode(Session::WT_CLOSE_SESSION, [7].pack("N") + "bye")
+    # Capsule boundaries need not match HTTP/3 frame or native receive boundaries.
+    wire = Quicsilver::Protocol.build_frame(0, capsule.byteslice(0, 4)) +
+      Quicsilver::Protocol.build_frame(0, capsule.byteslice(4..))
+    sends = []
+    resets = []
+    Quicsilver.stub(:send_stream, ->(handle, data, fin) { sends << [data, fin] }) do
+      Quicsilver.stub(:stream_reset, ->(handle, code) { resets << code }) do
+        wire.each_byte { |byte| receive(server, connection, SESSION_ID, byte.chr.b) }
+        assert_equal [["", true]], sends
+        assert_equal [7], notifications.map(&:code)
+        assert_equal "bye", notifications.first.reason
+        receive(server, connection, SESSION_ID, Quicsilver::Protocol.build_frame(0, "extra"))
+        assert_equal [Quicsilver::Protocol::H3_MESSAGE_ERROR], resets
+      end
+    end
+  end
+
   def test_a_complete_bidi_stream_is_routed_to_its_session
     server, connection = server_with_session
     delivered = []

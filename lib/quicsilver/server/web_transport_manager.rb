@@ -58,9 +58,7 @@ module Quicsilver
 
       def route_owned_stream(stream_id, stream_handle, payload, fin: false)
         if (session = @sessions[stream_id])
-          if session.routable?
-            fin ? session.receive_connect_fin(payload) : session.receive_connect_data(payload)
-          end
+          session.receive_connect_stream_data(payload, fin: fin)
         elsif known_stream?(stream_id)
           if (stream = active_stream(stream_id))
             stream.replace_stream_handle(stream_handle) if fin && stream_handle
