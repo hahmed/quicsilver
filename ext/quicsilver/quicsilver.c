@@ -1287,6 +1287,21 @@ quicsilver_connection_ids(VALUE self, VALUE connection_handle_val)
     return result;
 }
 
+static void
+close_connection(HQUIC connection)
+{
+    // MsQuic 2.6 defaults to a blocking close outside the worker callback.
+    // Our poll thread needs the GVL to complete that work, so queue it instead.
+    BOOLEAN async = TRUE;
+    QUIC_STATUS status = MsQuic->SetParam(connection, QUIC_PARAM_CONN_CLOSE_ASYNC, sizeof(async), &async);
+    if (QUIC_FAILED(status)) {
+        rb_raise(rb_eRuntimeError, "Enabling asynchronous connection close failed, 0x%x!", status);
+    }
+    forget_connection_streams(connection);
+    MsQuic->ConnectionClose(connection);
+    wake_event_loop();
+}
+
 // Close a QUIC connection and free context
 static VALUE
 quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
@@ -1303,8 +1318,7 @@ quicsilver_close_connection_handle(VALUE self, VALUE connection_data)
     (void)context_handle; // ctx freed by SHUTDOWN_COMPLETE, not here
 
     if (Connection != NULL) {
-        forget_connection_streams(Connection);
-        MsQuic->ConnectionClose(Connection);
+        close_connection(Connection);
     }
 
     // Don't free ctx here — ConnectionClose is async and SHUTDOWN_COMPLETE
@@ -1322,8 +1336,7 @@ quicsilver_close_server_connection(VALUE self, VALUE connection_handle)
 
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
     if (Connection != NULL) {
-        forget_connection_streams(Connection);
-        MsQuic->ConnectionClose(Connection);
+        close_connection(Connection);
     }
     return Qnil;
 }

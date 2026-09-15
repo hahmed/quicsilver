@@ -52,7 +52,7 @@ else
     end
   end
 
-  cmake_args = ['-B build', '-DCMAKE_BUILD_TYPE=Release']
+  cmake_args = ['-B build', '-DCMAKE_BUILD_TYPE=Release', '-DQUIC_TLS_LIB=quictls', '-DQUIC_LINUX_IOURING_ENABLED=OFF']
   if RUBY_PLATFORM =~ /darwin/
     cmake_args << '-DCMAKE_EXE_LINKER_FLAGS="-framework CoreServices"'
     cmake_args << '-DCMAKE_SHARED_LINKER_FLAGS="-framework CoreServices"'

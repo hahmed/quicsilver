@@ -353,6 +353,23 @@ uint32_t
 
 #endif // QUIC_API_ENABLE_PREVIEW_FEATURES
 
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+
+//
+// XDP Maps configured for external XDP programs.
+// Passed via SetParam (QUIC_PARAM_GLOBAL_XDP_MAP_CONFIG) after
+// MsQuicOpenVersion but before opening any registrations.
+// QUIC_XDP_MAP_HANDLE is defined per-platform in msquic_winuser.h,
+// msquic_winkernel.h, and msquic_posix.h.
+//
+
+typedef struct QUIC_XDP_MAP_CONFIG {
+    uint32_t InterfaceIndex;        // Network interface this map applies to.
+    QUIC_XDP_MAP_HANDLE MapHandle;  // XDP map handle.
+} QUIC_XDP_MAP_CONFIG;
+
+#endif // QUIC_API_ENABLE_PREVIEW_FEATURES
+
 typedef struct QUIC_REGISTRATION_CONFIG { // All fields may be NULL/zero.
     const char* AppName;
     QUIC_EXECUTION_PROFILE ExecutionProfile;
@@ -637,9 +654,29 @@ typedef struct QUIC_STATISTICS_V2 {
 
     uint32_t RttVariance;                   // In microseconds
 
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+    uint32_t ConnectionQueueDelayAvgUs;     // Sliding average connection queue delay in microseconds
+    uint32_t ConnectionQueueDelayMaxUs;     // Maximum connection queue delay in microseconds
+    uint32_t SendQueueDelayAvgUs;           // Sliding average send queue delay in microseconds
+    uint32_t SendQueueDelayMaxUs;           // Maximum send queue delay in microseconds
+    uint32_t ReceiveQueueDelayAvgUs;        // Sliding average receive queue delay in microseconds
+    uint32_t ReceiveQueueDelayMaxUs;        // Maximum receive queue delay in microseconds
+#endif
+
     // N.B. New fields must be appended to end
 
 } QUIC_STATISTICS_V2;
+
+typedef struct QUIC_NETWORK_STATISTICS
+{
+    uint32_t BytesInFlight;              // Bytes that were sent on the wire, but not yet acked
+    uint64_t PostedBytes;                // Total bytes queued, but not yet acked. These may contain sent bytes that may have potentially lost too.
+    uint64_t IdealBytes;                 // Ideal number of bytes required to be available to  avoid limiting throughput
+    uint64_t SmoothedRTT;                // Smoothed RTT value
+    uint32_t CongestionWindow;           // Congestion Window
+    uint64_t Bandwidth;                  // Estimated bandwidth
+
+} QUIC_NETWORK_STATISTICS;
 
 #define QUIC_STRUCT_SIZE_THRU_FIELD(Struct, Field) \
     (FIELD_OFFSET(Struct, Field) + sizeof(((Struct*)0)->Field))
@@ -648,6 +685,9 @@ typedef struct QUIC_STATISTICS_V2 {
 #define QUIC_STATISTICS_V2_SIZE_2   QUIC_STRUCT_SIZE_THRU_FIELD(QUIC_STATISTICS_V2, DestCidUpdateCount)     // MsQuic v2.1 final size
 #define QUIC_STATISTICS_V2_SIZE_3   QUIC_STRUCT_SIZE_THRU_FIELD(QUIC_STATISTICS_V2, SendEcnCongestionCount) // MsQuic v2.2 final size
 #define QUIC_STATISTICS_V2_SIZE_4   QUIC_STRUCT_SIZE_THRU_FIELD(QUIC_STATISTICS_V2, RttVariance)            // MsQuic v2.5 final size
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+#define QUIC_STATISTICS_V2_SIZE_5   QUIC_STRUCT_SIZE_THRU_FIELD(QUIC_STATISTICS_V2, ReceiveQueueDelayMaxUs) // MsQuic v2.6 preview size
+#endif
 
 typedef struct QUIC_LISTENER_STATISTICS {
 
@@ -691,6 +731,11 @@ typedef enum QUIC_PERFORMANCE_COUNTERS {
     QUIC_PERF_COUNTER_SEND_STATELESS_RESET, // Total stateless reset packets sent ever.
     QUIC_PERF_COUNTER_SEND_STATELESS_RETRY, // Total stateless retry packets sent ever.
     QUIC_PERF_COUNTER_CONN_LOAD_REJECT,     // Total connections rejected due to worker load.
+    QUIC_PERF_COUNTER_LISTEN_QUEUE_DEPTH,   // Current listeners queued for processing.
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+    QUIC_PERF_COUNTER_ENCRYPT_DURATION_US,  // Total time spent on encryption in microseconds.
+    QUIC_PERF_COUNTER_DECRYPT_DURATION_US,  // Total time spent on decryption in microseconds.
+#endif
     QUIC_PERF_COUNTER_MAX,
 } QUIC_PERFORMANCE_COUNTERS;
 
@@ -773,7 +818,7 @@ typedef struct QUIC_SETTINGS {
             uint64_t StreamMultiReceiveEnabled              : 1;
             uint64_t XdpEnabled                             : 1;
             uint64_t QTIPEnabled                            : 1;
-            uint64_t RioEnabled                             : 1;
+            uint64_t ReservedRioEnabled                     : 1;
             uint64_t RESERVED                               : 18;
 #else
             uint64_t RESERVED                               : 26;
@@ -827,7 +872,7 @@ typedef struct QUIC_SETTINGS {
             uint64_t StreamMultiReceiveEnabled : 1;
             uint64_t XdpEnabled                : 1;
             uint64_t QTIPEnabled               : 1;
-            uint64_t RioEnabled                : 1;
+            uint64_t ReservedRioEnabled        : 1;
             uint64_t ReservedFlags             : 55;
 #else
             uint64_t ReservedFlags             : 63;
@@ -961,6 +1006,9 @@ void
 #define QUIC_PARAM_GLOBAL_STATELESS_RESET_KEY           0x0100000B  // uint8_t[] - Array size is QUIC_STATELESS_RESET_KEY_LENGTH
 #define QUIC_PARAM_GLOBAL_STATISTICS_V2_SIZES           0x0100000C  // uint32_t[] - Array of sizes for each QUIC_STATISTICS_V2 version. Get-only. Pass a buffer of uint32_t, output count is variable. See documentation for details.
 #define QUIC_PARAM_GLOBAL_STATELESS_RETRY_CONFIG        0x0100000D  // QUIC_STATELESS_RETRY_CONFIG
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+#define QUIC_PARAM_GLOBAL_XDP_MAP_CONFIG                0x0100000E  // QUIC_XDP_MAP_CONFIG[]
+#endif
 
 //
 // Parameters for Registration.
@@ -989,6 +1037,7 @@ typedef struct QUIC_SCHANNEL_CREDENTIAL_ATTRIBUTE_W {
 #define QUIC_PARAM_LISTENER_STATS                       0x04000001  // QUIC_LISTENER_STATISTICS
 #ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
 #define QUIC_PARAM_LISTENER_CIBIR_ID                    0x04000002  // uint8_t[] {offset, id[]}
+#define QUIC_PARAM_LISTENER_PARTITION_INDEX             0x04000005  // uint16_t
 #endif
 #define QUIC_PARAM_DOS_MODE_EVENTS                      0x04000004  // BOOLEAN
 
@@ -1025,6 +1074,10 @@ typedef struct QUIC_SCHANNEL_CREDENTIAL_ATTRIBUTE_W {
 #define QUIC_PARAM_CONN_STATISTICS_V2_PLAT              0x05000017  // QUIC_STATISTICS_V2
 #define QUIC_PARAM_CONN_ORIG_DEST_CID                   0x05000018  // uint8_t[]
 #define QUIC_PARAM_CONN_SEND_DSCP                       0x05000019  // uint8_t
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+#define QUIC_PARAM_CONN_NETWORK_STATISTICS              0x05000020  // struct QUIC_NETWORK_STATISTICS
+#define QUIC_PARAM_CONN_CLOSE_ASYNC                     0x0500001A  // uint8_t
+#endif
 
 //
 // Parameters for TLS.
@@ -1114,6 +1167,34 @@ void
     _In_ _Pre_defensive_ __drv_freesMem(Mem)
         HQUIC Registration
     );
+
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+
+typedef
+_Function_class_(QUIC_REGISTRATION_CLOSE_CALLBACK)
+void
+(QUIC_API QUIC_REGISTRATION_CLOSE_CALLBACK)(
+    _In_opt_ void* Context
+    );
+
+typedef QUIC_REGISTRATION_CLOSE_CALLBACK *QUIC_REGISTRATION_CLOSE_CALLBACK_HANDLER;
+
+//
+// Closes the registration. This function synchronizes the cleanup of all child
+// objects. The callback handler is invoked once all those child objects have
+// been closed by the application.
+//
+typedef
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+(QUIC_API * QUIC_REGISTRATION_CLOSE2_FN)(
+    _In_ _Pre_defensive_ __drv_freesMem(Mem)
+        HQUIC Registration,
+    _In_ _Pre_defensive_ QUIC_REGISTRATION_CLOSE_CALLBACK_HANDLER Handler,
+    _In_opt_ void* Context
+    );
+
+#endif // QUIC_API_ENABLE_PREVIEW_FEATURES
 
 //
 // Calls shutdown for all connections in this registration. Don't call on a
@@ -1374,14 +1455,7 @@ typedef struct QUIC_CONNECTION_EVENT {
             BOOLEAN SendNegotiated;             // TRUE if sending one-way delay timestamps is negotiated.
             BOOLEAN ReceiveNegotiated;          // TRUE if receiving one-way delay timestamps is negotiated.
         } ONE_WAY_DELAY_NEGOTIATED;
-        struct {
-           uint32_t BytesInFlight;              // Bytes that were sent on the wire, but not yet acked
-           uint64_t PostedBytes;                // Total bytes queued, but not yet acked. These may contain sent bytes that may have potentially lost too.
-           uint64_t IdealBytes;                 // Ideal number of bytes required to be available to  avoid limiting throughput
-           uint64_t SmoothedRTT;                // Smoothed RTT value
-           uint32_t CongestionWindow;           // Congestion Window
-           uint64_t Bandwidth;                  // Estimated bandwidth
-        } NETWORK_STATISTICS;
+        QUIC_NETWORK_STATISTICS NETWORK_STATISTICS;
 #endif
     };
 } QUIC_CONNECTION_EVENT;
@@ -1519,6 +1593,30 @@ QUIC_STATUS
     _In_ BOOLEAN Result,
     _In_ QUIC_TLS_ALERT_CODES TlsAlert
     );
+
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+
+typedef struct QUIC_KEYING_MATERIAL_CONFIG {
+    _Field_z_ const char* Label;
+    uint32_t ContextLength;
+    _Field_size_bytes_opt_(ContextLength) const uint8_t* Context;
+    uint32_t OutputLength;
+} QUIC_KEYING_MATERIAL_CONFIG;
+
+//
+// Exports keying material derived from the connection's TLS session.
+// The connection's handshake must be complete and the TLS context still alive.
+//
+typedef
+_IRQL_requires_max_(PASSIVE_LEVEL)
+QUIC_STATUS
+(QUIC_API * QUIC_CONNECTION_EXPORT_KEYING_MATERIAL_FN)(
+    _In_ _Pre_defensive_ HQUIC Connection,
+    _In_ _Pre_defensive_ const QUIC_KEYING_MATERIAL_CONFIG* Config,
+    _Out_writes_bytes_(Config->OutputLength)
+        uint8_t* Output
+    );
+#endif // QUIC_API_ENABLE_PREVIEW_FEATURES
 
 //
 // Streams
@@ -1838,10 +1936,15 @@ typedef struct QUIC_API_TABLE {
     QUIC_CONN_POOL_CREATE_FN            ConnectionPoolCreate;        // Available from v2.5
 
 #ifndef _KERNEL_MODE
+#define QUIC_API_EXECUTION_CONTEXT
     QUIC_EXECUTION_CREATE_FN            ExecutionCreate;    // Available from v2.5
     QUIC_EXECUTION_DELETE_FN            ExecutionDelete;    // Available from v2.5
     QUIC_EXECUTION_POLL_FN              ExecutionPoll;      // Available from v2.5
 #endif // _KERNEL_MODE
+    QUIC_REGISTRATION_CLOSE2_FN         RegistrationClose2; // Available from v2.6
+
+    QUIC_CONNECTION_EXPORT_KEYING_MATERIAL_FN
+                                        ConnectionExportKeyingMaterial; // Available from v2.6
 #endif // QUIC_API_ENABLE_PREVIEW_FEATURES
 
 } QUIC_API_TABLE;
