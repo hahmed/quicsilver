@@ -108,10 +108,14 @@ class WebTransportSessionTest < Minitest::Test
     notifications = []
     session.on_close { |info| notifications << info }
 
-    stream.stub(:send, ->(*) { raise IOError, "connection gone" }) do
-      session.close(code: 7, reason: "bye")
+    log = StringIO.new
+    Quicsilver.stub(:logger, Logger.new(log)) do
+      stream.stub(:send, ->(*) { raise IOError, "connection gone" }) do
+        session.close(code: 7, reason: "bye")
+      end
     end
 
+    assert_match(/WebTransport session 0.*FIN.*IOError.*aborting CONNECT/, log.string)
     assert session.closed?
     assert_equal [7], notifications.map(&:code)
     assert_equal [Quicsilver::Protocol::H3_INTERNAL_ERROR], stream.aborts

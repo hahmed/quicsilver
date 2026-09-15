@@ -557,7 +557,14 @@ module Quicsilver
         # Successful submission preserves queued bytes and sends FIN. If native
         # submission fails on a live stream, abort both directions as a fallback.
         @stream.send(data, fin: true)
-      rescue StandardError
+      rescue StandardError => error
+        begin
+          Quicsilver.logger.warn(
+            "WebTransport session #{@stream_id} close FIN submission failed (#{error.class}); aborting CONNECT"
+          )
+        rescue StandardError
+          # A broken logger must not prevent transport or session cleanup.
+        end
         abort_connect(Protocol::H3_INTERNAL_ERROR)
       end
     end
