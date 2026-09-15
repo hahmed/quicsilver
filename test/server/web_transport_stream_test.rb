@@ -86,10 +86,86 @@ class WebTransportStreamTest < Minitest::Test
     refute stream.open?
   end
 
-  def stream_on(transport)
+  def stream_on(transport, **options)
     Quicsilver::Server::WebTransportStream.new(
-      session: nil, stream: transport, stream_id: 4
+      session: nil, stream: transport, stream_id: 4, **options
     )
+  end
+
+  def test_receive_byte_limit_resets_only_the_overflowing_stream
+    transport = RecordingTransport.new
+    stream = stream_on(transport, receive_buffer_bytes: 4, receive_overflow_code: 42)
+    other = stream_on(RecordingTransport.new)
+
+    stream.receive_data("1234")
+    stream.receive_data("5")
+    stream.receive_data("late")
+    other.receive_data("usable")
+    other.notify_read_close
+
+    assert_equal [WT.application_error_to_http(42)], transport.resets
+    error = assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
+    assert_equal 42, error.application_error_code
+    refute stream.open?
+    assert_equal "usable", other.read
+    assert_nil other.read
+  end
+
+  def test_receive_larger_than_byte_limit_resets_an_empty_stream
+    transport = RecordingTransport.new
+    stream = stream_on(transport, receive_buffer_bytes: 4, receive_overflow_code: 42)
+
+    stream.receive_data("12345")
+
+    assert_equal [WT.application_error_to_http(42)], transport.resets
+    error = assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
+    assert_equal 42, error.application_error_code
+    refute stream.open?
+  end
+
+  def test_receive_chunk_limit_counts_tiny_chunks_but_not_empty_data
+    transport = RecordingTransport.new
+    stream = stream_on(transport, receive_buffer_chunks: 2)
+    stream.receive_data("")
+    stream.receive_data("a")
+    stream.receive_data("b")
+    assert_empty transport.resets
+    stream.receive_data("c")
+    assert_equal 1, transport.resets.size
+    assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
+  end
+
+  def test_read_releases_receive_capacity_and_fin_preserves_queued_bytes
+    transport = RecordingTransport.new
+    stream = stream_on(transport, receive_buffer_bytes: 4, receive_buffer_chunks: 1)
+    stream.receive_data("1234")
+    assert_equal "1234", stream.read
+    stream.receive_data("5678")
+    stream.notify_read_close
+
+    assert_equal "5678", stream.read
+    assert_nil stream.read
+    assert_empty transport.resets
+  end
+
+  def test_receive_limits_must_be_positive_integers
+    [0, -1, nil, 1.5].each do |limit|
+      assert_raises(ArgumentError) { stream_on(RecordingTransport.new, receive_buffer_bytes: limit) }
+      assert_raises(ArgumentError) { stream_on(RecordingTransport.new, receive_buffer_chunks: limit) }
+    end
+  end
+
+  def test_receive_overflow_discards_input_even_if_native_abort_raises
+    transport = RecordingTransport.new
+    stream = stream_on(transport, receive_buffer_bytes: 1)
+    stream.receive_data("a")
+
+    transport.stub(:abort, ->(*) { raise IOError, "Transport failed" }) do
+      assert_raises(IOError) { stream.receive_data("b") }
+    end
+
+    refute stream.open?
+    assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
   end
 
   def test_received_chunks_are_read_in_order_before_eof

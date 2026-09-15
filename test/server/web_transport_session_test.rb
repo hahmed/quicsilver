@@ -27,6 +27,37 @@ class WebTransportSessionTest < Minitest::Test
     refute session.open?
   end
 
+  def test_accept_configures_receive_limits_for_bidi_and_uni_children
+    session = build_session
+    expect_successful_connect_response(session)
+    session.accept!(receive_buffer_bytes: 4, receive_buffer_chunks: 1, receive_overflow_code: 42)
+    bidi = session.add_stream(99998, 4)
+    uni = session.add_uni_stream(99997, 6)
+    resets = []
+
+    Quicsilver.stub(:stream_abort, ->(*args) { resets << args }) do
+      bidi.receive_data("12345")
+      uni.receive_data("a")
+      uni.receive_data("b")
+    end
+
+    code = Quicsilver::Protocol::WebTransport.application_error_to_http(42)
+    assert_equal [[99998, code], [99997, code]], resets
+    [bidi, uni].each do |stream|
+      assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
+    end
+    assert session.open?
+  end
+
+  def test_accept_rejects_invalid_receive_configuration_before_sending_headers
+    [{receive_buffer_bytes: 0}, {receive_buffer_chunks: -1},
+      {receive_overflow_code: -1}, {receive_overflow_code: 1 << 32}].each do |options|
+      session = build_session
+      assert_raises(ArgumentError) { session.accept!(**options) }
+      refute session.open?
+    end
+  end
+
   def test_send_datagram_raises_before_accept
     session = build_session
     assert_raises(RuntimeError) { session.send_datagram("data") }
