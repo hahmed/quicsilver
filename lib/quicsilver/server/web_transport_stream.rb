@@ -44,8 +44,18 @@ module Quicsilver
         end
       end
 
+      def self.validate_backpressure(enabled, bytes, chunks)
+        unless enabled == true || enabled == false
+          raise ArgumentError, "Receive backpressure must be true or false"
+        end
+        if enabled && [bytes, chunks].any? { |limit| limit > 0xffff_ffff_ffff_ffff }
+          raise ArgumentError, "Receive backpressure limits must fit in 64 bits"
+        end
+      end
+
       def initialize(session:, stream:, stream_id:, direction: :bidi,
-        receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0)
+        receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0,
+        receive_backpressure: false)
         @session = session
         @stream = stream
         @stream_id = stream_id
@@ -54,8 +64,10 @@ module Quicsilver
         @write_open = direction != :receive_only
         self.class.validate_overflow_code(receive_overflow_code)
         @receive_overflow_error = Protocol::WebTransport.application_error_to_http(receive_overflow_code)
-        queue = ReceiveQueue.new(bytes: receive_buffer_bytes, chunks: receive_buffer_chunks)
-        @input = ::Protocol::HTTP::Body::Writable.new(queue: queue)
+        @receive_queue = ReceiveQueue.new(bytes: receive_buffer_bytes, chunks: receive_buffer_chunks)
+        self.class.validate_backpressure(receive_backpressure, receive_buffer_bytes, receive_buffer_chunks)
+        @receive_backpressure = receive_backpressure
+        @input = ::Protocol::HTTP::Body::Writable.new(queue: @receive_queue)
         @close_callback = nil
         @peer_reset_callback = nil
         @peer_stop_sending_callback = nil
@@ -129,6 +141,7 @@ module Quicsilver
 
       def abort(http_error_code)
         @stream.abort(http_error_code)
+      ensure
         notify_close(error: ResetError.new(http_error_code))
       end
 
@@ -136,11 +149,30 @@ module Quicsilver
         @read_open || @write_open
       end
 
+      def enable_receive_backpressure
+        return unless @receive_backpressure && @read_open
+
+        @receive_queue.release_capacity_to do |bytes, chunks|
+          unless @stream.grant_receive_credit(bytes, chunks)
+            abort(@receive_overflow_error) if @read_open
+          end
+        end
+      end
+
       # Called by Server when data arrives on this stream. :nodoc:
       def receive_data(data)
-        return if data.nil? || data.empty? || !@read_open
+        return true unless @read_open
 
-        @input.write(data)
+        data ||= "".b
+        accepted = @receive_backpressure ? [data.bytesize, @receive_queue.available_bytes].min : data.bytesize
+        deferred = data.bytesize - accepted
+        if deferred.positive? && !@stream.defer_receive(deferred)
+          abort(@receive_overflow_error)
+          return false
+        end
+        @input.write(data.byteslice(0, accepted)) if accepted.positive?
+        enable_receive_backpressure
+        deferred.zero?
       rescue ReceiveQueue::Full
         # The reader is too far behind. Close our read side and ask the peer to
         # stop; the write side stays open so the app can still say why.
@@ -149,9 +181,14 @@ module Quicsilver
         ensure
           close_read(ResetError.new(@receive_overflow_error))
         end
+        false
       rescue ::Protocol::HTTP::Body::Writable::Closed, ClosedQueueError, ResetError
         # Closing can race the write after the read-open check above.
         raise if @read_open
+      end
+
+      def receive_fin(data)
+        notify_read_close if receive_data(data)
       end
 
       # Called by Server when the peer has closed its write side. :nodoc:
@@ -184,6 +221,10 @@ module Quicsilver
 
       # Called by Server when the stream is reset or fully closed. :nodoc:
       def notify_close(error: nil)
+        if error && @receive_backpressure && @read_open
+          @stream.stop_sending(error.http_error_code)
+        end
+      ensure
         @read_open = false
         @write_open = false
         error ? @input.close(error) : @input.close_write

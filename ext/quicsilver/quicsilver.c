@@ -4,6 +4,7 @@
 #define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 #include "msquic.h"
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -78,12 +79,24 @@ typedef struct {
     HQUIC Configuration;
 } ListenerContext;
 
+typedef struct {
+    uint64_t delivered;
+    uint64_t deferred;
+    VALUE thread;
+    int credit_enabled;
+} ReceiveAdmission;
+
 // Stream state tracking
 typedef struct {
     HQUIC stream;
     uint64_t token;
     QUIC_STREAM_SHUTDOWN_FLAGS abort_flags;
     uint32_t pending_priority;
+    uint64_t receive_credit;
+    uint64_t receive_chunks;
+    ReceiveAdmission* receive_admission;
+    int receive_credit_enabled;
+    int receive_delivery_failed;
     HQUIC connection;
     void* connection_ctx;  // ConnectionContext pointer (for building connection_data)
     VALUE client_obj;      // Ruby client object (copied from connection context)
@@ -108,6 +121,11 @@ register_stream(StreamContext* ctx, HQUIC stream, QUIC_STREAM_SHUTDOWN_FLAGS fla
     ctx->stream = stream;
     ctx->token = NextStreamToken++;
     ctx->abort_flags = flags;
+    ctx->receive_credit = 0;
+    ctx->receive_chunks = 0;
+    ctx->receive_admission = NULL;
+    ctx->receive_credit_enabled = 0;
+    ctx->receive_delivery_failed = 0;
     ctx->pending_priority = 0;
     st_insert(LiveStreams, (st_data_t)ctx->token, (st_data_t)ctx);
     return ctx->token;
@@ -232,6 +250,88 @@ dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
             }
         }
         rb_set_errinfo(Qnil);
+    }
+}
+
+static int
+resume_receive(StreamContext* ctx)
+{
+    QUIC_STATUS status = MsQuic->StreamReceiveSetEnabled(ctx->stream, TRUE);
+    if (QUIC_FAILED(status)) return 0;
+    return 1;
+}
+
+// Opt-in synchronous admission: MsQuic retains the unaccepted suffix. No
+// native receive pointer survives this callback, and only complete input carries FIN.
+static void
+receive_with_credit(StreamContext* ctx, QUIC_STREAM_EVENT* event)
+{
+    uint64_t token = ctx->token;
+    uint64_t indicated = event->RECEIVE.TotalBufferLength;
+    uint64_t accepted = indicated;
+    if (ctx->receive_credit_enabled) {
+        if (accepted > ctx->receive_credit) accepted = ctx->receive_credit;
+        if (!ctx->receive_chunks) accepted = 0;
+    }
+    int has_fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) && accepted == indicated;
+    event->RECEIVE.TotalBufferLength = 0;
+    if (ctx->receive_delivery_failed || (!accepted && !has_fin)) return;
+
+    char* combined = NULL;
+    if (accepted > SIZE_MAX - sizeof(token) || accepted > LONG_MAX - sizeof(token)) goto failed;
+    combined = malloc(sizeof(token) + (size_t)accepted);
+    if (!combined) goto failed;
+    memcpy(combined, &token, sizeof(token));
+    size_t copied = 0;
+    for (uint32_t b = 0; b < event->RECEIVE.BufferCount && copied < accepted; b++) {
+        size_t length = event->RECEIVE.Buffers[b].Length;
+        if (length > accepted - copied) length = (size_t)(accepted - copied);
+        memcpy(combined + sizeof(token) + copied, event->RECEIVE.Buffers[b].Buffer, length);
+        copied += length;
+    }
+    if (copied != accepted) goto failed;
+
+    // Debit before Ruby dispatch: a callback may replenish credit synchronously.
+    ReceiveAdmission admission = {accepted, 0, rb_thread_current(), ctx->receive_credit_enabled};
+    ctx->receive_admission = &admission;
+    if (admission.credit_enabled) {
+        ctx->receive_credit -= accepted;
+        if (accepted) ctx->receive_chunks--;
+    }
+    struct dispatch_ruby_args args = {
+        .connection = ctx->connection, .connection_ctx = ctx->connection_ctx,
+        .client_obj = ctx->client_obj, .event_type = has_fin ? "RECEIVE_FIN" : "RECEIVE",
+        .stream_id = ctx->stream_id, .data = combined,
+        .data_len = sizeof(token) + (size_t)accepted, .early_data = has_fin ? ctx->early_data : 0
+    };
+    int state = 0;
+    rb_protect(dispatch_ruby_body, (VALUE)&args, &state);
+    ctx = find_stream(token);
+    if (ctx) ctx->receive_admission = NULL;
+    if (state) {
+        // Exception formatting can itself invoke Ruby and raise across MsQuic.
+        rb_set_errinfo(Qnil);
+        goto failed;
+    }
+    // Classification may defer a suffix before a racing reader installs the
+    // first positive allowance. Reconcile it before MsQuic pauses this receive.
+    if (accepted - admission.deferred < indicated && ctx && ctx->receive_credit_enabled &&
+        ctx->receive_credit && ctx->receive_chunks && !resume_receive(ctx)) goto failed;
+    free(combined);
+    event->RECEIVE.TotalBufferLength = accepted - admission.deferred;
+    return;
+
+failed:
+    free(combined);
+    fprintf(stderr, "Quicsilver: receive delivery failed; aborting stream\n");
+    // Ruby delivery may have shut down the connection; resolve the token again.
+    ctx = find_stream(token);
+    if (ctx) {
+        ctx->receive_delivery_failed = 1;
+        ctx->receive_credit = 0;
+        // Already in a native callback; inline abort avoids allocating a queued
+        // operation on this failure path. It may retire ctx before returning.
+        MsQuic->StreamShutdown(ctx->stream, ctx->abort_flags | QUIC_STREAM_SHUTDOWN_FLAG_INLINE, 0);
     }
 }
 
@@ -376,44 +476,12 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
 
     switch (Event->Type) {
         case QUIC_STREAM_EVENT_RECEIVE: {
-            int has_fin = (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
-
             // Track 0-RTT early data for replay protection
             if (Event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_0_RTT) {
                 ctx->early_data = 1;
             }
 
-            if (Event->RECEIVE.BufferCount == 0 && has_fin) {
-                // Empty FIN — headers-only request/response with no body
-                dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
-                    "RECEIVE_FIN", ctx->stream_id, (const char*)&token, sizeof(token), ctx->early_data);
-                break;
-            }
-
-            if (Event->RECEIVE.BufferCount > 0) {
-                const char* event_type = has_fin ? "RECEIVE_FIN" : "RECEIVE";
-
-                size_t total_data_len = 0;
-                for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
-                    total_data_len += Event->RECEIVE.Buffers[b].Length;
-                }
-
-                // Always prepend [stream_handle(8)] so Ruby has the handle
-                // for all events — needed for WebTransport streams, GOAWAY,
-                // and any code that needs to send back on the stream.
-                size_t total_len = sizeof(token) + total_data_len;
-                char* combined = (char*)malloc(total_len);
-                if (combined != NULL) {
-                    memcpy(combined, &token, sizeof(token));
-                    size_t offset = sizeof(token);
-                    for (uint32_t b = 0; b < Event->RECEIVE.BufferCount; b++) {
-                        memcpy(combined + offset, Event->RECEIVE.Buffers[b].Buffer, Event->RECEIVE.Buffers[b].Length);
-                        offset += Event->RECEIVE.Buffers[b].Length;
-                    }
-                    dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, event_type, ctx->stream_id, combined, total_len, has_fin ? ctx->early_data : 0);
-                    free(combined);
-                }
-            }
+            receive_with_credit(ctx, Event);
             break;
         }
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
@@ -1906,6 +1974,70 @@ quicsilver_get_stream_id(VALUE self, VALUE stream_handle)
     return ULL2NUM(stream_id);
 }
 
+// Experimental native byte/chunk admission. First grant opts in (zero pauses on the
+// next data indication); subsequent grants add credit. This does not reserve
+// connection-level control credit or integrate application queue consumption.
+static VALUE
+quicsilver_grant_stream_receive_credit(VALUE self, VALUE stream_handle, VALUE bytes, VALUE chunks)
+{
+    uint64_t token = NUM2ULL(stream_handle);
+    if (!RB_INTEGER_TYPE_P(bytes)) rb_raise(rb_eTypeError, "Receive credit must be an integer");
+    if (RTEST(rb_funcall(bytes, rb_intern("<"), 1, INT2FIX(0)))) {
+        rb_raise(rb_eArgError, "Receive credit must not be negative");
+    }
+    uint64_t credit = NUM2ULL(bytes);
+    if (!RB_INTEGER_TYPE_P(chunks)) rb_raise(rb_eTypeError, "Receive chunks must be an integer");
+    if (RTEST(rb_funcall(chunks, rb_intern("<"), 1, INT2FIX(0)))) {
+        rb_raise(rb_eArgError, "Receive chunks must not be negative");
+    }
+    uint64_t chunk_credit = NUM2ULL(chunks);
+    StreamContext* ctx = find_stream(token);
+    if (!MsQuic || !ctx || ctx->receive_delivery_failed ||
+        !(ctx->abort_flags & QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE)) return Qfalse;
+    if (credit > UINT64_MAX - ctx->receive_credit) rb_raise(rb_eRangeError, "Receive credit exceeds 64 bits");
+
+    if (chunk_credit > UINT64_MAX - ctx->receive_chunks) rb_raise(rb_eRangeError, "Receive chunks exceed 64 bits");
+
+    // A grant during delivery is reconciled by that callback. Outside delivery,
+    // only a depleted-to-usable transition queues an enable operation.
+    if (!ctx->receive_admission && ctx->receive_credit_enabled &&
+        (!ctx->receive_credit || !ctx->receive_chunks) &&
+        (ctx->receive_credit + credit) && (ctx->receive_chunks + chunk_credit)) {
+        if (!resume_receive(ctx)) return Qfalse;
+    }
+    ctx->receive_credit_enabled = 1;
+    ctx->receive_credit += credit;
+    ctx->receive_chunks += chunk_credit;
+    wake_event_loop();
+    return Qtrue;
+}
+
+// During initial classification Ruby may admit the prefix while leaving a
+// trailing payload in MsQuic. This is only valid in this stream's RECEIVE call.
+static VALUE
+quicsilver_defer_stream_receive(VALUE self, VALUE stream_handle, VALUE bytes)
+{
+    uint64_t token = NUM2ULL(stream_handle);
+    if (!RB_INTEGER_TYPE_P(bytes)) rb_raise(rb_eTypeError, "Deferred bytes must be an integer");
+    if (RTEST(rb_funcall(bytes, rb_intern("<"), 1, INT2FIX(0)))) {
+        rb_raise(rb_eArgError, "Deferred bytes must not be negative");
+    }
+    uint64_t deferred = NUM2ULL(bytes);
+    VALUE thread = rb_thread_current();
+    StreamContext* ctx = find_stream(token);
+    if (!ctx || !ctx->receive_admission) return Qfalse;
+    ReceiveAdmission* admission = ctx->receive_admission;
+    if (admission->thread != thread || admission->deferred || deferred > admission->delivered) return Qfalse;
+    if (admission->credit_enabled) {
+        if (deferred > UINT64_MAX - ctx->receive_credit) return Qfalse;
+        if (deferred && deferred == admission->delivered && ctx->receive_chunks == UINT64_MAX) return Qfalse;
+        ctx->receive_credit += deferred;
+        if (deferred && deferred == admission->delivered) ctx->receive_chunks++;
+    }
+    admission->deferred = deferred;
+    return Qtrue;
+}
+
 static VALUE
 shutdown_stream(VALUE stream_handle, VALUE error_code, QUIC_STREAM_SHUTDOWN_FLAGS flags)
 {
@@ -2004,6 +2136,8 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "stream_stop_sending", quicsilver_stream_stop_sending, 2);
     rb_define_singleton_method(mQuicsilver, "set_stream_priority", quicsilver_set_stream_priority, 2);
     rb_define_singleton_method(mQuicsilver, "get_stream_id", quicsilver_get_stream_id, 1);
+    rb_define_singleton_method(mQuicsilver, "grant_stream_receive_credit", quicsilver_grant_stream_receive_credit, 3);
+    rb_define_singleton_method(mQuicsilver, "defer_stream_receive", quicsilver_defer_stream_receive, 2);
     rb_define_singleton_method(mQuicsilver, "datagram_send", quicsilver_datagram_send, 2);
 
     // Event processing (custom execution — app drives MsQuic)
