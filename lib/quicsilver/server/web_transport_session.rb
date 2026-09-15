@@ -146,6 +146,7 @@ module Quicsilver
         @received_close = false
         @connect_failed = false
         @closed = false
+        @receive_options = {}
       end
 
       def stream_manager=(manager)
@@ -158,10 +159,22 @@ module Quicsilver
 
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
       # Call only after the app has checked Origin and authorized the request.
-      def accept!
+      #
+      # Limits apply to each child's queued Ruby input, not native buffers or
+      # the whole connection. A child that overflows stops receiving: we send
+      # STOP_SENDING with receive_overflow_code, discard its queued input, and
+      # fail its pending reads. Its write side stays open.
+      def accept!(receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0)
         raise IOError, "Session closed" if @closed
         return if @accepted
 
+        ReceiveQueue.validate_limits(receive_buffer_bytes, receive_buffer_chunks)
+        WebTransportStream.validate_overflow_code(receive_overflow_code)
+        @receive_options = {
+          receive_buffer_bytes: receive_buffer_bytes,
+          receive_buffer_chunks: receive_buffer_chunks,
+          receive_overflow_code: receive_overflow_code
+        }
         frame = Protocol.build_headers_frame([[:":status", "200"]])
         @stream.send(frame, fin: false)
         @accepted = true
@@ -387,7 +400,7 @@ module Quicsilver
       def add_stream(stream_handle, stream_id) # :nodoc:
         stream = Transport::Stream.new(stream_handle)
         wt_stream = WebTransportStream.new(
-          session: self, stream: stream, stream_id: stream_id
+          session: self, stream: stream, stream_id: stream_id, **@receive_options
         )
         return wt_stream unless register_stream(wt_stream)
         @stream_callback&.call(wt_stream)
@@ -404,7 +417,7 @@ module Quicsilver
         stream = Transport::Stream.new(stream_handle)
         wt_stream = WebTransportStream.new(
           session: self, stream: stream, stream_id: stream_id,
-          direction: :receive_only
+          direction: :receive_only, **@receive_options
         )
         return wt_stream unless register_stream(wt_stream)
         @uni_stream_callback&.call(wt_stream)
@@ -445,7 +458,7 @@ module Quicsilver
         stream = @connection.open_stream(unidirectional: unidirectional)
         wt_stream = WebTransportStream.new(
           session: self, stream: stream, stream_id: stream.stream_id,
-          direction: unidirectional ? :send_only : :bidi
+          direction: unidirectional ? :send_only : :bidi, **@receive_options
         )
         type = unidirectional ? WT_STREAM_UNI : WT_STREAM_BIDI
         prefix = Protocol.encode_varint(type) + Protocol.encode_varint(@stream_id)

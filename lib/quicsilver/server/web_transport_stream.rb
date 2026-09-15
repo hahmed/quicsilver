@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "protocol/http/body/writable"
+require_relative "receive_queue"
 
 module Quicsilver
   class Server
@@ -37,14 +38,24 @@ module Quicsilver
 
       attr_reader :stream_id, :session
 
-      def initialize(session:, stream:, stream_id:, direction: :bidi)
+      def self.validate_overflow_code(code)
+        unless code.is_a?(Integer) && code.between?(0, 0xffff_ffff)
+          raise ArgumentError, "Receive overflow code must be a 32-bit application error code"
+        end
+      end
+
+      def initialize(session:, stream:, stream_id:, direction: :bidi,
+        receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0)
         @session = session
         @stream = stream
         @stream_id = stream_id
         @direction = direction
         @read_open = direction != :send_only
         @write_open = direction != :receive_only
-        @input = ::Protocol::HTTP::Body::Writable.new
+        self.class.validate_overflow_code(receive_overflow_code)
+        @receive_overflow_error = Protocol::WebTransport.application_error_to_http(receive_overflow_code)
+        queue = ReceiveQueue.new(bytes: receive_buffer_bytes, chunks: receive_buffer_chunks)
+        @input = ::Protocol::HTTP::Body::Writable.new(queue: queue)
         @close_callback = nil
         @peer_reset_callback = nil
         @peer_stop_sending_callback = nil
@@ -130,6 +141,14 @@ module Quicsilver
         return if data.nil? || data.empty? || !@read_open
 
         @input.write(data)
+      rescue ReceiveQueue::Full
+        # The reader is too far behind. Close our read side and ask the peer to
+        # stop; the write side stays open so the app can still say why.
+        begin
+          @stream.stop_sending(@receive_overflow_error)
+        ensure
+          close_read(ResetError.new(@receive_overflow_error))
+        end
       rescue ::Protocol::HTTP::Body::Writable::Closed, ClosedQueueError, ResetError
         # Closing can race the write after the read-open check above.
         raise if @read_open
@@ -145,10 +164,8 @@ module Quicsilver
       # RESET_STREAM ends our read side; the write side stays open. :nodoc:
       def notify_peer_reset(http_error_code)
         error = ResetError.new(http_error_code)
-        @read_open = false
         begin
-          @input.close(error)
-          notify_close_callback unless open?
+          close_read(error)
         ensure
           @peer_reset_callback&.call(error.application_error_code)
         end
@@ -182,6 +199,13 @@ module Quicsilver
       end
 
       private
+
+      # Close the read half and fail pending reads, leaving the write half as is.
+      def close_read(error)
+        @read_open = false
+        @input.close(error)
+        notify_close_callback unless open?
+      end
 
       def discard_input
         @stream.stop_sending(Protocol::WebTransport.application_error_to_http(0)) if @read_open

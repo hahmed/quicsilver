@@ -85,13 +85,14 @@ class StreamLifetimeTest < Minitest::Test
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
     @wt_sessions = Queue.new
     @wt_closes = Queue.new
+    @wt_receive_options = {}
     app = ->(env) do
       if (session = env["quicsilver.context"]&.webtransport)
         origin = env["HTTP_ORIGIN"]
         next [403, {}, []] if origin && origin != "https://example.com"
 
         session.on_close { |info| @wt_closes << info }
-        session.accept!
+        session.accept!(**@wt_receive_options)
         @wt_sessions << session
         [200, {}, []]
       else
@@ -755,6 +756,42 @@ class StreamLifetimeTest < Minitest::Test
     peer.send("request after stop", fin: true)
     assert_equal "request after stop", stream.read
     assert_nil stream.read
+  end
+
+  # An unread child overflows its queue. The peer must see STOP_SENDING with
+  # the configured code, and the rest of the connection must keep working.
+  def test_receive_overflow_stops_the_unread_child_and_leaves_the_session_usable
+    @wt_receive_options = {receive_buffer_bytes: 1024, receive_overflow_code: 42}
+    _, session = open_webtransport_session
+    starved_peer, starved = open_webtransport_child(session)
+    sibling_peer, sibling = open_webtransport_child(session)
+    overflow_code = Quicsilver::Protocol::WebTransport.application_error_to_http(42)
+
+    # Never read from `starved`; push past its byte limit.
+    starved_peer.send("x" * 4096)
+
+    # The peer is told to stop sending, with our application code.
+    event = await_event(@client, "STOP_SENDING", starved.stream_id)
+    assert_equal overflow_code, decode_event(event).error_code
+
+    # Our read side is closed; queued input was discarded, not delivered.
+    error = assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { starved.read }
+    assert_equal 42, error.application_error_code
+
+    # The write half survived, so the app can still answer on that stream.
+    assert starved.open?
+    starved.write("reader fell behind")
+    starved.close_write
+    received = "".b
+    loop do
+      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN"], starved.stream_id)
+      received << decode_event(event).data
+      break if event[1] == "RECEIVE_FIN"
+    end
+    assert_equal "reader fell behind", received
+
+    # Sibling stream, datagrams, and plain HTTP/3 keep working.
+    assert_webtransport_usable(session, sibling_peer, sibling)
   end
 
   def test_session_close_aborts_bidi_and_receive_only_children
