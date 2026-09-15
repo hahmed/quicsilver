@@ -35,9 +35,9 @@ module Quicsilver
         Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
         connection.send_error(stream, 500, "Internal Server Error") if stream.writable?
       ensure
-        @request_registry.complete(stream.stream_id, connection&.handle) if @request_registry.include?(stream.stream_id, connection&.handle)
+        @request_registry.complete(stream.stream_id, connection.handle)
         @cancelled_mutex.synchronize { @cancelled_streams.delete([connection.handle, stream.stream_id]) }
-        connection.remove_stream(stream.stream_id) if connection
+        connection.remove_stream(stream.stream_id)
       end
 
       private

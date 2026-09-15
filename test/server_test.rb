@@ -168,15 +168,31 @@ class ServerTest < Minitest::Test
     assert registry.include?(0, 222)
   end
 
-  def test_request_registry_complete_without_connection_handle_removes_all_matching_stream_ids
+  def test_request_registry_requires_connection_identity_without_removing_requests
     registry = Quicsilver::Server::RequestRegistry.new
 
     registry.track(0, 111, path: "/one", method: "GET")
     registry.track(0, 222, path: "/two", method: "GET")
 
-    registry.complete(0)
+    [:complete, :include?].each do |operation|
+      assert_raises(ArgumentError) { registry.public_send(operation, 0) }
+      assert_raises(ArgumentError) { registry.public_send(operation, 0, nil) }
+    end
+    assert_raises(ArgumentError) { registry.track(0, nil, path: "/invalid", method: "GET") }
 
-    assert registry.empty?
+    assert_equal 2, registry.active_count
+    assert registry.include?(0, 111)
+    assert registry.include?(0, 222)
+  end
+
+  def test_request_registry_completing_an_absent_request_leaves_other_connections_alone
+    registry = Quicsilver::Server::RequestRegistry.new
+    registry.track(0, 222, path: "/two", method: "GET")
+
+    2.times { registry.complete(0, 111) }
+
+    assert_equal 1, registry.active_count
+    assert registry.include?(0, 222)
   end
 
   # STOP_SENDING compliance: server must mark stream as cancelled and reset it
