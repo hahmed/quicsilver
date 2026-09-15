@@ -22,14 +22,17 @@ class StreamLifetimeTest < Minitest::Test
 
   class RecordingServer < Quicsilver::Server
     attr_reader :events
+    attr_writer :record_receives_for
 
     def initialize(...)
       @events = Queue.new
       @test_streams = {}
+      @record_receives_for = nil
       super
     end
 
     def handle_stream_event(connection, stream_id, event, data, early_data)
+      record_receive = event == "RECEIVE" && stream_id == @record_receives_for
       key = [connection.first, stream_id]
       if %w[RECEIVE RECEIVE_FIN].include?(event) && Quicsilver::Transport::StreamEvent.new(data, event).data.start_with?(MARKER)
         @test_streams[key] = true
@@ -41,7 +44,7 @@ class StreamLifetimeTest < Minitest::Test
       end
 
       super
-      if %w[CONNECTION_CLOSED STREAM_START_COMPLETE STREAM_SHUTDOWN_COMPLETE].include?(event)
+      if record_receive || %w[CONNECTION_CLOSED STREAM_START_COMPLETE STREAM_SHUTDOWN_COMPLETE].include?(event)
         @events << [stream_id, event, data, connection.first]
       end
     end
@@ -304,42 +307,50 @@ class StreamLifetimeTest < Minitest::Test
     assert_equal 200, @client.get("/").status
   end
 
-  def test_peer_close_capsule_finishes_connect_response
-    outgoing, incoming, id = open_stream
-    session = Quicsilver::Server::WebTransportSession.new(
-      connection: @server_connection, stream: incoming, headers: {}
-    )
-    session.accept!
-    notifications = []
-    session.on_close { |info| notifications << info }
+  def test_fragmented_peer_close_capsule_finishes_connect_response
+    connection = @client.instance_variable_get(:@connection_data)
+    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
+    outgoing.send(Quicsilver::Protocol.build_headers_frame([
+      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
+      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
+    ]))
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "CONNECT did not reach the Rack app"
+    @server.record_receives_for = session.stream_id
     capsule = Quicsilver::Protocol::Capsule.encode(
       Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE,
       [7].pack("N") + "bye"
     )
-    outgoing.send(Quicsilver::Protocol.build_frame(0, capsule), fin: true)
-    loop do
-      event = await_event(@server, ["RECEIVE", "RECEIVE_FIN"], id)
-      data = decode_event(event).data
-      if event[1] == "RECEIVE_FIN"
-        session.receive_connect_stream_data(data, fin: true)
-        break
-      end
-      session.receive_connect_stream_data(data)
+    wire = Quicsilver::Protocol.build_frame(0, capsule.byteslice(0, 4)) +
+      Quicsilver::Protocol.build_frame(0, capsule.byteslice(4..))
+
+    # Wait for actual server receipt before sending each next byte so MsQuic
+    # cannot coalesce the split frame headers and capsule into one indication.
+    # The server observer records events only after normal production routing.
+    wire.each_byte do |byte|
+      outgoing.send(byte.chr.b)
+      await_event(@server, "RECEIVE", session.stream_id)
     end
+    outgoing.send("", fin: true)
 
     received = "".b
     loop do
-      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], id)
+      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], session.stream_id)
       refute_equal "STREAM_RESET", event[1]
       received << decode_event(event).data
       break if event[1] == "RECEIVE_FIN"
     end
-    assert_equal Quicsilver::Protocol.build_headers_frame([[":status", "200"]]), received
-    assert_equal 1, notifications.size
-    assert_equal 7, notifications.first.code
-    assert_equal "bye", notifications.first.reason
-    assert notifications.first.remote?
-    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+    parser = Quicsilver::Protocol::ResponseParser.new(received)
+    parser.parse
+    assert_equal 200, parser.status
+    assert_empty parser.body.read
+    info = @wt_closes.pop(timeout: 3)
+    refute_nil info, "Close notification did not reach the application"
+    assert_equal 7, info.code
+    assert_equal "bye", info.reason
+    assert info.remote?
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
+    assert @wt_closes.empty?, "Session close notified the application more than once"
     assert_equal 200, @client.get("/").status
   end
 
