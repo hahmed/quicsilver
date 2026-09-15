@@ -291,6 +291,8 @@ module Quicsilver
             break if type_length == 0
             length, length_length = Protocol.decode_varint_str(@connect_frame_buffer, type_length)
             break if length_length == 0
+            # RFC 9114 §4.4 forbids known non-DATA frames after CONNECT,
+            # including HEADERS trailers; these are connection errors.
             if Protocol::FrameParser::CONTROL_ONLY_SET.key?(type) ||
                 Protocol::FrameParser::HTTP2_RESERVED_FRAMES.key?(type) ||
                 [Protocol::FRAME_HEADERS, Protocol::FRAME_PUSH_PROMISE, Protocol::FRAME_PRIORITY_UPDATE].include?(type)

@@ -738,6 +738,7 @@ module Quicsilver
         if session
           # Initial CONNECT headers and capsule DATA can share a receive event.
           # Preserve even a partial following frame for the session decoder.
+          # The parser above validated nonempty headers, so this frame exists.
           header_end = catch(:headers_end) do
             Protocol::FrameReader.each(data) do |type, _payload, offset|
               throw :headers_end, offset if type == Protocol::FRAME_HEADERS

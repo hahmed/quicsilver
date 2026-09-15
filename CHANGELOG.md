@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- WebTransport CLOSE and DRAIN capsules use HTTP/3 DATA frames. Session close sends FIN, validates peer close payloads, and terminates both directions on protocol errors.
+
+### Changed
+
+- WebTransport `close(code:, reason:)` rejects invalid UTF-8 and codes outside the unsigned 32-bit range before changing session state. Valid UTF-8 binary strings remain supported; long valid reasons are truncated at a UTF-8 character boundary.
+
 ## [0.5.0] - 2026-05-08
 
 ### Added
