@@ -22,6 +22,7 @@ class StreamLifetimeTest < Minitest::Test
 
   class RecordingServer < Quicsilver::Server
     attr_reader :events
+    attr_accessor :receive_callback
 
     def initialize(...)
       @events = Queue.new
@@ -36,6 +37,7 @@ class StreamLifetimeTest < Minitest::Test
       end
 
       if @test_streams[key]
+        @receive_callback&.call(stream_id, event, data) if %w[RECEIVE RECEIVE_FIN].include?(event)
         @events << [stream_id, event, data, connection.first]
         return
       end
@@ -302,7 +304,218 @@ class StreamLifetimeTest < Minitest::Test
     assert_retired(stream)
   end
 
+  def test_receive_credit_delivers_prefixes_and_defers_fin_until_replenished
+    outgoing, incoming, id = open_stream
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, 0, 1)
+    outgoing.send("abcdef", fin: true)
+
+    # Another connection must progress while this receiver has no credit.
+    first_client = @client
+    first_connection_handle = @server_connection.handle
+    connect_client
+    assert_equal 200, @client.get("/").status
+
+    received = "".b
+    [2, 2, 2].each_with_index do |credit, index|
+      assert Quicsilver.grant_stream_receive_credit(incoming.handle, credit, 64)
+      target = received.bytesize + credit
+      while received.bytesize < target
+        event = await_event(@server, ["RECEIVE", "RECEIVE_FIN"], id, connection: first_connection_handle)
+        received << decode_event(event).data
+        assert_operator received.bytesize, :<=, target
+        assert_equal "RECEIVE", event[1] if index < 2
+      end
+      if index == 2 && event[1] != "RECEIVE_FIN"
+        assert_empty decode_event(await_event(@server, "RECEIVE_FIN", id, connection: first_connection_handle)).data
+      end
+    end
+    assert_equal "abcdef", received
+  ensure
+    first_client&.disconnect
+  end
+
+  def test_receive_credit_can_be_replenished_inside_the_receive_callback
+    outgoing, incoming, id = open_stream
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, 1, 1)
+    @server.receive_callback = ->(_, event, _) do
+      Quicsilver.grant_stream_receive_credit(incoming.handle, 1, 1) if event == "RECEIVE"
+    end
+    assert_delivers(outgoing, @server, id, "callback replenishment")
+  end
+
+  def test_first_receive_credit_grant_resumes_a_deferred_suffix
+    outgoing, incoming, id = open_stream
+    received = "".b
+    @server.receive_callback = ->(_, event, data) do
+      payload = Quicsilver::Transport::StreamEvent.new(data, event).data
+      if received.empty?
+        assert Quicsilver.defer_stream_receive(incoming.handle, payload.bytesize)
+        assert Quicsilver.grant_stream_receive_credit(incoming.handle, 64, 64)
+        received << "deferred:"
+      else
+        received << payload
+      end
+    end
+    outgoing.send("resume after classification")
+    until received == "deferred:resume after classification"
+      await_event(@server, "RECEIVE", id)
+    end
+    assert_equal "deferred:resume after classification", received
+  end
+
+  def test_receive_chunk_credit_resumes_without_additional_byte_credit
+    outgoing, incoming, id = open_stream
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, 64, 1)
+    outgoing.send("a")
+    assert_equal "a", decode_event(await_event(@server, "RECEIVE", id)).data
+    outgoing.send("b", fin: true)
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, 0, 1)
+    assert_equal "b", decode_event(await_event(@server, ["RECEIVE", "RECEIVE_FIN"], id)).data
+  end
+
+  def test_receive_credit_does_not_delay_an_empty_fin
+    outgoing, incoming, id = open_stream
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, 0, 1)
+    outgoing.send("".b, fin: true)
+    assert_empty decode_event(await_event(@server, "RECEIVE_FIN", id)).data
+  end
+
+  def test_receive_credit_rejects_invalid_grants_and_retired_tokens
+    _, incoming, id = open_stream
+    assert_raises(ArgumentError) { Quicsilver.grant_stream_receive_credit(incoming.handle, -1, 1) }
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, (1 << 64) - 1, 1)
+    assert_raises(RangeError) { Quicsilver.grant_stream_receive_credit(incoming.handle, 1, 1) }
+    assert incoming.abort(REJECTION)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+    refute Quicsilver.grant_stream_receive_credit(incoming.handle, 1, 1)
+  end
+
+  def test_aborting_a_receiver_with_zero_credit_retires_its_token
+    outgoing, incoming, id = open_stream
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, 0, 1)
+    outgoing.send("waiting for capacity")
+    assert incoming.abort(REJECTION)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+    refute Quicsilver.grant_stream_receive_credit(incoming.handle, 1, 1)
+  end
+
+  def test_receive_credit_aborts_when_ruby_delivery_raises
+    outgoing, incoming, id = open_stream
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, 4, 1)
+    error = Class.new(StandardError) do
+      def message = raise("exception formatting must not escape the native callback")
+      def backtrace = raise("exception formatting must not escape the native callback")
+    end.new
+    @server.receive_callback = ->(*) { raise error }
+    outgoing.send("data")
+    await_event(@client, "STREAM_RESET", id)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+    refute Quicsilver.grant_stream_receive_credit(incoming.handle, 1, 1)
+  end
+
+  def test_webtransport_bidi_backpressure_preserves_oversized_initial_payload_and_fin
+    assert_webtransport_backpressure(unidirectional: false)
+  end
+
+  def test_webtransport_uni_backpressure_preserves_oversized_initial_payload_and_fin
+    assert_webtransport_backpressure(unidirectional: true)
+  end
+
+  def test_stop_sending_retires_a_webtransport_stream_with_paused_input
+    session = accept_backpressured_session
+    accepted = Queue.new
+    session.on_stream { |stream| accepted << stream }
+    connection = @client.instance_variable_get(:@connection_data)
+    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
+    prefix = Quicsilver::Protocol.encode_varint(session.class::WT_STREAM_BIDI) +
+      Quicsilver::Protocol.encode_varint(session.stream_id)
+    outgoing.send(prefix + "abcdefghij")
+    incoming = accepted.pop(timeout: 3)
+    refute_nil incoming, "WebTransport child was not accepted"
+    id = incoming.stream_id
+    code = Quicsilver::Protocol::WebTransport.application_error_to_http(42)
+
+    assert outgoing.stop_sending(code)
+    stopped = await_event(@client, "STOP_SENDING", id)
+    assert_equal code, decode_event(stopped).error_code
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id, connection: session.connection.handle)
+    error = assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { incoming.read }
+    assert_equal 42, error.application_error_code
+  ensure
+    session&.notify_close
+  end
+
+  def test_webtransport_initial_callback_failure_aborts_the_native_stream
+    session = accept_backpressured_session
+    failed = Queue.new
+    session.on_stream do |stream|
+      failed << stream.stream_id
+      raise "Initial WebTransport delivery failed"
+    end
+    connection = @client.instance_variable_get(:@connection_data)
+    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
+    prefix = Quicsilver::Protocol.encode_varint(session.class::WT_STREAM_BIDI) +
+      Quicsilver::Protocol.encode_varint(session.stream_id)
+    outgoing.send(prefix + "payload")
+    id = failed.pop(timeout: 3)
+    refute_nil id, "WebTransport callback was not invoked"
+
+    await_event(@client, "STREAM_RESET", id)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id, connection: session.connection.handle)
+  ensure
+    session&.notify_close
+  end
+
   private
+
+
+  def accept_backpressured_session
+    _, connect_stream, = open_stream
+    session = Quicsilver::Server::WebTransportSession.new(
+      connection: @server_connection, stream: connect_stream, headers: {}
+    )
+    @server.instance_variable_get(:@webtransport).for(@server_connection.handle).register(session)
+    session.accept!(receive_backpressure: true, receive_buffer_bytes: 4, receive_buffer_chunks: 1)
+    session
+  end
+
+  def assert_webtransport_backpressure(unidirectional:)
+    session = accept_backpressured_session
+    accepted = Queue.new
+    session.on_stream { |stream| accepted << stream }
+    session.on_uni_stream { |stream| accepted << stream }
+
+    connection = @client.instance_variable_get(:@connection_data)
+    handle = Quicsilver.open_stream(connection, unidirectional)
+    outgoing = Quicsilver::Transport::Stream.new(handle)
+    type = unidirectional ? session.class::WT_STREAM_UNI : session.class::WT_STREAM_BIDI
+    prefix = Quicsilver::Protocol.encode_varint(type) + Quicsilver::Protocol.encode_varint(session.stream_id)
+    payload = "abcdefghij".b
+    outgoing.send(prefix + payload, fin: true)
+    incoming = accepted.pop(timeout: 3)
+    refute_nil incoming, "WebTransport child was not accepted"
+
+    other = RecordingClient.new("localhost", @port, unsecure: true, request_timeout: 3)
+    assert_equal 200, other.get("/").status
+
+    reader = Thread.new do
+      chunks = []
+      while (chunk = incoming.read)
+        chunks << chunk
+      end
+      chunks
+    end
+    reader.report_on_exception = false
+    assert reader.join(3), "WebTransport reader did not resume to FIN"
+    chunks = reader.value
+    assert_equal payload, chunks.join
+    assert chunks.all? { |chunk| chunk.bytesize <= 4 }, "Read exceeded the configured receive byte limit"
+  ensure
+    reader&.kill
+    reader&.join(3)
+    other&.disconnect
+    session&.notify_close
+  end
 
   def connect_client
     @client = RecordingClient.new("localhost", @port, unsecure: true, request_timeout: 3)

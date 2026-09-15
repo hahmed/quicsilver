@@ -19,6 +19,14 @@ module Quicsilver
         Quicsilver.send_stream(@handle, data, fin)
       end
 
+      def grant_receive_credit(bytes, chunks)
+        Quicsilver.grant_stream_receive_credit(@handle, bytes, chunks)
+      end
+
+      def defer_receive(bytes)
+        Quicsilver.defer_stream_receive(@handle, bytes)
+      end
+
       def reset(error_code = Protocol::H3_REQUEST_CANCELLED)
         Quicsilver.stream_reset(@handle, error_code)
       end

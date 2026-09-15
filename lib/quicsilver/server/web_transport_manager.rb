@@ -64,8 +64,7 @@ module Quicsilver
         elsif known_stream?(stream_id)
           if (stream = active_stream(stream_id))
             stream.replace_stream_handle(stream_handle) if fin && stream_handle
-            stream.receive_data(payload)
-            stream.notify_read_close if fin
+            fin ? stream.receive_fin(payload) : stream.receive_data(payload)
           end
         else
           return false
@@ -155,16 +154,16 @@ module Quicsilver
         bidi_prefix_state(payload) == :matched
       end
 
-      def accept_bidi_stream(stream_id, stream_handle, payload)
+      def accept_bidi_stream(stream_id, stream_handle, payload, fin: false)
         session_id, = WebTransportSession.parse_stream_prefix(payload)
         return reject_stream(stream_id, stream_handle) unless session_id && @sessions[session_id]&.accepts_new_streams?
 
-        WebTransportSession.accept_stream(@sessions, stream_id, stream_handle, payload)
+        WebTransportSession.accept_stream(@sessions, stream_id, stream_handle, payload, fin: fin)
       end
 
       def route_unidirectional_stream(stream_id, stream_handle, payload, fin: false)
         if (stream = active_stream(stream_id))
-          stream.receive_data(payload)
+          fin ? stream.receive_fin(payload) : stream.receive_data(payload)
           return stream
         end
         return if known_stream?(stream_id)
@@ -182,7 +181,7 @@ module Quicsilver
         return reject_stream(stream_id, stream_handle) unless session&.accepts_new_streams?
 
         stream = session.add_uni_stream(stream_handle, stream_id)
-        stream.receive_data(initial_data) if initial_data && !initial_data.empty?
+        fin ? stream.receive_fin(initial_data) : stream.receive_data(initial_data)
         stream
       end
 
