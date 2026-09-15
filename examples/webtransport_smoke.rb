@@ -413,19 +413,19 @@ ssl_context = OpenSSL::SSL::SSLContext.new
 ssl_context.cert = OpenSSL::X509::Certificate.new(File.read(PAGE_CERT))
 ssl_context.extra_chain_cert = [OpenSSL::X509::Certificate.new(File.read(ISSUER_CERT))] if File.exist?(ISSUER_CERT)
 ssl_context.key = OpenSSL::PKey.read(File.read(PAGE_KEY))
-ssl_server = OpenSSL::SSL::SSLServer.new(https_server, ssl_context)
+stopping = false
 
 https_thread = Thread.new do
-  loop do
-    begin
-      socket = ssl_server.accept
-    rescue OpenSSL::SSL::SSLError => error
-      warn "HTTPS accept error: #{error.class}: #{error.message}"
-      next
-    end
+  until stopping
+    next unless IO.select([https_server], nil, nil, 0.1)
+    socket = https_server.accept_nonblock(exception: false)
+    next if socket == :wait_readable
 
     Thread.new(socket) do |client|
       begin
+        client = OpenSSL::SSL::SSLSocket.new(client, ssl_context)
+        client.sync_close = true
+        client.accept
         request_line = client.gets&.strip
         puts "HTTPS #{request_line}" if request_line
 
@@ -452,14 +452,10 @@ https_thread = Thread.new do
       end
     end
   end
-rescue IOError, SystemCallError
 end
 
-trap("INT") do
-  puts "\nStopping..."
-  https_server.close rescue nil
-  h3_server.stop
-end
+trap("INT") { stopping = true }
+trap("TERM") { stopping = true }
 
 puts "🚇 WebTransport smoke test"
 puts "   Page:         https://#{HOST}:#{HTTPS_PORT}/   (HTTPS/TCP + Alt-Svc)"
@@ -474,5 +470,16 @@ puts "   /etc/hosts:   127.0.0.1 #{HOST}"
 puts "   Watch this terminal and the browser console."
 puts
 
-https_thread.join
-h3_thread.join(2)
+begin
+  https_thread.join
+ensure
+  stopping = true
+  puts "\nStopping..."
+  begin
+    https_thread.join
+  ensure
+    https_server.close
+    h3_server.stop
+    h3_thread.join(2)
+  end
+end
