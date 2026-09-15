@@ -140,7 +140,7 @@ module Quicsilver
       def stream_manager=(manager)
         @streams_mutex.synchronize do
           @stream_manager = manager
-          @streams.each_key { |stream_id| manager.register_stream(stream_id) }
+          @streams.each_key { |stream_id| manager.register_stream(stream_id, @stream_id) }
           @starting_streams.each_value { |stream| manager.register_starting_stream(stream) }
         end
       end
@@ -346,7 +346,7 @@ module Quicsilver
         @streams_mutex.synchronize do
           starting = @starting_streams.delete(stream.stream_handle)
           stream.notify_start(stream_id)
-          @stream_manager&.register_stream(stream_id)
+          @stream_manager&.register_stream(stream_id, @stream_id)
           @streams[stream_id] = stream if starting && !@closed
         end
       end
@@ -401,7 +401,7 @@ module Quicsilver
       def register_stream(stream, outgoing: false)
         registered = @streams_mutex.synchronize do
           if stream.stream_id
-            @stream_manager&.register_stream(stream.stream_id)
+            @stream_manager&.register_stream(stream.stream_id, @stream_id)
           else
             @stream_manager&.register_starting_stream(stream)
           end

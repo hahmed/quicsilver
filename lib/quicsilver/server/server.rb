@@ -573,6 +573,7 @@ module Quicsilver
     def handle_receive(connection, connection_handle, stream_id, data, early_data: false)
       stream_handle = data.byteslice(0, HANDLE_SIZE)&.unpack1("Q<")
       payload = data.byteslice(HANDLE_SIZE..-1) || "".b
+      return if @webtransport.for(connection_handle).route_owned_stream(stream_id, stream_handle, payload)
 
       # Unidirectional streams (control, QPACK) must be processed incrementally —
       # they never send FIN, so waiting for RECEIVE_FIN would mean never parsing.
@@ -593,17 +594,9 @@ module Quicsilver
 
     def handle_bidi_receive(connection, connection_handle, stream_id, stream_handle, payload, early_data: false)
       manager = @webtransport.for(connection_handle)
-      return if manager.rejected_stream?(stream_id)
 
       pending = @pending_mutex.synchronize { @pending_streams[[connection_handle, stream_id]] }
-      if (wt_stream = manager.active_stream(stream_id))
-        wt_stream.receive_data(payload)
-      elsif manager.known_stream?(stream_id)
-        # Its session has closed; retain WebTransport ownership until shutdown.
-        return
-      elsif (wt_session = manager.session(stream_id))
-        wt_session.receive_connect_data(payload)
-      elsif pending
+      if pending
         pending.frame_buffer << payload
         drain_data_frames(pending)
       elsif (wt_payload = manager.pending_payload(stream_id, stream_handle, payload))
@@ -619,23 +612,7 @@ module Quicsilver
     def handle_receive_fin(connection, connection_handle, stream_id, data, early_data: false)
       event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
       manager = @webtransport.for(connection_handle)
-      return if manager.rejected_stream?(stream_id)
-
-      if (wt_session = @webtransport.for(connection_handle).session(stream_id))
-        wt_session.receive_connect_fin(event.data)
-        return
-      end
-
-      if (wt_session = @webtransport.for(connection_handle).session_for_stream(stream_id))
-        if (wt_stream = wt_session.stream(stream_id))
-          wt_stream.replace_stream_handle(event.handle) if event.handle
-          wt_stream.receive_data(event.data) if event.data && !event.data.empty?
-          wt_stream.notify_read_close
-        end
-        return
-      end
-
-      return if manager.known_stream?(stream_id)
+      return if manager.route_owned_stream(stream_id, event.handle, event.data, fin: true)
 
       if connection.uni_stream_type(stream_id) == :webtransport_uni
         stream = manager.route_unidirectional_stream(stream_id, event.handle, event.data, fin: true)

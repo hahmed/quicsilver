@@ -48,22 +48,29 @@ module Quicsilver
       end
 
       def active_stream(stream_id)
-        @sessions.each_value do |session|
-          next unless session.routable?
-
-          stream = session.stream(stream_id)
-          return stream if stream
-        end
-        nil
+        owning_session(stream_id)&.stream(stream_id)
       end
 
       def session_for_stream(stream_id)
-        @sessions.each_value do |session|
-          next unless session.routable?
+        session = owning_session(stream_id)
+        session if session&.stream(stream_id)
+      end
 
-          return session if session.stream(stream_id)
+      def route_owned_stream(stream_id, stream_handle, payload, fin: false)
+        if (session = @sessions[stream_id])
+          if session.routable?
+            fin ? session.receive_connect_fin(payload) : session.receive_connect_data(payload)
+          end
+        elsif known_stream?(stream_id)
+          if (stream = active_stream(stream_id))
+            stream.replace_stream_handle(stream_handle) if fin && stream_handle
+            stream.receive_data(payload)
+            stream.notify_read_close if fin
+          end
+        else
+          return false
         end
-        nil
+        true
       end
 
       def register_starting_stream(stream)
@@ -81,8 +88,8 @@ module Quicsilver
         stream.session.stream_started(stream, stream_id)
       end
 
-      def register_stream(stream_id)
-        @stream_states[stream_id] = :accepted
+      def register_stream(stream_id, session_id)
+        @stream_states[stream_id] = session_id
       end
 
       def known_stream?(stream_id)
@@ -106,14 +113,15 @@ module Quicsilver
         starting&.session&.remove_starting_stream(handle)
         @pending_uni_streams.delete(stream_id)
         @pending_streams.delete(stream_id)
+        owner = session_for_stream(stream_id)
         known = @stream_states.delete(stream_id) || starting
         if (session = @sessions.delete(stream_id))
           session.notify_close
           return true
         end
-        return !!known unless (session = session_for_stream(stream_id))
+        return !!known unless owner
 
-        session.remove_stream(stream_id)
+        owner.remove_stream(stream_id)
         true
       end
 
@@ -194,6 +202,13 @@ module Quicsilver
       end
 
       private
+
+      def owning_session(stream_id)
+        session_id = @stream_states[stream_id]
+        return unless session_id.is_a?(Integer)
+
+        session(session_id)
+      end
 
       def bidi_prefix_state(data)
         type, type_len = Protocol.decode_varint_str(data, 0)

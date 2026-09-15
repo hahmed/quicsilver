@@ -153,6 +153,27 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     assert_equal ["first", payload], [received.fetch(0).read, received.fetch(0).read]
   end
 
+  def test_owned_streams_deliver_prefix_shaped_payloads_through_receive_and_fin
+    server, connection = server_with_session
+    received = []
+    session.on_stream { |stream| received << stream }
+    session.on_uni_stream { |stream| received << stream }
+
+    receive(server, connection, 4, bidi_payload("first"))
+    receive(server, connection, 6, varint(Session::WT_STREAM_UNI) + varint(0) + "first")
+    payload = bidi_payload("application bytes", session_id: 64)
+    [4, 6].each do |stream_id|
+      receive(server, connection, stream_id, payload)
+      receive_fin(server, connection, stream_id, payload)
+    end
+
+    assert_equal 2, received.size
+    received.each do |stream|
+      assert_equal ["first", payload, payload], [stream.read, stream.read, stream.read]
+      assert_nil stream.read
+    end
+  end
+
   def test_unknown_session_with_split_prefix_is_rejected_on_fin
     server, connection = server_with_session
     payload = bidi_payload("hello", session_id: 64)
@@ -199,6 +220,21 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
           receive(server, connection, stream_id, http3_request)
           receive_fin(server, connection, stream_id, http3_request)
         end
+      end
+    end
+
+    assert_empty dispatched
+  end
+
+  def test_closed_connect_stream_never_becomes_an_http_request
+    server, connection = server_with_session
+    session.notify_close
+    dispatched = []
+
+    server.stub(:dispatch_request, ->(*) { dispatched << true }) do
+      server.stub(:dispatch_streaming, ->(*) { dispatched << true }) do
+        receive(server, connection, SESSION_ID, http3_request)
+        receive_fin(server, connection, SESSION_ID, http3_request)
       end
     end
 
