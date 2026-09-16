@@ -36,6 +36,7 @@ module Quicsilver
           end
 
           len_byte = buffer.getbyte(offset + type_len)
+          break unless len_byte
           if len_byte < 0x40
             length = len_byte
             length_len = 1

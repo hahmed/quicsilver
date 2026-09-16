@@ -254,6 +254,35 @@ class StreamLifetimeTest < Minitest::Test
     assert_equal 200, @client.get("/").status
   end
 
+  def test_connect_dispatch_preserves_partial_following_extension_frame
+    connection = @client.instance_variable_get(:@connection_data)
+    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
+    headers = Quicsilver::Protocol.build_headers_frame([
+      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
+      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
+    ])
+
+    # The extension frame type is complete, but its length arrives later.
+    # CONNECT acceptance must not wait for the following frame to complete.
+    outgoing.send(headers + Quicsilver::Protocol.encode_varint(0x4041))
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "Complete CONNECT headers were lost with a partial following frame"
+    outgoing.send(Quicsilver::Protocol.encode_varint(0), fin: true)
+
+    received = "".b
+    loop do
+      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], session.stream_id)
+      refute_equal "STREAM_RESET", event[1]
+      received << decode_event(event).data
+      break if event[1] == "RECEIVE_FIN"
+    end
+    parser = Quicsilver::Protocol::ResponseParser.new(received)
+    parser.parse
+    assert_equal 200, parser.status
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
+    assert_equal 200, @client.get("/").status
+  end
+
   def test_trailing_connect_data_after_response_fin_stops_peer_and_retires_stream
     connection = @client.instance_variable_get(:@connection_data)
     outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
