@@ -221,158 +221,79 @@ class StreamLifetimeTest < Minitest::Test
     assert_raises(ArgumentError) { Quicsilver.set_stream_priority(incoming.handle, 65_536) }
   end
 
-  def test_real_connect_dispatch_preserves_coalesced_close_capsule
-    connection = @client.instance_variable_get(:@connection_data)
-    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
-    headers = Quicsilver::Protocol.build_headers_frame([
-      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
-      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
-    ])
-    capsule = Quicsilver::Protocol::Capsule.encode(
-      Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE,
-      [9].pack("N") + "coalesced"
+  def test_close_alongside_connect_headers_reaches_the_session
+    peer, session = open_webtransport_session(
+      initial_data: data_frame(close_capsule(code: 9, reason: "coalesced"))
     )
-    outgoing.send(headers + Quicsilver::Protocol.build_frame(0, capsule))
-    session = @wt_sessions.pop(timeout: 3)
-    refute_nil session, "CONNECT did not reach the Rack app"
+
     info = @wt_closes.pop(timeout: 3)
     refute_nil info, "Coalesced CLOSE was lost during CONNECT dispatch"
     assert_equal 9, info.code
     assert_equal "coalesced", info.reason
-    received = "".b
-    loop do
-      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], session.stream_id)
-      refute_equal "STREAM_RESET", event[1]
-      received << decode_event(event).data
-      break if event[1] == "RECEIVE_FIN"
-    end
-    parser = Quicsilver::Protocol::ResponseParser.new(received)
-    parser.parse
-    assert_equal 200, parser.status
-    outgoing.send("", fin: true)
+    assert_equal 200, read_connect_response_until_fin(session.stream_id).status
+
+    peer.send("", fin: true)
     await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
     assert_equal 200, @client.get("/").status
   end
 
-  def test_connect_dispatch_preserves_partial_following_extension_frame
-    connection = @client.instance_variable_get(:@connection_data)
-    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
-    headers = Quicsilver::Protocol.build_headers_frame([
-      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
-      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
-    ])
-
-    # The extension frame type is complete, but its length arrives later.
-    # CONNECT acceptance must not wait for the following frame to complete.
-    outgoing.send(headers + Quicsilver::Protocol.encode_varint(0x4041))
-    session = @wt_sessions.pop(timeout: 3)
-    refute_nil session, "Complete CONNECT headers were lost with a partial following frame"
-    outgoing.send(Quicsilver::Protocol.encode_varint(0), fin: true)
-
-    received = "".b
-    loop do
-      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], session.stream_id)
-      refute_equal "STREAM_RESET", event[1]
-      received << decode_event(event).data
-      break if event[1] == "RECEIVE_FIN"
-    end
-    parser = Quicsilver::Protocol::ResponseParser.new(received)
-    parser.parse
-    assert_equal 200, parser.status
-    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
-    assert_equal 200, @client.get("/").status
-  end
-
-  def test_trailing_connect_data_after_response_fin_stops_peer_and_retires_stream
-    connection = @client.instance_variable_get(:@connection_data)
-    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
-    headers = Quicsilver::Protocol.build_headers_frame([
-      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
-      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
-    ])
-    capsule = Quicsilver::Protocol::Capsule.encode(
-      Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE, [0].pack("N")
+  def test_partial_following_frame_does_not_block_connect_acceptance
+    # Send the extension frame type with CONNECT, then its length after acceptance.
+    peer, session = open_webtransport_session(
+      initial_data: Quicsilver::Protocol.encode_varint(0x4041)
     )
-    outgoing.send(headers + Quicsilver::Protocol.build_frame(0, capsule))
-    session = @wt_sessions.pop(timeout: 3)
-    refute_nil session
-    await_event(@client, "RECEIVE_FIN", session.stream_id)
+    peer.send(Quicsilver::Protocol.encode_varint(0), fin: true)
 
-    # Keep the request direction open after receiving the server's FIN.
-    # A separate request exercises the connection before sending late data.
+    assert_equal 200, read_connect_response_until_fin(session.stream_id).status
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
     assert_equal 200, @client.get("/").status
-    outgoing.send(Quicsilver::Protocol.build_frame(0, "forbidden"))
+  end
+
+  def test_data_after_close_stops_peer_and_retires_connect_stream
+    peer, session = open_webtransport_session(initial_data: data_frame(close_capsule))
+    read_connect_response_until_fin(session.stream_id)
+
+    # Keep the request direction open and exercise the connection before late data.
+    assert_equal 200, @client.get("/").status
+    peer.send(data_frame("forbidden"))
+
     stopped = await_event(@client, "STOP_SENDING", session.stream_id)
     assert_equal Quicsilver::Protocol::H3_MESSAGE_ERROR, decode_event(stopped).error_code
     await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
     await_event(@client, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
-    assert_retired(outgoing)
+    assert_retired(peer)
     assert_equal 200, @client.get("/").status
   end
 
-  def test_session_close_delivers_capsule_and_fin_to_native_peer
-    outgoing, incoming, id = open_stream
-    session = Quicsilver::Server::WebTransportSession.new(
-      connection: @server_connection, stream: incoming, headers: {}
-    )
-    session.accept!
+  def test_local_close_delivers_reason_and_fin_to_peer
+    peer, session = open_webtransport_session
+
     session.close(code: 42, reason: "maintenance")
 
-    received = "".b
-    loop do
-      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], id)
-      refute_equal "STREAM_RESET", event[1], "CONNECT reset can discard the close reason"
-      received << decode_event(event).data
-      break if event[1] == "RECEIVE_FIN"
-    end
-    expected = Quicsilver::Protocol.build_headers_frame([[":status", "200"]]) +
-      Quicsilver::Protocol.build_frame(0, Quicsilver::Protocol::Capsule.encode(
-        Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE,
-        [42].pack("N") + "maintenance"
-      ))
-    assert_equal expected, received
-    outgoing.send("", fin: true)
-    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+    response = read_connect_response_until_fin(session.stream_id)
+    assert_equal 200, response.status
+    assert_equal close_capsule(code: 42, reason: "maintenance"), response.body.read
+    peer.send("", fin: true)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
     assert_equal 200, @client.get("/").status
   end
 
-  def test_fragmented_peer_close_capsule_finishes_connect_response
-    connection = @client.instance_variable_get(:@connection_data)
-    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
-    outgoing.send(Quicsilver::Protocol.build_headers_frame([
-      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
-      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
-    ]))
-    session = @wt_sessions.pop(timeout: 3)
-    refute_nil session, "CONNECT did not reach the Rack app"
+  def test_fragmented_peer_close_preserves_reason_and_finishes_response
+    peer, session = open_webtransport_session
     @server.record_receives_for = session.stream_id
-    capsule = Quicsilver::Protocol::Capsule.encode(
-      Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE,
-      [7].pack("N") + "bye"
-    )
-    wire = Quicsilver::Protocol.build_frame(0, capsule.byteslice(0, 4)) +
-      Quicsilver::Protocol.build_frame(0, capsule.byteslice(4..))
+    capsule = close_capsule(code: 7, reason: "bye")
+    wire = data_frame(capsule.byteslice(0, 4)) + data_frame(capsule.byteslice(4..))
 
-    # Wait for actual server receipt before sending each next byte so MsQuic
-    # cannot coalesce the split frame headers and capsule into one indication.
-    # The server observer records events only after normal production routing.
+    # Wait for production routing after each byte to prevent receive coalescing.
     wire.each_byte do |byte|
-      outgoing.send(byte.chr.b)
+      peer.send(byte.chr.b)
       await_event(@server, "RECEIVE", session.stream_id)
     end
-    outgoing.send("", fin: true)
+    peer.send("", fin: true)
 
-    received = "".b
-    loop do
-      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], session.stream_id)
-      refute_equal "STREAM_RESET", event[1]
-      received << decode_event(event).data
-      break if event[1] == "RECEIVE_FIN"
-    end
-    parser = Quicsilver::Protocol::ResponseParser.new(received)
-    parser.parse
-    assert_equal 200, parser.status
-    assert_empty parser.body.read
+    response = read_connect_response_until_fin(session.stream_id)
+    assert_equal 200, response.status
+    assert_empty response.body.read
     info = @wt_closes.pop(timeout: 3)
     refute_nil info, "Close notification did not reach the application"
     assert_equal 7, info.code
@@ -484,6 +405,46 @@ class StreamLifetimeTest < Minitest::Test
   def connect_client
     @client = RecordingClient.new("localhost", @port, unsecure: true, request_timeout: 3)
     assert_equal 200, @client.get("/").status
+  end
+
+  # Initial data shares the same send as HEADERS to exercise CONNECT handoff.
+  def open_webtransport_session(initial_data: "".b)
+    connection = @client.instance_variable_get(:@connection_data)
+    peer = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
+    headers = Quicsilver::Protocol.build_headers_frame([
+      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
+      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
+    ])
+    peer.send(headers + initial_data)
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "CONNECT did not reach Rack acceptance"
+    [peer, session]
+  end
+
+  def read_connect_response_until_fin(stream_id)
+    received = "".b
+    loop do
+      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], stream_id)
+      refute_equal "STREAM_RESET", event[1], "CONNECT reset can discard the close reason"
+      received << decode_event(event).data
+      break if event[1] == "RECEIVE_FIN"
+    end
+    parser = Quicsilver::Protocol::ResponseParser.new(received)
+    parser.parse
+    consumed = Quicsilver::Protocol::FrameReader.each(received) { |_type, _payload| }
+    assert_equal received.bytesize, consumed, "Incomplete HTTP/3 response frame"
+    parser
+  end
+
+  def data_frame(payload)
+    Quicsilver::Protocol.build_frame(Quicsilver::Protocol::FRAME_DATA, payload)
+  end
+
+  def close_capsule(code: 0, reason: "")
+    Quicsilver::Protocol::Capsule.encode(
+      Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE,
+      [code].pack("N") + reason.b
+    )
   end
 
   def open_stream(unidirectional: false)
