@@ -129,6 +129,50 @@ class WebTransportSessionTest < Minitest::Test
     assert session.closed?
   end
 
+  def test_raising_close_callback_does_not_skip_trailing_data_rejection
+    capsule = close_capsule(7, "bye")
+    [data_frame(capsule + "x"), data_frame(capsule) + data_frame("x")].each do |wire|
+      stream = RecordingConnectStream.new
+      session = build_session(stream: stream)
+      session.accept!
+      session.on_close { raise "application callback failed" }
+
+      error = assert_raises(RuntimeError) do
+        session.receive_connect_stream_data(wire, fin: true)
+      end
+
+      assert_equal "application callback failed", error.message
+      assert_equal Quicsilver::Protocol::H3_MESSAGE_ERROR, stream.error_code
+      assert session.closed?
+    end
+  end
+
+  def test_raising_close_callback_does_not_skip_truncated_frame_rejection
+    connection = RecordingConnection.new
+    session = build_session(connection: connection)
+    session.accept!
+    session.on_close { raise "application callback failed" }
+    capsule = close_capsule(7, "bye")
+    wire = "\x00".b + Quicsilver::Protocol.encode_varint(capsule.bytesize + 1) + capsule
+
+    session.receive_connect_stream_data(wire, fin: true)
+
+    assert_equal Quicsilver::Protocol::H3_FRAME_ERROR, connection.error_code
+    assert session.closed?
+  end
+
+  def test_raising_drain_callback_is_not_a_peer_frame_error
+    connection = RecordingConnection.new
+    session = build_session(connection: connection)
+    session.accept!
+    session.on_drain { raise "application callback failed" }
+    wire = data_frame(drain_capsule) + data_frame("")
+
+    assert_raises(RuntimeError) { session.receive_connect_stream_data(wire, fin: true) }
+
+    assert_nil connection.error_code
+  end
+
   def test_invalid_local_close_leaves_session_usable
     stream = RecordingConnectStream.new
     session = build_session(stream: stream)

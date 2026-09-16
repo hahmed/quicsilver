@@ -283,18 +283,24 @@ module Quicsilver
         end
         return if closed?
 
-        @connect_decoder.each(data) do |chunk|
-          receive_connect_data(chunk)
-          break if @connect_failed || @received_close
+        begin
+          @connect_decoder.each(data) do |chunk|
+            receive_connect_data(chunk)
+            break if @connect_failed || @received_close
+          end
+        ensure
+          # Application callbacks must not bypass trailing-byte or FIN checks.
+          if @received_close && !@connect_failed
+            if @connect_decoder.buffered?
+              handle_capsule_error(Protocol::Capsule::ParseError.new("Stream data after close capsule"))
+            elsif fin
+              @connect_decoder.finish!
+            end
+          end
         end
         return if @connect_failed
-        if @received_close && @connect_decoder.buffered?
-          return handle_capsule_error(Protocol::Capsule::ParseError.new("Stream data after close capsule"))
-        end
-        if fin
-          @connect_decoder.finish!
-          receive_connect_fin("")
-        end
+        @connect_decoder.finish! if fin && !@received_close
+        receive_connect_fin("") if fin
       rescue Protocol::FrameError => error
         @connect_failed = true
         @connect_decoder.clear
@@ -316,11 +322,14 @@ module Quicsilver
 
         while (capsule = Protocol::Capsule.parse(@connect_buffer))
           type, payload, @connect_buffer = capsule
-          handle_capsule(type, payload)
-          if @received_close
-            handle_capsule_error(Protocol::Capsule::ParseError.new("Data after close capsule")) unless @connect_buffer.empty?
-            break
+          begin
+            handle_capsule(type, payload)
+          ensure
+            if @received_close && !@connect_buffer.empty?
+              handle_capsule_error(Protocol::Capsule::ParseError.new("Data after close capsule"))
+            end
           end
+          break if @received_close
         end
       rescue Protocol::Capsule::ParseError => error
         handle_capsule_error(error)
