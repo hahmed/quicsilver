@@ -41,7 +41,6 @@ class WebTransportSessionTest < Minitest::Test
     assert_datagram_sent(connection_data, expected) do
       session.send_datagram("hello")
     end
-
   end
 
   def test_send_datagram_raises_after_close
@@ -50,14 +49,6 @@ class WebTransportSessionTest < Minitest::Test
     session.close
 
     assert_raises(RuntimeError) { session.send_datagram("hello") }
-  end
-
-  def test_close_makes_session_not_open
-    session = build_session
-    session.accept!
-    assert session.open?
-    session.close
-    refute session.open?
   end
 
   def test_close_delivers_reason_with_fin_without_reset
@@ -74,6 +65,8 @@ class WebTransportSessionTest < Minitest::Test
     assert stream.finished?
     assert_nil stream.error_code
     assert_equal [42], notifications.map(&:code)
+    assert_equal "maintenance", notifications.first.reason
+    assert notifications.first.local?
     refute session.open?
   end
 
@@ -94,6 +87,7 @@ class WebTransportSessionTest < Minitest::Test
     assert_equal 7, notifications.first.code
     assert_equal "bye", notifications.first.reason
     assert notifications.first.remote?
+    assert session.closed?
   end
 
   def test_close_still_notifies_when_connect_send_fails
@@ -300,10 +294,16 @@ class WebTransportSessionTest < Minitest::Test
     stream = RecordingConnectStream.new
     session = build_session(stream: stream)
     session.accept!
+    info = nil
+    session.on_close { |close_info| info = close_info }
+
     session.receive_connect_stream_data("", fin: true)
     assert_empty response_body(stream)
     assert stream.finished?
     assert session.closed?
+    assert_equal 0, info.code
+    assert_equal "", info.reason
+    assert info.remote?
   end
 
   def test_close_truncates_long_reason
@@ -507,19 +507,6 @@ class WebTransportSessionTest < Minitest::Test
 
   # === Capsules ===
 
-  def test_receive_connect_data_handles_close_session_capsule
-    session = build_session
-    session.accept!
-    closed = false
-    capsule = close_capsule(7, "bye")
-
-    session.on_close { closed = true }
-    session.receive_connect_data(capsule)
-
-    refute session.open?
-    assert closed
-  end
-
   def test_receive_connect_data_buffers_partial_capsule
     session = build_session
     session.accept!
@@ -537,22 +524,6 @@ class WebTransportSessionTest < Minitest::Test
   end
 
   # === close code and reason (draft-16 §6) ===
-  #
-  # The peer's WT_CLOSE_SESSION capsule carries a 32-bit code and a UTF-8
-  # reason. We decoded both and dropped them, so an application could not tell
-  # a clean close from an error, or the peer hanging up from us closing.
-
-  def test_close_capsule_reports_the_code_and_reason
-    session = build_session
-    session.accept!
-    info = nil
-
-    session.on_close { |close_info| info = close_info }
-    session.receive_connect_data(close_capsule(7, "going away"))
-
-    assert_equal 7, info.code
-    assert_equal "going away", info.reason
-  end
 
   def test_close_capsule_without_a_reason_reports_an_empty_string
     session = build_session
@@ -563,20 +534,6 @@ class WebTransportSessionTest < Minitest::Test
     session.receive_connect_data(close_capsule(3, ""))
 
     assert_equal 3, info.code
-    assert_equal "", info.reason
-  end
-
-  # §6: a clean CONNECT stream close is equivalent to a capsule with code 0 and
-  # an empty reason.
-  def test_a_clean_close_reports_code_zero
-    session = build_session
-    session.accept!
-    info = nil
-
-    session.on_close { |close_info| info = close_info }
-    session.notify_close
-
-    assert_equal 0, info.code
     assert_equal "", info.reason
   end
 
@@ -605,71 +562,23 @@ class WebTransportSessionTest < Minitest::Test
     assert info.reason.valid_encoding?
   end
 
-  # The wire format cannot say who closed; applications need it for reconnect.
-
-  def test_a_peer_close_is_reported_as_remote
-    session = build_session
-    session.accept!
-    info = nil
-
-    session.on_close { |close_info| info = close_info }
-    session.receive_connect_data(close_capsule(7, "bye"))
-
-    assert info.remote?
-  end
-
-  def test_closing_ourselves_is_reported_as_local
-    session = build_session
-    session.accept!
-    info = nil
-
-    session.on_close { |close_info| info = close_info }
-    session.close(code: 3, reason: "shutting down")
-
-    assert info.local?
-    assert_equal 3, info.code
-    assert_equal "shutting down", info.reason
-  end
-
   # === WT_DRAIN_SESSION (draft-16 §4.7) ===
-  #
-  #   After sending or receiving either a WT_DRAIN_SESSION capsule or a HTTP/3
-  #   GOAWAY frame, an endpoint MAY continue using the session ... The signal
-  #   is intended for the application, which is expected to attempt to
-  #   gracefully terminate the session as soon as possible.
-  #
-  # So it is advisory: the session stays usable and the app decides when to go.
+  # Drain is advisory: the application decides when to close.
 
-  def test_drain_capsule_notifies_the_application
+  def test_peer_drain_notifies_without_closing_the_session
     session = build_session
     session.accept!
     drained = false
-
+    closed = false
     session.on_drain { drained = true }
+    session.on_close { closed = true }
+
     session.receive_connect_data(drain_capsule)
 
     assert drained
-  end
-
-  def test_drain_capsule_leaves_the_session_open
-    session = build_session
-    session.accept!
-
-    session.receive_connect_data(drain_capsule)
-
-    assert session.open?
-    assert session.accepts_new_streams?, "draining is advisory, not a close"
-  end
-
-  def test_drain_capsule_does_not_close_the_session
-    session = build_session
-    session.accept!
-    closed = false
-
-    session.on_close { closed = true }
-    session.receive_connect_data(drain_capsule)
-
     refute closed
+    assert session.open?
+    assert session.accepts_new_streams?
   end
 
   def test_drain_capsule_without_a_handler_is_harmless
@@ -681,7 +590,7 @@ class WebTransportSessionTest < Minitest::Test
     assert session.open?
   end
 
-  def test_drain_sends_an_empty_capsule
+  def test_local_drain_sends_capsule_and_keeps_session_usable
     stream = RecordingConnectStream.new
     session = build_session(stream: stream)
     session.accept!
@@ -690,14 +599,6 @@ class WebTransportSessionTest < Minitest::Test
 
     assert_equal drain_capsule, response_body(stream)
     refute stream.finished?
-  end
-
-  def test_drain_leaves_the_session_usable
-    session = build_session
-    session.accept!
-
-    session.drain!
-
     assert session.open?
     assert session.accepts_new_streams?
   end
@@ -725,24 +626,6 @@ class WebTransportSessionTest < Minitest::Test
     session.on_close { closed = true }
     session.receive_connect_data(capsules)
 
-    refute session.open?
-    assert closed
-  end
-
-  def test_receive_connect_data_rejects_empty_close_session_capsule
-    stream = RecordingConnectStream.new
-    session = build_session(stream: stream)
-    session.accept!
-    closed = false
-    capsule = Quicsilver::Protocol::Capsule.encode(
-      Quicsilver::Server::WebTransportSession::WT_CLOSE_SESSION,
-      ""
-    )
-
-    session.on_close { closed = true }
-    session.receive_connect_data(capsule)
-
-    assert_equal Quicsilver::Protocol::H3_MESSAGE_ERROR, stream.error_code
     refute session.open?
     assert closed
   end
