@@ -254,13 +254,13 @@ module Quicsilver
       # Build control stream data
       # @param max_field_section_size [Integer, nil] Advertise SETTINGS_MAX_FIELD_SECTION_SIZE (0x06)
       #   to the peer (RFC 9114 §4.2.2 / §7.2.4.1). nil = don't advertise.
-      def build_control_stream(max_field_section_size: nil)
+      def build_control_stream(max_field_section_size: nil, datagram_receive_enabled: true)
         stream_type = [0x00].pack('C')  # Control stream type
         settings_hash = {
           SETTINGS_QPACK_MAX_TABLE_CAPACITY => 0,
           SETTINGS_QPACK_BLOCKED_STREAMS => 0,
           SETTINGS_ENABLE_CONNECT_PROTOCOL => 1,
-          SETTINGS_H3_DATAGRAM => 1,
+          SETTINGS_H3_DATAGRAM => datagram_receive_enabled ? 1 : 0,
           SETTINGS_ENABLE_WEBTRANSPORT => 1,
           SETTINGS_WT_ENABLED => 1,
           # No session flow control until its capsules are implemented.

@@ -16,6 +16,7 @@ module Quicsilver
       @hostname = hostname
       @port = port
       @unsecure = options.fetch(:unsecure, false)
+      @datagram_receive_enabled = options.fetch(:datagram_receive_enabled, true)
       @connection_timeout = options.fetch(:connection_timeout, DEFAULT_CONNECTION_TIMEOUT)
       @request_timeout = options.fetch(:request_timeout, DEFAULT_REQUEST_TIMEOUT)
       @max_body_size = options[:max_body_size]
@@ -196,7 +197,7 @@ module Quicsilver
       return self if @connected
 
       Quicsilver.open_connection
-      config = Quicsilver.create_configuration(@unsecure)
+      config = Quicsilver.create_configuration(@unsecure, @datagram_receive_enabled)
       raise ConnectionError, "Failed to create configuration" if config.nil?
 
       start_connection(config)
@@ -374,7 +375,7 @@ module Quicsilver
 
     def send_control_stream
       @control_stream = open_unidirectional_stream
-      @control_stream.send(Protocol.build_control_stream)
+      @control_stream.send(Protocol.build_control_stream(datagram_receive_enabled: @datagram_receive_enabled))
 
       [0x02, 0x03].each do |type|
         stream = open_unidirectional_stream

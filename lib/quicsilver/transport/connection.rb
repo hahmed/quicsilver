@@ -21,6 +21,10 @@ module Quicsilver
         @settings_received
       end
 
+      def datagram_send_enabled?
+        Quicsilver.connection_datagram_send_enabled?(@handle)
+      end
+
       def webtransport_settings_valid?(protocol)
         return false unless settings_received? && @settings[Protocol::SETTINGS_H3_DATAGRAM] == 1
 

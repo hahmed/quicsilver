@@ -779,7 +779,7 @@ module Quicsilver
     end
 
     def establish_webtransport(connection, request)
-      unless connection.webtransport_settings_valid?(request.headers[":protocol"])
+      unless connection.webtransport_settings_valid?(request.headers[":protocol"]) && connection.datagram_send_enabled?
         @webtransport.for(connection.handle).reject_stream(
           request.stream_id, request.stream_handle, error_code: Protocol::H3_MESSAGE_ERROR
         )

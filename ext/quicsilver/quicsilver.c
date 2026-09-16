@@ -719,8 +719,12 @@ quicsilver_open(VALUE self)
 
 // Create a QUIC configuration (for client connections)
 static VALUE
-quicsilver_create_configuration(VALUE self, VALUE unsecure)
+quicsilver_create_configuration(int argc, VALUE *argv, VALUE self)
 {
+    VALUE unsecure, datagram_receive_enabled;
+    rb_scan_args(argc, argv, "11", &unsecure, &datagram_receive_enabled);
+    if (argc == 1) datagram_receive_enabled = Qtrue;
+
     if (MsQuic == NULL) {
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized. Call Quicsilver.open_connection first.");
         return Qnil;
@@ -733,7 +737,7 @@ quicsilver_create_configuration(VALUE self, VALUE unsecure)
     QUIC_SETTINGS Settings = {0};
     Settings.IdleTimeoutMs = 10000; // 10 second idle timeout to match server
     Settings.IsSet.IdleTimeoutMs = TRUE;
-    Settings.DatagramReceiveEnabled = TRUE;
+    Settings.DatagramReceiveEnabled = RTEST(datagram_receive_enabled);
     Settings.IsSet.DatagramReceiveEnabled = TRUE;
     
     // Simple ALPN for now - Ruby can customize this later
@@ -1233,6 +1237,22 @@ connection_param_bytes(VALUE connection_handle_val, uint32_t param)
     }
 
     return rb_str_new((const char*)buffer, buffer_size);
+}
+
+// MsQuic derives this from the peer's max_datagram_frame_size transport parameter.
+static VALUE
+quicsilver_connection_datagram_send_enabled(VALUE self, VALUE connection_handle_val)
+{
+    if (MsQuic == NULL) return Qfalse;
+
+    HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle_val);
+    if (Connection == NULL) return Qfalse;
+
+    BOOLEAN enabled = FALSE;
+    uint32_t size = sizeof(enabled);
+    QUIC_STATUS status = MsQuic->GetParam(
+        Connection, QUIC_PARAM_CONN_DATAGRAM_SEND_ENABLED, &size, &enabled);
+    return QUIC_SUCCEEDED(status) && enabled ? Qtrue : Qfalse;
 }
 
 // Returns [ip_string, port] or nil.
@@ -1896,7 +1916,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "close_connection", quicsilver_close, 0);
     
     // Configuration management
-    rb_define_singleton_method(mQuicsilver, "create_configuration", quicsilver_create_configuration, 1);
+    rb_define_singleton_method(mQuicsilver, "create_configuration", quicsilver_create_configuration, -1);
     rb_define_singleton_method(mQuicsilver, "create_server_configuration", quicsilver_create_server_configuration, 1);
     rb_define_singleton_method(mQuicsilver, "close_configuration", quicsilver_close_configuration, 1);
     
@@ -1907,6 +1927,7 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "connection_statistics", quicsilver_connection_statistics, 1);
     rb_define_singleton_method(mQuicsilver, "transport_counters", quicsilver_transport_counters, 0);
+    rb_define_singleton_method(mQuicsilver, "connection_datagram_send_enabled?", quicsilver_connection_datagram_send_enabled, 1);
     rb_define_singleton_method(mQuicsilver, "connection_remote_address", quicsilver_connection_remote_address, 1);
     rb_define_singleton_method(mQuicsilver, "connection_ids", quicsilver_connection_ids, 1);
     rb_define_singleton_method(mQuicsilver, "get_resumption_ticket", quicsilver_get_resumption_ticket, 1);

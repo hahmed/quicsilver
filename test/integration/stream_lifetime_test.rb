@@ -304,6 +304,27 @@ class StreamLifetimeTest < Minitest::Test
     end
   end
 
+  def test_client_can_disable_datagrams_and_still_use_http
+    @client.disconnect
+    @client = RecordingClient.new("localhost", @port, unsecure: true, datagram_receive_enabled: false)
+
+    assert_equal 200, @client.get("/").status
+    refute @server_connection.datagram_send_enabled?
+    refute @server_connection.webtransport_settings_valid?("webtransport-h3")
+  end
+
+  def test_http_datagram_setting_cannot_replace_quic_datagram_negotiation
+    ["webtransport-h3", "webtransport"].each do |protocol|
+      connect_without_settings(datagram_receive_enabled: false)
+      @client.send_settings(webtransport_settings)
+      peer = open_connect_stream(protocol: protocol)
+
+      assert_connect_rejected(peer, Quicsilver::Protocol::H3_MESSAGE_ERROR)
+      assert @wt_sessions.empty?, "HTTP SETTINGS alone must not admit WebTransport"
+      assert_equal 200, @client.get("/").status
+    end
+  end
+
   def test_legacy_connect_accepts_datagram_settings_without_draft16_flag
     connect_without_settings
     @client.send_settings(0x33 => 1)
@@ -618,9 +639,9 @@ class StreamLifetimeTest < Minitest::Test
 
   private
 
-  def connect_without_settings
+  def connect_without_settings(**options)
     @client&.disconnect
-    @client = SettingsClient.new("localhost", @port, unsecure: true, request_timeout: 3)
+    @client = SettingsClient.new("localhost", @port, unsecure: true, request_timeout: 3, **options)
     assert_equal 200, @client.get("/").status
     @server.record_receives_for = :all
   end
