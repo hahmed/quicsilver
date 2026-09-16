@@ -172,7 +172,11 @@ class HTTP3Test < Minitest::Test
     settings = parse_settings(bytes[1 + type_len + length_len, frame_length])
 
     assert_equal 1, settings[0x2b603742], "SETTINGS_ENABLE_WEBTRANSPORT must be 1"
-    assert_equal 100, settings[0x14e9cd29], "SETTINGS_WT_MAX_SESSIONS must be advertised"
+    assert_equal 1, settings[0x2c7cf000], "SETTINGS_WT_ENABLED must be 1"
+    assert_equal 1, settings[0x14e9cd29], "Legacy peers must see the single-session limit"
+    [0x2b61, 0x2b64, 0x2b65].each do |setting|
+      assert_equal 0, settings.fetch(setting, 0), "Do not negotiate unimplemented session flow control"
+    end
   end
 
   # === GREASE (RFC 9114) ===

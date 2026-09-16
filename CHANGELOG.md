@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- WebTransport permits one active session per QUIC connection until session flow control is implemented. Additional CONNECT requests are rejected with `H3_REQUEST_REJECTED`; closing a session allows another. SETTINGS no longer advertise session flow-control credit, and the legacy session limit is one.
 - WebTransport `close(code:, reason:)` rejects invalid UTF-8 and codes outside the unsigned 32-bit range before changing session state. Valid UTF-8 binary strings remain supported; long valid reasons are truncated at a UTF-8 character boundary.
 
 ## [0.5.0] - 2026-05-08

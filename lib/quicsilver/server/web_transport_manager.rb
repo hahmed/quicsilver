@@ -98,11 +98,11 @@ module Quicsilver
         @stream_states[stream_id] == :rejected
       end
 
-      def reject_stream(stream_id, stream_handle)
+      def reject_stream(stream_id, stream_handle, error_code: Protocol::WebTransport::BUFFERED_STREAM_REJECTED)
         @pending_streams.delete(stream_id)
         @pending_uni_streams.delete(stream_id)
         @stream_states[stream_id] = :rejected
-        Transport::Stream.new(stream_handle).abort(Protocol::WebTransport::BUFFERED_STREAM_REJECTED)
+        Transport::Stream.new(stream_handle).abort(error_code)
         nil
       end
 

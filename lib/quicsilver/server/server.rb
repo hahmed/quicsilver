@@ -908,10 +908,14 @@ module Quicsilver
       pending.frame_buffer = buf
     end
 
-    # Heuristic: check if raw data starts with an HTTP/3 HEADERS frame (type 0x01).
-    # QUIC typically delivers complete frames, but if this misidentifies data,
-    # the parser will fail safely in dispatch_streaming's rescue handlers.
     def accept_webtransport(connection, connection_handle, stream_id, stream_handle, headers, early_data: false)
+      # Draft-16 §5.1 forbids concurrent sessions without session flow control.
+      manager = @webtransport.for(connection_handle)
+      if manager.routable_sessions.any?
+        manager.reject_stream(stream_id, stream_handle, error_code: Protocol::H3_REQUEST_REJECTED)
+        return
+      end
+
       Quicsilver.logger.debug(
         "WebTransport CONNECT stream=#{stream_id} path=#{headers[":path"].inspect} " \
         "authority=#{headers[":authority"].inspect} headers=#{headers.inspect}"

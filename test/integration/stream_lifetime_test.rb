@@ -221,6 +221,43 @@ class StreamLifetimeTest < Minitest::Test
     assert_raises(ArgumentError) { Quicsilver.set_stream_priority(incoming.handle, 65_536) }
   end
 
+  def test_second_session_is_rejected_without_affecting_the_first
+    peer, session = open_webtransport_session
+
+    rejected = open_connect_stream
+    reset = await_event(@client, "STREAM_RESET")
+    assert_equal rejected.handle, decode_event(reset).handle
+    assert_equal Quicsilver::Protocol::H3_REQUEST_REJECTED, decode_event(reset).error_code
+    stopped = await_event(@client, "STOP_SENDING", reset.first)
+    assert_equal Quicsilver::Protocol::H3_REQUEST_REJECTED, decode_event(stopped).error_code
+    await_event(@client, "STREAM_SHUTDOWN_COMPLETE", reset.first)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", reset.first)
+    assert @wt_sessions.empty?, "Excess CONNECT must not reach the Rack app"
+    assert session.open?
+    assert_equal 200, @client.get("/").status
+
+    session.close(code: 7, reason: "still usable")
+    response = read_connect_response_until_fin(session.stream_id)
+    assert_equal close_capsule(code: 7, reason: "still usable"), response.body.read
+    peer.send("", fin: true)
+  end
+
+  def test_closing_a_session_allows_another_on_the_same_connection
+    peer, session = open_webtransport_session
+    session.close
+    read_connect_response_until_fin(session.stream_id)
+    peer.send("", fin: true)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
+
+    replacement_peer, replacement = open_webtransport_session
+
+    assert replacement.open?
+    refute_equal session.stream_id, replacement.stream_id
+    replacement.close
+    assert_equal 200, read_connect_response_until_fin(replacement.stream_id).status
+    replacement_peer.send("", fin: true)
+  end
+
   def test_close_alongside_connect_headers_reaches_the_session
     peer, session = open_webtransport_session(
       initial_data: data_frame(close_capsule(code: 9, reason: "coalesced"))
@@ -407,8 +444,15 @@ class StreamLifetimeTest < Minitest::Test
     assert_equal 200, @client.get("/").status
   end
 
-  # Initial data shares the same send as HEADERS to exercise CONNECT handoff.
   def open_webtransport_session(initial_data: "".b)
+    peer = open_connect_stream(initial_data: initial_data)
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "CONNECT did not reach Rack acceptance"
+    [peer, session]
+  end
+
+  # Initial data shares the same send as HEADERS to exercise CONNECT handoff.
+  def open_connect_stream(initial_data: "".b)
     connection = @client.instance_variable_get(:@connection_data)
     peer = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
     headers = Quicsilver::Protocol.build_headers_frame([
@@ -416,9 +460,7 @@ class StreamLifetimeTest < Minitest::Test
       [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
     ])
     peer.send(headers + initial_data)
-    session = @wt_sessions.pop(timeout: 3)
-    refute_nil session, "CONNECT did not reach Rack acceptance"
-    [peer, session]
+    peer
   end
 
   def read_connect_response_until_fin(stream_id)
