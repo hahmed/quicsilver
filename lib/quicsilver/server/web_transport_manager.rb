@@ -11,12 +11,16 @@ module Quicsilver
     #
     # Scoped to a single connection — see WebTransportRegistry.
     class WebTransportManager
+      MAX_PENDING_CONNECT_BYTES = 65_536
+      ConnectRequest = Struct.new(:stream_id, :stream_handle, :headers, :data, :early_data, :fin, keyword_init: true)
+
       def initialize
         @sessions = {}
         @pending_streams = {}
         @stream_states = {}
         @starting_streams = {}
         @pending_uni_streams = {}
+        @pending_connect = nil
       end
 
       def sessions
@@ -29,7 +33,31 @@ module Quicsilver
       end
 
       def unregister(stream_id)
+        @pending_connect = nil if @pending_connect&.stream_id == stream_id
         @sessions.delete(stream_id)
+      end
+
+      def defer_connect(request)
+        if @pending_connect || routable_sessions.any?
+          return reject_stream(request.stream_id, request.stream_handle, error_code: Protocol::H3_REQUEST_REJECTED)
+        end
+        @pending_connect = request
+        @stream_states[request.stream_id] = :pending_connect
+        receive_pending_connect("", fin: request.fin)
+      end
+
+      def take_pending_connect
+        request = @pending_connect
+        @pending_connect = nil
+        @stream_states.delete(request.stream_id) if request
+        request
+      end
+
+      def cancel_pending_connect(stream_id, stream_handle)
+        return false unless @pending_connect&.stream_id == stream_id
+
+        reject_stream(stream_id, stream_handle, error_code: Protocol::H3_REQUEST_CANCELLED)
+        true
       end
 
       def session(stream_id)
@@ -57,7 +85,9 @@ module Quicsilver
       end
 
       def route_owned_stream(stream_id, stream_handle, payload, fin: false)
-        if (session = @sessions[stream_id])
+        if @pending_connect&.stream_id == stream_id
+          receive_pending_connect(payload, fin: fin)
+        elsif (session = @sessions[stream_id])
           session.receive_connect_stream_data(payload, fin: fin)
         elsif known_stream?(stream_id)
           if (stream = active_stream(stream_id))
@@ -99,6 +129,7 @@ module Quicsilver
       end
 
       def reject_stream(stream_id, stream_handle, error_code: Protocol::WebTransport::BUFFERED_STREAM_REJECTED)
+        @pending_connect = nil if @pending_connect&.stream_id == stream_id
         @pending_streams.delete(stream_id)
         @pending_uni_streams.delete(stream_id)
         @stream_states[stream_id] = :rejected
@@ -107,6 +138,7 @@ module Quicsilver
       end
 
       def stream_shutdown_complete(stream_id, handle: nil)
+        @pending_connect = nil if @pending_connect&.stream_id == stream_id
         starting = @starting_streams.delete(handle)
         starting&.session&.remove_starting_stream(handle)
         @pending_uni_streams.delete(stream_id)
@@ -200,6 +232,16 @@ module Quicsilver
       end
 
       private
+
+      def receive_pending_connect(payload, fin:)
+        request = @pending_connect
+        if request.data.bytesize + payload.bytesize > MAX_PENDING_CONNECT_BYTES
+          return reject_stream(request.stream_id, request.stream_handle, error_code: Protocol::H3_EXCESSIVE_LOAD)
+        end
+
+        request.data << payload
+        request.fin ||= fin
+      end
 
       def owning_session(stream_id)
         session_id = @stream_states[stream_id]

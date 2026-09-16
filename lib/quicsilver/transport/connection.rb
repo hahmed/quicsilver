@@ -16,6 +16,18 @@ module Quicsilver
       attr_reader :peer_goaway_id, :local_goaway_id
       attr_reader :stream_priorities
       attr_reader :remote_address, :remote_port, :session_resumed
+
+      def settings_received?
+        @settings_received
+      end
+
+      def webtransport_settings_valid?(protocol)
+        return false unless settings_received? && @settings[Protocol::SETTINGS_H3_DATAGRAM] == 1
+
+        # Compatibility path: the legacy token does not require the newer flag.
+        protocol == Protocol::WebTransport::PROTOCOL_LEGACY || @settings[Protocol::SETTINGS_WT_ENABLED] == 1
+      end
+
       def initialize(handle, data, max_header_size: nil, connection_id: nil, transport_server_id: nil)
         @handle = handle
         @data = data

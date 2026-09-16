@@ -19,8 +19,9 @@ module Quicsilver
       #
       # draft-ietf-webtrans-http3-16 §3.2 requires "webtransport-h3". The bare
       # "webtransport" token identifies the capsule-based HTTP/2 binding
-      # (§2.1.2) and was what pre-15 drafts used over HTTP/3; Chrome still
-      # sends it, so both are accepted.
+      # (§2.1.2) and was what pre-15 drafts used over HTTP/3. We retain it
+      # for legacy interoperability; the token alone does not identify a
+      # browser version or prove support for every feature of an older draft.
       PROTOCOL = "webtransport-h3"
       PROTOCOL_LEGACY = "webtransport"
 

@@ -397,6 +397,7 @@ module Quicsilver
         return unless (connection = @connections[connection_handle])
         event = Transport::StreamEvent.new(data, "STOP_SENDING")
         Quicsilver.logger.debug("Stream #{stream_id} stop sending requested with error code: 0x#{event.error_code.to_s(16)}")
+        return if @webtransport.for(connection_handle).cancel_pending_connect(stream_id, event.handle)
 
         # §4.4: STOP_SENDING on a WebTransport stream is delivered to the
         # application, like RESET_STREAM. Without this it falls through to the
@@ -583,6 +584,9 @@ module Quicsilver
           if stream_type == :webtransport_uni
             route_wt_uni_stream(connection_handle, stream_id, stream_handle, stream_payload)
           end
+          if connection.settings_received? && (request = @webtransport.for(connection_handle).take_pending_connect)
+            establish_webtransport(connection, request)
+          end
         rescue Protocol::FrameError => e
           Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
           Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
@@ -651,7 +655,8 @@ module Quicsilver
 
       if stream.bidirectional?
         connection.track_client_stream(stream_id)
-        dispatch_request(connection, stream, early_data: early_data)
+        dispatch_streaming(connection, connection_handle, stream_id, full_data,
+          stream_handle: event.handle, early_data: early_data, completed_stream: stream)
       else
         begin
           stream_type, payload = connection.handle_unidirectional_stream(stream)
@@ -702,9 +707,9 @@ module Quicsilver
       end
     end
 
-    # Streaming dispatch: parse headers from first RECEIVE, dispatch immediately.
-    # Body data arrives via subsequent RECEIVE events into StreamInput.
-    def dispatch_streaming(connection, connection_handle, stream_id, data, stream_handle: nil, early_data: false)
+    # Admit requests when headers arrive, whether or not FIN accompanies them.
+    # Completed HTTP requests keep their normal worker dispatch.
+    def dispatch_streaming(connection, connection_handle, stream_id, data, stream_handle: nil, early_data: false, completed_stream: nil)
       parser = Protocol::RequestParser.new(
         data,
         max_header_size: @server_configuration.max_header_size,
@@ -715,7 +720,10 @@ module Quicsilver
       parser.validate_headers!
 
       headers = parser.headers
-      return if headers.empty?
+      if headers.empty?
+        dispatch_request(connection, completed_stream, early_data: early_data) if completed_stream
+        return
+      end
 
       # RFC 9114 §5.2: Reject requests on streams at or above the GOAWAY stream ID
       if connection.local_goaway_id && stream_id >= connection.local_goaway_id
@@ -733,7 +741,9 @@ module Quicsilver
 
       if method == "CONNECT" && Protocol::WebTransport.protocol?(headers[":protocol"])
         dispatch_webtransport_connect(connection, stream_id, headers, data,
-          stream_handle: stream_handle, early_data: early_data)
+          stream_handle: stream_handle, early_data: early_data, fin: !completed_stream.nil?)
+      elsif completed_stream
+        dispatch_request(connection, completed_stream, early_data: early_data)
       else
         enqueue_streaming_request(connection, stream_id, parser, data,
           stream_handle: stream_handle, early_data: early_data)
@@ -742,21 +752,43 @@ module Quicsilver
       Quicsilver.logger.error("Frame error: #{e.message}")
       Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
     rescue Protocol::MessageError => e
-      Quicsilver.logger.error("Message error on stream #{stream_id}: #{e.message}")
+      if completed_stream
+        dispatch_request(connection, completed_stream, early_data: early_data)
+      else
+        Quicsilver.logger.error("Message error on stream #{stream_id}: #{e.message}")
+      end
     rescue => e
       Quicsilver.logger.error("Error in streaming dispatch: #{e.class} - #{e.message}")
     end
 
-    def dispatch_webtransport_connect(connection, stream_id, headers, data, stream_handle:, early_data:)
-      session = accept_webtransport(connection, connection.handle, stream_id, stream_handle, headers, early_data: early_data)
-      return unless session
-
+    def dispatch_webtransport_connect(connection, stream_id, headers, data, stream_handle:, early_data:, fin: false)
       # Validated HEADERS exist. Preserve following bytes, including partial
       # frames, for the session's incremental CONNECT decoder.
       header_end = Protocol::FrameReader.each(data) do |type, _payload, offset|
         break offset if type == Protocol::FRAME_HEADERS
       end
-      session.receive_connect_stream_data(data.byteslice(header_end..))
+      request = WebTransportManager::ConnectRequest.new(
+        stream_id: stream_id, stream_handle: stream_handle, headers: headers,
+        data: data.byteslice(header_end..), early_data: early_data, fin: fin
+      )
+      if connection.settings_received?
+        establish_webtransport(connection, request)
+      else
+        @webtransport.for(connection.handle).defer_connect(request)
+      end
+    end
+
+    def establish_webtransport(connection, request)
+      unless connection.webtransport_settings_valid?(request.headers[":protocol"])
+        @webtransport.for(connection.handle).reject_stream(
+          request.stream_id, request.stream_handle, error_code: Protocol::H3_MESSAGE_ERROR
+        )
+        return
+      end
+
+      session = accept_webtransport(connection, connection.handle, request.stream_id,
+        request.stream_handle, request.headers, early_data: request.early_data)
+      session&.receive_connect_stream_data(request.data, fin: request.fin)
     end
 
     def enqueue_streaming_request(connection, stream_id, parser, data, stream_handle:, early_data:)

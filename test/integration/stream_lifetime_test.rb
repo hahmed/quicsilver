@@ -20,6 +20,18 @@ class StreamLifetimeTest < Minitest::Test
     end
   end
 
+  class SettingsClient < RecordingClient
+    def send_settings(settings)
+      @control_stream.send("\x00".b + Quicsilver::Protocol.build_settings_frame(settings))
+    end
+
+    private
+
+    def send_control_stream
+      @control_stream = open_unidirectional_stream
+    end
+  end
+
   class RecordingServer < Quicsilver::Server
     attr_reader :events
     attr_writer :record_receives_for
@@ -32,7 +44,7 @@ class StreamLifetimeTest < Minitest::Test
     end
 
     def handle_stream_event(connection, stream_id, event, data, early_data)
-      record_receive = event == "RECEIVE" && stream_id == @record_receives_for
+      record_receive = %w[RECEIVE RECEIVE_FIN].include?(event) && (@record_receives_for == :all || stream_id == @record_receives_for)
       key = [connection.first, stream_id]
       if %w[RECEIVE RECEIVE_FIN].include?(event) && Quicsilver::Transport::StreamEvent.new(data, event).data.start_with?(MARKER)
         @test_streams[key] = true
@@ -219,6 +231,173 @@ class StreamLifetimeTest < Minitest::Test
     assert Quicsilver.set_stream_priority(incoming.handle, 0)
     assert Quicsilver.set_stream_priority(incoming.handle, 65_535)
     assert_raises(ArgumentError) { Quicsilver.set_stream_priority(incoming.handle, 65_536) }
+  end
+
+  def test_connect_waits_for_settings_and_preserves_close_data_and_fin
+    connect_without_settings
+    peer = open_connect_stream
+    id = await_connect_received(peer)
+    assert @wt_sessions.empty?, "CONNECT must wait for peer SETTINGS"
+
+    peer.send(data_frame(close_capsule(code: 7, reason: "waiting")), fin: true)
+    await_event(@server, "RECEIVE_FIN", id)
+    assert @wt_sessions.empty?
+    @client.send_settings(webtransport_settings)
+
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "SETTINGS did not release the pending CONNECT"
+    info = @wt_closes.pop(timeout: 3)
+    refute_nil info
+    assert_equal 7, info.code
+    assert_equal "waiting", info.reason
+    assert_equal 200, read_connect_response_until_fin(id).status
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+  end
+
+  def test_connect_sent_with_fin_waits_for_settings
+    connect_without_settings
+    open_connect_stream(fin: true)
+    received = await_event(@server, "RECEIVE_FIN")
+    assert @wt_sessions.empty?, "FIN must not bypass the SETTINGS gate"
+
+    @client.send_settings(webtransport_settings)
+
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "SETTINGS did not release CONNECT sent with FIN"
+    assert_equal received.first, session.stream_id
+    assert_equal 0, @wt_closes.pop(timeout: 3)&.code
+    assert_equal 200, read_connect_response_until_fin(session.stream_id).status
+  end
+
+  def test_connect_sent_with_fin_is_rejected_without_required_settings
+    connect_without_settings
+    @client.send_settings({})
+    peer = open_connect_stream(fin: true)
+
+    assert_connect_rejected(peer, Quicsilver::Protocol::H3_MESSAGE_ERROR)
+    assert @wt_sessions.empty?
+    assert_equal 200, @client.get("/").status
+  end
+
+  def test_completed_http_request_still_resets_on_invalid_headers
+    connection = @client.instance_variable_get(:@connection_data)
+    peer = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
+    headers = Quicsilver::Protocol.build_headers_frame([
+      [":method", "GET"], [":scheme", "https"], [":authority", "localhost"]
+    ])
+    peer.send(headers, fin: true) # Missing required :path.
+
+    reset = await_event(@client, "STREAM_RESET", handle: peer.handle)
+    assert_equal Quicsilver::Protocol::H3_MESSAGE_ERROR, decode_event(reset).error_code
+    assert_equal 200, @client.get("/").status
+  end
+
+  def test_missing_webtransport_settings_reject_connect_before_rack
+    [{}, {0x33 => 1}, {0x2c7cf000 => 1}, {0x33 => 1, 0x2c7cf000 => 0}].each do |settings|
+      connect_without_settings
+      @client.send_settings(settings)
+      peer = open_connect_stream
+
+      assert_connect_rejected(peer, Quicsilver::Protocol::H3_MESSAGE_ERROR)
+      assert @wt_sessions.empty?
+      assert_equal 200, @client.get("/").status
+    end
+  end
+
+  def test_legacy_connect_accepts_datagram_settings_without_draft16_flag
+    connect_without_settings
+    @client.send_settings(0x33 => 1)
+    peer = open_connect_stream(protocol: "webtransport")
+
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "Legacy CONNECT with datagram support was rejected"
+    session.close
+    assert_equal 200, read_connect_response_until_fin(session.stream_id).status
+    peer.send("", fin: true)
+  end
+
+  def test_invalid_settings_reject_an_already_waiting_connect
+    connect_without_settings
+    peer = open_connect_stream
+    await_connect_received(peer)
+    assert @wt_sessions.empty?
+
+    @client.send_settings({})
+
+    assert_connect_rejected(peer, Quicsilver::Protocol::H3_MESSAGE_ERROR)
+    assert @wt_sessions.empty?
+  end
+
+  def test_waiting_connect_buffer_is_bounded
+    connect_without_settings
+    peer = open_connect_stream
+    await_connect_received(peer)
+
+    peer.send(data_frame("x" * 65_537))
+
+    assert_connect_rejected(peer, Quicsilver::Protocol::H3_EXCESSIVE_LOAD)
+    @client.send_settings(webtransport_settings)
+    assert_equal 200, @client.get("/").status
+    assert @wt_sessions.empty?, "An overflowed CONNECT must never reach Rack"
+    open_webtransport_session
+  end
+
+  def test_only_one_connect_can_wait_for_settings
+    connect_without_settings
+    first = open_connect_stream
+    id = await_connect_received(first)
+    second = open_connect_stream
+
+    assert_connect_rejected(second, Quicsilver::Protocol::H3_REQUEST_REJECTED)
+    @client.send_settings(webtransport_settings)
+
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session
+    assert_equal id, session.stream_id
+    assert @wt_sessions.empty?
+  end
+
+  def test_reset_discards_connect_waiting_for_settings
+    connect_without_settings
+    peer = open_connect_stream
+    id = await_connect_received(peer)
+    peer.abort(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+
+    @client.send_settings(webtransport_settings)
+    _, replacement = open_webtransport_session
+
+    refute_equal id, replacement.stream_id
+    assert @wt_sessions.empty?, "Reset CONNECT must not be replayed after SETTINGS"
+  end
+
+  def test_stop_sending_discards_connect_waiting_for_settings
+    connect_without_settings
+    peer = open_connect_stream
+    id = await_connect_received(peer)
+    peer.stop_sending(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+
+    @client.send_settings(webtransport_settings)
+    _, replacement = open_webtransport_session
+
+    refute_equal id, replacement.stream_id
+    assert @wt_sessions.empty?, "Cancelled CONNECT must not be replayed after SETTINGS"
+  end
+
+  def test_connection_close_discards_connect_waiting_for_settings
+    connect_without_settings
+    peer = open_connect_stream
+    await_connect_received(peer)
+    previous_connection = @server_connection.handle
+    @server_connection.shutdown
+    await_event(@server, "CONNECTION_CLOSED", connection: previous_connection)
+    @client.disconnect
+
+    connect_client
+    open_webtransport_session
+
+    assert @wt_sessions.empty?, "Disconnected CONNECT must not reach the Rack app"
   end
 
   def test_second_session_is_rejected_without_affecting_the_first
@@ -439,6 +618,29 @@ class StreamLifetimeTest < Minitest::Test
 
   private
 
+  def connect_without_settings
+    @client&.disconnect
+    @client = SettingsClient.new("localhost", @port, unsecure: true, request_timeout: 3)
+    assert_equal 200, @client.get("/").status
+    @server.record_receives_for = :all
+  end
+
+  def webtransport_settings
+    {0x33 => 1, 0x2c7cf000 => 1}
+  end
+
+  def await_connect_received(peer)
+    started = await_event(@client, "STREAM_START_COMPLETE", handle: peer.handle)
+    await_event(@server, "RECEIVE", started.first)
+    started.first
+  end
+
+  def assert_connect_rejected(peer, code)
+    reset = await_event(@client, "STREAM_RESET", handle: peer.handle)
+    assert_equal code, decode_event(reset).error_code
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", reset.first)
+  end
+
   def connect_client
     @client = RecordingClient.new("localhost", @port, unsecure: true, request_timeout: 3)
     assert_equal 200, @client.get("/").status
@@ -452,14 +654,14 @@ class StreamLifetimeTest < Minitest::Test
   end
 
   # Initial data shares the same send as HEADERS to exercise CONNECT handoff.
-  def open_connect_stream(initial_data: "".b)
+  def open_connect_stream(initial_data: "".b, protocol: "webtransport-h3", fin: false)
     connection = @client.instance_variable_get(:@connection_data)
     peer = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
     headers = Quicsilver::Protocol.build_headers_frame([
-      [":method", "CONNECT"], [":protocol", "webtransport-h3"],
+      [":method", "CONNECT"], [":protocol", protocol],
       [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
     ])
-    peer.send(headers + initial_data)
+    peer.send(headers + initial_data, fin: fin)
     peer
   end
 
@@ -524,7 +726,7 @@ class StreamLifetimeTest < Minitest::Test
     assert_raises(IOError) { stream.send("late") }
   end
 
-  def await_event(endpoint, type, id = nil, connection: nil)
+  def await_event(endpoint, type, id = nil, connection: nil, handle: nil)
     connection ||= @server_connection.handle if endpoint.equal?(@server)
     inbox = @inbox[endpoint]
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
@@ -532,7 +734,8 @@ class StreamLifetimeTest < Minitest::Test
     loop do
       index = inbox.index do |event|
         types.include?(event[1]) && (id.nil? || event[0] == id) &&
-          (connection.nil? || event[3] == connection)
+          (connection.nil? || event[3] == connection) &&
+          (handle.nil? || decode_event(event).handle == handle)
       end
       return inbox.delete_at(index) if index
 
