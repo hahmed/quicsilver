@@ -731,23 +731,38 @@ module Quicsilver
         "authority=#{headers[":authority"].inspect} headers=#{headers.inspect}"
       )
 
-      # WebTransport: intercept before normal request dispatch.
-      # The CONNECT stream stays open (no FIN) — it becomes the session.
       if method == "CONNECT" && Protocol::WebTransport.protocol?(headers[":protocol"])
-        session = accept_webtransport(connection, connection_handle, stream_id, stream_handle, headers, early_data: early_data)
-        if session
-          # Initial CONNECT headers and capsule DATA can share a receive event.
-          # Preserve even a partial following frame for the session decoder.
-          # The parser above validated nonempty headers, so this frame exists.
-          header_end = catch(:headers_end) do
-            Protocol::FrameReader.each(data) do |type, _payload, offset|
-              throw :headers_end, offset if type == Protocol::FRAME_HEADERS
-            end
-          end
-          session.receive_connect_stream_data(data.byteslice(header_end..))
-        end
-        return
+        dispatch_webtransport_connect(connection, stream_id, headers, data,
+          stream_handle: stream_handle, early_data: early_data)
+      else
+        enqueue_streaming_request(connection, stream_id, parser, data,
+          stream_handle: stream_handle, early_data: early_data)
       end
+    rescue Protocol::FrameError => e
+      Quicsilver.logger.error("Frame error: #{e.message}")
+      Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
+    rescue Protocol::MessageError => e
+      Quicsilver.logger.error("Message error on stream #{stream_id}: #{e.message}")
+    rescue => e
+      Quicsilver.logger.error("Error in streaming dispatch: #{e.class} - #{e.message}")
+    end
+
+    def dispatch_webtransport_connect(connection, stream_id, headers, data, stream_handle:, early_data:)
+      session = accept_webtransport(connection, connection.handle, stream_id, stream_handle, headers, early_data: early_data)
+      return unless session
+
+      # Validated HEADERS exist. Preserve following bytes, including partial
+      # frames, for the session's incremental CONNECT decoder.
+      header_end = Protocol::FrameReader.each(data) do |type, _payload, offset|
+        break offset if type == Protocol::FRAME_HEADERS
+      end
+      session.receive_connect_stream_data(data.byteslice(header_end..))
+    end
+
+    def enqueue_streaming_request(connection, stream_id, parser, data, stream_handle:, early_data:)
+      connection_handle = connection.handle
+      headers = parser.headers
+      method = headers[":method"]
 
       if @server_configuration.early_data_policy == :reject &&
          early_data && !RequestHandler::SAFE_METHODS.include?(method)
@@ -755,10 +770,7 @@ module Quicsilver
         return
       end
 
-      # Shed before registering any state. Checking capacity after tracking the
-      # stream would leave @request_registry and connection.streams entries that
-      # nothing later completes, so an overloaded server would keep reporting
-      # in-flight work it is not doing.
+      # Reject before tracking the request so overload cannot leave orphaned state.
       if @scheduler.full?
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), shedding stream #{stream_id}")
         send_stream_error(connection, stream_id, stream_handle, 503, "Service Unavailable")
@@ -773,15 +785,9 @@ module Quicsilver
       )
       request.headers.add("quicsilver-early-data", early_data.to_s)
 
-      # Feed body data from the first RECEIVE.
-      # The parser consumed complete frames (HEADERS + any complete DATA frames).
-      if body
-        # Complete DATA frames the parser extracted
-        if parser.body && parser.body.size > 0
-          parser.body.rewind
-          body_data = parser.body.read
-          body.write(body_data) unless body_data.empty?
-        end
+      # Copy complete DATA payloads; partial frames stay in the pending buffer.
+      if body && parser.body.size > 0
+        body.write(parser.body.read)
       end
 
       pending = PendingStream.new(
@@ -805,13 +811,6 @@ module Quicsilver
         path: headers[":path"] || "/", method: method || "GET")
 
       @scheduler.enqueue([:streaming, pending])
-    rescue Protocol::FrameError => e
-      Quicsilver.logger.error("Frame error: #{e.message}")
-      Quicsilver.connection_shutdown(connection_handle, e.error_code, false) rescue nil
-    rescue Protocol::MessageError => e
-      Quicsilver.logger.error("Message error on stream #{stream_id}: #{e.message}")
-    rescue => e
-      Quicsilver.logger.error("Error in streaming dispatch: #{e.class} - #{e.message}")
     end
 
     def handle_streaming_request(pending)
