@@ -639,24 +639,49 @@ class StreamLifetimeTest < Minitest::Test
     assert_equal 200, @client.get("/").status
   end
 
-  def test_session_shutdown_aborts_bidi_and_receive_only_children
-    _, bidi, bidi_id = open_stream
-    _, uni, uni_id = open_stream(unidirectional: true)
-    session = Quicsilver::Server::WebTransportSession.new(
-      connection: @server_connection, stream: bidi, headers: {}
-    )
-    session.add_stream(bidi.handle, bidi_id)
-    session.add_uni_stream(uni.handle, uni_id)
+  def test_server_reset_leaves_sibling_stream_and_datagrams_usable
+    _, session = open_webtransport_session
+    _, reset_stream = open_webtransport_child(session)
+    sibling_peer, sibling = open_webtransport_child(session)
 
-    session.notify_close
-    session.notify_close
+    reset_stream.reset(42)
 
-    [[bidi_id, "STREAM_RESET"], [bidi_id, "STOP_SENDING"], [uni_id, "STOP_SENDING"]].each do |id, signal|
+    %w[STREAM_RESET STOP_SENDING].each do |signal|
+      event = await_event(@client, signal, reset_stream.stream_id)
+      assert_equal Quicsilver::Protocol::WebTransport.application_error_to_http(42), decode_event(event).error_code
+    end
+    assert_webtransport_usable(session, sibling_peer, sibling)
+  end
+
+  def test_peer_reset_reports_application_error_and_leaves_session_usable
+    _, session = open_webtransport_session
+    peer, reset_stream = open_webtransport_child(session)
+    sibling_peer, sibling = open_webtransport_child(session)
+    resets = Queue.new
+    reset_stream.on_reset { |code| resets << code }
+
+    peer.abort(Quicsilver::Protocol::WebTransport.application_error_to_http(42))
+
+    assert_equal 42, resets.pop(timeout: 3)
+    refute reset_stream.open?
+    assert_webtransport_usable(session, sibling_peer, sibling)
+  end
+
+  def test_session_close_aborts_bidi_and_receive_only_children
+    _, session = open_webtransport_session
+    _, bidi = open_webtransport_child(session)
+    _, uni = open_webtransport_child(session, unidirectional: true)
+
+    session.close
+
+    [[bidi.stream_id, "STREAM_RESET"], [bidi.stream_id, "STOP_SENDING"], [uni.stream_id, "STOP_SENDING"]].each do |id, signal|
       event = await_event(@client, signal, id)
       assert_equal Quicsilver::Protocol::WebTransport::SESSION_GONE, decode_event(event).error_code
     end
-    assert_nil session.stream(bidi_id)
-    assert_nil session.stream(uni_id)
+    refute bidi.open?
+    refute uni.open?
+    assert_equal 200, read_connect_response_until_fin(session.stream_id).status
+    assert_equal 200, @client.get("/").status
   end
 
   def test_streams_opened_in_a_native_callback_get_ids_and_close_while_peer_blocked
@@ -770,6 +795,42 @@ class StreamLifetimeTest < Minitest::Test
     session = @wt_sessions.pop(timeout: 3)
     refute_nil session, "CONNECT did not reach Rack acceptance"
     [peer, session]
+  end
+
+  def open_webtransport_child(session, unidirectional: false)
+    accepted = Queue.new
+    if unidirectional
+      session.on_uni_stream { |stream| accepted << stream }
+    else
+      session.on_stream { |stream| accepted << stream }
+    end
+    peer = @client.open_raw_stream(unidirectional: unidirectional)
+    type = unidirectional ? 0x54 : 0x41
+    peer.send(Quicsilver::Protocol.encode_varint(type) + Quicsilver::Protocol.encode_varint(session.stream_id))
+    stream = accepted.pop(timeout: 3)
+    refute_nil stream, "WebTransport child stream was not accepted"
+    [peer, stream]
+  end
+
+  def assert_webtransport_usable(session, peer, stream)
+    stream.write("still here")
+    stream.close_write
+    received = "".b
+    loop do
+      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], stream.stream_id)
+      refute_equal "STREAM_RESET", event[1]
+      received << decode_event(event).data
+      break if event[1] == "RECEIVE_FIN"
+    end
+    assert_equal "still here", received
+    peer.send("", fin: true)
+
+    session.on_datagram { |data| session.send_datagram("echo: #{data}") }
+    @client.datagram_send(Quicsilver::Protocol::Datagram.encode(session.stream_id, "ping"))
+    datagram = await_event(@client, "DATAGRAM_RECEIVED")
+    assert_equal [session.stream_id, "echo: ping"], Quicsilver::Protocol::Datagram.decode(datagram[2])
+    assert session.open?
+    assert_equal 200, @client.get("/").status
   end
 
   # Initial data shares the same send as HEADERS to exercise CONNECT handoff.
