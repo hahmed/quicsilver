@@ -192,7 +192,7 @@ class WebTransportManagerTest < Minitest::Test
   def test_accept_bidi_stream_returns_nil_for_unknown_session
     manager = Quicsilver::Server::WebTransportManager.new
     payload = Quicsilver::Protocol.encode_varint(Quicsilver::Server::WebTransportSession::WT_STREAM_BIDI) +
-              Quicsilver::Protocol.encode_varint(99) +
+              Quicsilver::Protocol.encode_varint(100) +
               "hello"
 
     assert_nil manager.accept_bidi_stream(4, 99999, payload)
@@ -215,7 +215,7 @@ class WebTransportManagerTest < Minitest::Test
 
   def test_route_unidirectional_stream_returns_nil_for_unknown_session
     manager = Quicsilver::Server::WebTransportManager.new
-    payload = Quicsilver::Protocol.encode_varint(99) + "hello"
+    payload = Quicsilver::Protocol.encode_varint(100) + "hello"
 
     assert_nil manager.route_unidirectional_stream(8, 99999, payload)
   end

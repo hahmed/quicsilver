@@ -710,7 +710,7 @@ class WebTransportSessionTest < Minitest::Test
   def test_accept_stream_ignores_unknown_session
     sessions = {}
     prefix = Quicsilver::Protocol.encode_varint(0x41) +
-             Quicsilver::Protocol.encode_varint(999)
+             Quicsilver::Protocol.encode_varint(1000)
 
     result = Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
     assert_nil result

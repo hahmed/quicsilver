@@ -96,11 +96,13 @@ class WebTransportStreamPrefixTest < Minitest::Test
   # Session ids are CONNECT stream ids, so id % 4 == 0 always holds.
 
   def test_rejects_a_bidi_session_id_not_divisible_by_four
-    assert_nil Session.parse_stream_prefix(bidi_prefix(7) + "d")
+    error = assert_raises(Quicsilver::Protocol::FrameError) { Session.parse_stream_prefix(bidi_prefix(7) + "d") }
+    assert_equal Quicsilver::Protocol::H3_ID_ERROR, error.error_code
   end
 
   def test_rejects_a_uni_session_id_not_divisible_by_four
-    assert_nil Session.parse_uni_stream_data(varint(7) + "d")
+    error = assert_raises(Quicsilver::Protocol::FrameError) { Session.parse_uni_stream_data(varint(7) + "d") }
+    assert_equal Quicsilver::Protocol::H3_ID_ERROR, error.error_code
   end
 
   # === extended CONNECT :protocol (§3.2) ===

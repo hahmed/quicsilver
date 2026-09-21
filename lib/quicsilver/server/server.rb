@@ -600,6 +600,7 @@ module Quicsilver
       manager = @webtransport.for(connection_handle)
 
       pending = @pending_mutex.synchronize { @pending_streams[[connection_handle, stream_id]] }
+      payload = connection.complete_stream(stream_id, payload) unless pending
       if pending
         pending.frame_buffer << payload
         drain_data_frames(pending)
@@ -619,7 +620,7 @@ module Quicsilver
       return if manager.route_owned_stream(stream_id, event.handle, event.data, fin: true)
 
       if connection.uni_stream_type(stream_id) == :webtransport_uni
-        stream = manager.route_unidirectional_stream(stream_id, event.handle, event.data, fin: true)
+        stream = route_wt_uni_stream(connection_handle, stream_id, event.handle, event.data, fin: true)
         stream&.notify_read_close
         return
       end
@@ -721,7 +722,11 @@ module Quicsilver
 
       headers = parser.headers
       if headers.empty?
-        dispatch_request(connection, completed_stream, early_data: early_data) if completed_stream
+        if completed_stream
+          dispatch_request(connection, completed_stream, early_data: early_data)
+        else
+          connection.buffer_data(stream_id, data)
+        end
         return
       end
 
@@ -779,7 +784,8 @@ module Quicsilver
     end
 
     def establish_webtransport(connection, request)
-      unless connection.webtransport_settings_valid?(request.headers[":protocol"]) && connection.datagram_send_enabled?
+      unless request.headers[":scheme"] == "https" &&
+          connection.webtransport_settings_valid?(request.headers[":protocol"]) && connection.datagram_send_enabled?
         @webtransport.for(connection.handle).reject_stream(
           request.stream_id, request.stream_handle, error_code: Protocol::H3_MESSAGE_ERROR
         )
@@ -1012,6 +1018,10 @@ module Quicsilver
       # [session_id varint][data...]
       # Reuse the same prefix parser — format is identical minus the type byte.
       @webtransport.for(connection_handle).route_unidirectional_stream(stream_id, stream_handle, payload, fin: fin)
+    rescue Protocol::FrameError => e
+      Quicsilver.logger.error("WebTransport stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
+      Quicsilver.connection_shutdown(connection_handle, e.error_code, false)
+      nil
     rescue => e
       Quicsilver.logger.error("WebTransport uni stream error: #{e.class} - #{e.message}")
     end
@@ -1019,6 +1029,10 @@ module Quicsilver
     # Accept an incoming WebTransport stream — parse prefix and route to session
     def accept_webtransport_stream(connection_handle, stream_id, stream_handle, payload)
       @webtransport.for(connection_handle).accept_bidi_stream(stream_id, stream_handle, payload)
+    rescue Protocol::FrameError => e
+      Quicsilver.logger.error("WebTransport stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
+      Quicsilver.connection_shutdown(connection_handle, e.error_code, false)
+      nil
     rescue => e
       Quicsilver.logger.error("WebTransport stream error: #{e.class} - #{e.message}")
     end

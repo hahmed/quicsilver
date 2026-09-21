@@ -7,14 +7,22 @@ class StreamLifetimeTest < Minitest::Test
   MARKER = "stream-lifetime-test".b
 
   class RecordingClient < Quicsilver::Client
-    attr_reader :events
+    attr_reader :events, :connection_error
 
     def initialize(...)
       @events = Queue.new
       super
     end
 
+    def open_raw_stream(unidirectional: false)
+      unidirectional ? open_unidirectional_stream : open_stream
+    end
+
     def handle_stream_event(stream_id, event, data, early_data)
+      if event == "CONNECTION_CLOSED" && @connection_data
+        # The native context remains valid during this callback only.
+        @connection_error = Quicsilver.connection_status(@connection_data[1])["error_code"]
+      end
       @events << [stream_id, event, data]
       super
     end
@@ -134,8 +142,7 @@ class StreamLifetimeTest < Minitest::Test
   end
 
   def test_clean_fin_retires_a_unidirectional_stream
-    connection = @client.instance_variable_get(:@connection_data)
-    outgoing = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, true))
+    outgoing = @client.open_raw_stream(unidirectional: true)
     outgoing.send(MARKER, fin: true)
     event = await_event(@server, "RECEIVE_FIN")
     id = event.first
@@ -280,8 +287,7 @@ class StreamLifetimeTest < Minitest::Test
   end
 
   def test_completed_http_request_still_resets_on_invalid_headers
-    connection = @client.instance_variable_get(:@connection_data)
-    peer = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
+    peer = @client.open_raw_stream
     headers = Quicsilver::Protocol.build_headers_frame([
       [":method", "GET"], [":scheme", "https"], [":authority", "localhost"]
     ])
@@ -290,6 +296,63 @@ class StreamLifetimeTest < Minitest::Test
     reset = await_event(@client, "STREAM_RESET", handle: peer.handle)
     assert_equal Quicsilver::Protocol::H3_MESSAGE_ERROR, decode_event(reset).error_code
     assert_equal 200, @client.get("/").status
+  end
+
+  def test_fragmented_connect_headers_establish_without_fin
+    @server.record_receives_for = :all
+    headers = connect_headers
+    [1, 2, headers.bytesize - 1].each do |split|
+      peer = @client.open_raw_stream
+      peer.send(headers.byteslice(0, split))
+      id = await_connect_received(peer)
+      assert @wt_sessions.empty?
+
+      peer.send(headers.byteslice(split..))
+      await_event(@server, "RECEIVE", id)
+      session = @wt_sessions.pop(timeout: 3)
+      refute_nil session, "CONNECT split at byte #{split} was not accepted"
+      session.close
+      assert_equal 200, read_connect_response_until_fin(id).status
+      peer.send("", fin: true)
+      await_event(@server, "STREAM_SHUTDOWN_COMPLETE", id)
+    end
+  end
+
+  def test_non_https_webtransport_connect_is_rejected_before_rack
+    ["webtransport-h3", "webtransport"].each do |protocol|
+      peer = open_connect_stream(protocol: protocol, scheme: "http")
+
+      assert_connect_rejected(peer, Quicsilver::Protocol::H3_MESSAGE_ERROR)
+      assert @wt_sessions.empty?
+      assert_equal 200, @client.get("/").status
+    end
+  end
+
+  def test_invalid_bidi_session_id_closes_connection
+    peer = @client.open_raw_stream
+    peer.send(Quicsilver::Protocol.encode_varint(0x41) + Quicsilver::Protocol.encode_varint(1))
+
+    await_event(@client, "CONNECTION_CLOSED")
+    assert_equal Quicsilver::Protocol::H3_ID_ERROR, @client.connection_error
+  end
+
+  def test_invalid_uni_session_id_with_fin_closes_connection
+    peer = @client.open_raw_stream(unidirectional: true)
+    peer.send(Quicsilver::Protocol.encode_varint(0x54) + Quicsilver::Protocol.encode_varint(2), fin: true)
+
+    await_event(@client, "CONNECTION_CLOSED")
+    assert_equal Quicsilver::Protocol::H3_ID_ERROR, @client.connection_error
+  end
+
+  def test_fragmented_invalid_uni_session_id_closes_connection
+    @server.record_receives_for = :all
+    peer = @client.open_raw_stream(unidirectional: true)
+    peer.send(Quicsilver::Protocol.encode_varint(0x54) + "\x40".b)
+    await_event(@server, "RECEIVE")
+    peer.send("\x03".b, fin: true)
+
+    await_event(@client, "CONNECTION_CLOSED")
+    assert_equal Quicsilver::Protocol::H3_ID_ERROR, @client.connection_error
   end
 
   def test_missing_webtransport_settings_reject_connect_before_rack
@@ -675,15 +738,17 @@ class StreamLifetimeTest < Minitest::Test
   end
 
   # Initial data shares the same send as HEADERS to exercise CONNECT handoff.
-  def open_connect_stream(initial_data: "".b, protocol: "webtransport-h3", fin: false)
-    connection = @client.instance_variable_get(:@connection_data)
-    peer = Quicsilver::Transport::Stream.new(Quicsilver.open_stream(connection, false))
-    headers = Quicsilver::Protocol.build_headers_frame([
-      [":method", "CONNECT"], [":protocol", protocol],
-      [":scheme", "https"], [":authority", "localhost"], [":path", "/wt"]
-    ])
-    peer.send(headers + initial_data, fin: fin)
+  def open_connect_stream(initial_data: "".b, protocol: "webtransport-h3", scheme: "https", fin: false)
+    peer = @client.open_raw_stream
+    peer.send(connect_headers(protocol: protocol, scheme: scheme) + initial_data, fin: fin)
     peer
+  end
+
+  def connect_headers(protocol: "webtransport-h3", scheme: "https")
+    Quicsilver::Protocol.build_headers_frame([
+      [":method", "CONNECT"], [":protocol", protocol],
+      [":scheme", scheme], [":authority", "localhost"], [":path", "/wt"]
+    ])
   end
 
   def read_connect_response_until_fin(stream_id)
@@ -713,9 +778,7 @@ class StreamLifetimeTest < Minitest::Test
   end
 
   def open_stream(unidirectional: false)
-    connection = @client.instance_variable_get(:@connection_data)
-    handle = Quicsilver.open_stream(connection, unidirectional)
-    outgoing = Quicsilver::Transport::Stream.new(handle)
+    outgoing = @client.open_raw_stream(unidirectional: unidirectional)
     outgoing.send(MARKER)
     event = await_event(@server, "RECEIVE")
     id = event.first

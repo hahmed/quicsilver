@@ -46,8 +46,10 @@ module Quicsilver
       # A session id is the stream id of the CONNECT request that established
       # it, so it is always a client-initiated bidirectional stream
       # (draft-ietf-webtrans-http3-16 §4). Anything else cannot name a session.
-      def self.valid_session_id?(session_id)
-        session_id % 4 == 0
+      def self.validate_session_id!(session_id)
+        return if session_id % 4 == 0
+
+        raise Protocol::FrameError.new("Invalid WebTransport session ID #{session_id}", error_code: Protocol::H3_ID_ERROR)
       end
 
       def self.parse_stream_prefix(payload)
@@ -56,7 +58,7 @@ module Quicsilver
 
         session_id, sid_len = Protocol.decode_varint_str(payload, type_len)
         return nil if sid_len == 0
-        return nil unless valid_session_id?(session_id)
+        validate_session_id!(session_id)
 
         [session_id, payload.byteslice((type_len + sid_len)..-1) || "".b]
       end
@@ -109,7 +111,7 @@ module Quicsilver
       def self.parse_uni_stream_data(payload)
         session_id, sid_len = Protocol.decode_varint_str(payload, 0)
         return nil if sid_len == 0
-        return nil unless valid_session_id?(session_id)
+        validate_session_id!(session_id)
 
         [session_id, payload.byteslice(sid_len..-1) || "".b]
       end
