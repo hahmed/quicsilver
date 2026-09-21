@@ -10,10 +10,17 @@ module Quicsilver
     # - Datagrams: unreliable, unordered (live cursors, typing indicators)
     # - Streams: reliable, ordered (chat messages, RPC)
     #
-    # Usage from Rack:
+    # The Rack app owns Origin validation (draft-ietf-webtrans-http3-16 §3.2).
+    # Check HTTP_ORIGIN against trusted origins before calling accept!; return
+    # 403 to reject. Non-browser clients may omit Origin, so the app also decides
+    # whether to allow requests without it. Origin is not client authentication.
+    #
+    # Usage inside a Rack app (a browser-only endpoint):
     #   session = env["quicsilver.context"].webtransport
+    #   return [403, {}, []] unless env["HTTP_ORIGIN"] == "https://app.example.com"
     #   session.accept!
     #   session.on_datagram { |data| session.send_datagram("echo: #{data}") }
+    #   [200, {}, []]
     #
     class WebTransportSession
       attr_reader :path, :authority, :headers, :connection, :stream_id
@@ -150,6 +157,7 @@ module Quicsilver
       end
 
       # Accept the session — sends 200 HEADERS on the CONNECT stream.
+      # Call only after the app has checked Origin and authorized the request.
       def accept!
         raise IOError, "Session closed" if @closed
         return if @accepted

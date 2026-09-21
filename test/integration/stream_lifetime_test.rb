@@ -78,6 +78,9 @@ class StreamLifetimeTest < Minitest::Test
     @wt_closes = Queue.new
     app = ->(env) do
       if (session = env["quicsilver.context"]&.webtransport)
+        origin = env["HTTP_ORIGIN"]
+        next [403, {}, []] if origin && origin != "https://example.com"
+
         session.on_close { |info| @wt_closes << info }
         session.accept!
         @wt_sessions << session
@@ -326,6 +329,38 @@ class StreamLifetimeTest < Minitest::Test
       assert @wt_sessions.empty?
       assert_equal 200, @client.get("/").status
     end
+  end
+
+  def test_rack_rejects_untrusted_origins_without_using_session_capacity
+    ["https://untrusted.example", "https://example.com.attacker.test", "null"].each do |origin|
+      peer = open_connect_stream(origin: origin)
+      started = await_event(@client, "STREAM_START_COMPLETE", handle: peer.handle)
+
+      assert_equal 403, read_connect_response_until_fin(started.first).status
+      assert @wt_sessions.empty?, "Rejected Origin established a session"
+      peer.send("", fin: true)
+      await_event(@server, "STREAM_SHUTDOWN_COMPLETE", started.first)
+    end
+
+    peer = open_connect_stream(origin: "https://example.com")
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "Rejected Origins prevented a trusted session from opening"
+    session.close
+    assert_equal 200, read_connect_response_until_fin(session.stream_id).status
+    peer.send("", fin: true)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
+    assert_equal 200, @client.get("/").status
+  end
+
+  def test_rack_can_accept_non_browser_clients_without_origin
+    peer = open_connect_stream
+    session = @wt_sessions.pop(timeout: 3)
+
+    refute_nil session, "Origin is optional for non-browser clients"
+    session.close
+    assert_equal 200, read_connect_response_until_fin(session.stream_id).status
+    peer.send("", fin: true)
+    await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
   end
 
   def test_invalid_bidi_session_id_closes_connection
@@ -738,17 +773,19 @@ class StreamLifetimeTest < Minitest::Test
   end
 
   # Initial data shares the same send as HEADERS to exercise CONNECT handoff.
-  def open_connect_stream(initial_data: "".b, protocol: "webtransport-h3", scheme: "https", fin: false)
+  def open_connect_stream(initial_data: "".b, protocol: "webtransport-h3", scheme: "https", origin: nil, fin: false)
     peer = @client.open_raw_stream
-    peer.send(connect_headers(protocol: protocol, scheme: scheme) + initial_data, fin: fin)
+    peer.send(connect_headers(protocol: protocol, scheme: scheme, origin: origin) + initial_data, fin: fin)
     peer
   end
 
-  def connect_headers(protocol: "webtransport-h3", scheme: "https")
-    Quicsilver::Protocol.build_headers_frame([
+  def connect_headers(protocol: "webtransport-h3", scheme: "https", origin: nil)
+    headers = [
       [":method", "CONNECT"], [":protocol", protocol],
       [":scheme", scheme], [":authority", "localhost"], [":path", "/wt"]
-    ])
+    ]
+    headers << ["origin", origin] if origin
+    Quicsilver::Protocol.build_headers_frame(headers)
   end
 
   def read_connect_response_until_fin(stream_id)

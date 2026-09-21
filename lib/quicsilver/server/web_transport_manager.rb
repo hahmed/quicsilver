@@ -128,6 +128,13 @@ module Quicsilver
         @stream_states[stream_id] == :rejected
       end
 
+      def reject_session(session, status)
+        unregister(session.stream_id)
+        # Keep routing late data and FIN here until the CONNECT stream shuts down.
+        @stream_states[session.stream_id] = :rejected
+        session.reject!(status)
+      end
+
       def reject_stream(stream_id, stream_handle, error_code: Protocol::WebTransport::BUFFERED_STREAM_REJECTED)
         @pending_connect = nil if @pending_connect&.stream_id == stream_id
         @pending_streams.delete(stream_id)

@@ -1008,8 +1008,7 @@ module Quicsilver
       if session.accepted?
         connection.track_client_stream(stream_id)
       else
-        @webtransport.for(connection_handle).unregister(stream_id)
-        session.reject!(response.status)
+        @webtransport.for(connection_handle).reject_session(session, response.status)
       end
     end
 
