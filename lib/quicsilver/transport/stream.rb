@@ -19,6 +19,10 @@ module Quicsilver
         Quicsilver.send_stream(@handle, data, fin)
       end
 
+      def reliable_offset=(offset)
+        Quicsilver.set_stream_reliable_offset(@handle, offset)
+      end
+
       def reset(error_code = Protocol::H3_REQUEST_CANCELLED)
         Quicsilver.stream_reset(@handle, error_code)
       end

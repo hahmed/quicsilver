@@ -1,3 +1,4 @@
+require_relative "msquic_patch"
 require 'mkmf'
 require 'fileutils'
 
@@ -34,11 +35,17 @@ msquic_dir = File.expand_path('../../../vendor/msquic', __FILE__)
 vendor_lib_dir = "#{msquic_dir}/build/bin/Release"
 shipped_lib_dir = ext_dir  # lib/quicsilver/ contains libmsquic.2.dylib
 
+# A stale binary must not bypass the source patch when building from a checkout.
+if File.exist?(File.join(msquic_dir, "CMakeLists.txt"))
+  MsquicPatch.apply!(msquic_dir)
+end
+needs_patched_build = File.exist?(File.join(msquic_dir, "CMakeLists.txt")) && !MsquicPatch.built?(msquic_dir)
+
 # Find which directory has libmsquic
-lib_dir = if File.exist?(vendor_lib_dir) && Dir.glob("#{vendor_lib_dir}/libmsquic.*").any?
+lib_dir = if !needs_patched_build && File.exist?(vendor_lib_dir) && Dir.glob("#{vendor_lib_dir}/libmsquic.*").any?
   puts "Using vendored MsQuic from #{vendor_lib_dir}"
   vendor_lib_dir
-elsif Dir.glob("#{shipped_lib_dir}/libmsquic*").any?
+elsif !needs_patched_build && Dir.glob("#{shipped_lib_dir}/libmsquic*").any?
   puts "Using shipped libmsquic from #{shipped_lib_dir}"
   shipped_lib_dir
 else
@@ -52,6 +59,8 @@ else
     end
   end
 
+  MsquicPatch.apply!(msquic_dir)
+
   cmake_args = ['-B build', '-DCMAKE_BUILD_TYPE=Release', '-DQUIC_TLS_LIB=quictls', '-DQUIC_LINUX_IOURING_ENABLED=OFF']
   if RUBY_PLATFORM =~ /darwin/
     cmake_args << '-DCMAKE_EXE_LINKER_FLAGS="-framework CoreServices"'
@@ -64,6 +73,7 @@ else
   Dir.chdir(msquic_dir) do
     system(env, "cmake #{cmake_args.join(' ')}") or raise 'MsQuic cmake configure failed'
     system(env, 'cmake --build build --config Release') or raise 'MsQuic build failed'
+    MsquicPatch.record_build!(msquic_dir)
   end
 
   vendor_lib_dir

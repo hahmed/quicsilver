@@ -19,6 +19,10 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     def abort(*) = true
   end
 
+  class RoutingConnection < Quicsilver::Transport::Connection
+    def reliable_reset_enabled? = false
+  end
+
   SESSION_ID = 0
   COMMAND_STREAM = 4
 
@@ -510,7 +514,7 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     server = Quicsilver::Server.new(find_available_port, server_configuration: config)
 
     connection_handle = 12_345
-    connection = Quicsilver::Transport::Connection.new(connection_handle, [connection_handle, 0])
+    connection = RoutingConnection.new(connection_handle, [connection_handle, 0])
     server.connections[connection_handle] = connection
 
     @session = build_session(connection)

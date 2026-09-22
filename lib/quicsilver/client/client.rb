@@ -17,6 +17,7 @@ module Quicsilver
       @port = port
       @unsecure = options.fetch(:unsecure, false)
       @datagram_receive_enabled = options.fetch(:datagram_receive_enabled, true)
+      @reliable_reset_enabled = options.fetch(:reliable_reset_enabled, true)
       @connection_timeout = options.fetch(:connection_timeout, DEFAULT_CONNECTION_TIMEOUT)
       @request_timeout = options.fetch(:request_timeout, DEFAULT_REQUEST_TIMEOUT)
       @max_body_size = options[:max_body_size]
@@ -197,7 +198,7 @@ module Quicsilver
       return self if @connected
 
       Quicsilver.open_connection
-      config = Quicsilver.create_configuration(@unsecure, @datagram_receive_enabled)
+      config = create_configuration
       raise ConnectionError, "Failed to create configuration" if config.nil?
 
       start_connection(config)
@@ -295,6 +296,10 @@ module Quicsilver
     end
 
     private
+
+    def create_configuration
+      Quicsilver.create_configuration(@unsecure, @datagram_receive_enabled, @reliable_reset_enabled)
+    end
 
     def ensure_connected!
       return if @connected

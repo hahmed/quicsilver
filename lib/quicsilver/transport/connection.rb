@@ -25,11 +25,16 @@ module Quicsilver
         Quicsilver.connection_datagram_send_enabled?(@handle)
       end
 
+      def reliable_reset_enabled?
+        Quicsilver.connection_reliable_reset_enabled?(@handle)
+      end
+
       def webtransport_settings_valid?(protocol)
         return false unless settings_received? && @settings[Protocol::SETTINGS_H3_DATAGRAM] == 1
 
         # Compatibility path: the legacy token does not require the newer flag.
-        protocol == Protocol::WebTransport::PROTOCOL_LEGACY || @settings[Protocol::SETTINGS_WT_ENABLED] == 1
+        protocol == Protocol::WebTransport::PROTOCOL_LEGACY ||
+          (@settings[Protocol::SETTINGS_WT_ENABLED] == 1 && reliable_reset_enabled?)
       end
 
       def initialize(handle, data, max_header_size: nil, connection_id: nil, transport_server_id: nil)

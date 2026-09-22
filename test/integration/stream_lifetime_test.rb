@@ -28,6 +28,15 @@ class StreamLifetimeTest < Minitest::Test
     end
   end
 
+  class ServerStreamClient < RecordingClient
+    private
+
+    def create_configuration
+      # Grant the server credit for WebTransport and HTTP/3 control streams.
+      Quicsilver.create_configuration(true, true, true, 16, 16)
+    end
+  end
+
   class SettingsClient < RecordingClient
     def send_settings(settings)
       @control_stream.send("\x00".b + Quicsilver::Protocol.build_settings_frame(settings))
@@ -639,6 +648,47 @@ class StreamLifetimeTest < Minitest::Test
     assert_equal 200, @client.get("/").status
   end
 
+  def test_modern_connect_requires_reliable_reset_but_legacy_still_works
+    @client.disconnect
+    @client = RecordingClient.new("localhost", @port, unsecure: true, reliable_reset_enabled: false)
+    assert_equal 200, @client.get("/").status
+    refute @server_connection.reliable_reset_enabled?
+
+    peer = open_connect_stream
+    assert_connect_rejected(peer, Quicsilver::Protocol::H3_MESSAGE_ERROR)
+    assert @wt_sessions.empty?
+
+    open_connect_stream(protocol: "webtransport")
+    session = @wt_sessions.pop(timeout: 3)
+    refute_nil session, "Legacy clients do not negotiate reliable reset"
+    session.close
+    assert_equal 200, read_connect_response_until_fin(session.stream_id).status
+  end
+
+  def test_reliable_reset_delivers_prefix_before_reset
+    assert_reliable_prefix_delivery(MARKER)
+  end
+
+  def test_reliable_reset_waits_for_flow_control_credit
+    assert_reliable_prefix_delivery(MARKER + "x" * (1024 * 1024))
+  end
+
+  def test_immediate_server_bidi_reset_delivers_session_header
+    assert_immediate_server_reset_delivers_header(:open_stream, 0x41)
+  end
+
+  def test_immediate_server_uni_reset_delivers_session_header
+    assert_immediate_server_reset_delivers_header(:open_uni_stream, 0x54)
+  end
+
+  def test_session_close_during_bidi_open_rejects_open_cleanly
+    assert_session_close_during_stream_open(:open_stream)
+  end
+
+  def test_session_close_during_uni_open_rejects_open_cleanly
+    assert_session_close_during_stream_open(:open_uni_stream)
+  end
+
   def test_server_reset_leaves_sibling_stream_and_datagrams_usable
     _, session = open_webtransport_session
     _, reset_stream = open_webtransport_child(session)
@@ -795,6 +845,86 @@ class StreamLifetimeTest < Minitest::Test
     session = @wt_sessions.pop(timeout: 3)
     refute_nil session, "CONNECT did not reach Rack acceptance"
     [peer, session]
+  end
+
+  def assert_reliable_prefix_delivery(prefix)
+    peer = @client.open_raw_stream
+    @server.record_receives_for = :all
+    peer.send(prefix)
+    peer.reliable_offset = prefix.bytesize
+    peer.reset(REJECTION)
+
+    started = await_event(@client, "STREAM_START_COMPLETE", handle: peer.handle)
+    received = "".b
+    loop do
+      event = await_event(@server, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], started.first)
+      if event[1] == "STREAM_RESET"
+        assert_equal REJECTION, decode_event(event).error_code
+        break
+      end
+      refute_equal "RECEIVE_FIN", event[1], "Reliable reset must not appear as graceful FIN"
+      received << decode_event(event).data
+    end
+    assert_equal prefix, received
+    assert_equal 200, @client.get("/").status
+  end
+
+  def assert_immediate_server_reset_delivers_header(open_method, type)
+    @client.disconnect
+    @client = ServerStreamClient.new("localhost", @port, unsecure: true)
+    assert_equal 200, @client.get("/").status
+    _, session = open_webtransport_session
+
+    stream = session.public_send(open_method)
+    stream.reset(42)
+
+    started = await_event(@server, "STREAM_START_COMPLETE", handle: stream.stream_handle)
+    bytes = "".b
+    loop do
+      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], started.first)
+      if event[1] == "STREAM_RESET"
+        assert_equal 42, Quicsilver::Protocol::WebTransport.http_to_application_error(decode_event(event).error_code)
+        break
+      end
+      refute_equal "RECEIVE_FIN", event[1], "Reset must not appear as graceful FIN"
+      bytes << decode_event(event).data
+    end
+    assert_equal Quicsilver::Protocol.encode_varint(type) + Quicsilver::Protocol.encode_varint(session.stream_id), bytes
+    assert session.open?
+    assert_equal 200, @client.get("/").status
+  end
+
+  def assert_session_close_during_stream_open(open_method)
+    _, session = open_webtransport_session
+    paused = Queue.new
+    resume = Queue.new
+    # Pause before the header reaches native code; keep real QUIC sends/resets.
+    @server_connection.define_singleton_method(:open_stream) do |**options|
+      super(**options).tap do |stream|
+        stream.define_singleton_method(:send) do |*args, **kwargs|
+          paused << self
+          resume.pop
+          super(*args, **kwargs)
+        end
+      end
+    end
+    opening = Thread.new do
+      session.public_send(open_method)
+    rescue StandardError => error
+      error
+    end
+    stream = paused.pop(timeout: 3)
+    refute_nil stream, "Stream opening did not reach the header send"
+    session.close
+    resume << true
+    assert opening.join(3), "Stream opening did not finish after session closure"
+    assert_kind_of RuntimeError, opening.value
+    assert_equal "Session not open", opening.value.message
+    assert session.closed?
+    assert_equal 200, @client.get("/").status
+  ensure
+    resume << true if resume
+    opening&.join(3)
   end
 
   def open_webtransport_child(session, unidirectional: false)

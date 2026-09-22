@@ -63,6 +63,7 @@ typedef struct {
     char remote_address[INET6_ADDRSTRLEN];
     uint16_t remote_port;
     int session_resumed;
+    int reliable_reset_negotiated;
     // 0-RTT resumption ticket (client-side)
     uint8_t* resumption_ticket;
     uint32_t resumption_ticket_length;
@@ -487,6 +488,9 @@ ConnectionCallback(HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event
     }
     
     switch (Event->Type) {
+        case QUIC_CONNECTION_EVENT_RELIABLE_RESET_NEGOTIATED:
+            ctx->reliable_reset_negotiated = Event->RELIABLE_RESET_NEGOTIATED.IsNegotiated;
+            break;
         case QUIC_CONNECTION_EVENT_CONNECTED:
             ctx->connected = 1;
             ctx->failed = 0;
@@ -607,6 +611,7 @@ ListenerCallback(HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event)
                 conn_ctx->remote_address[0] = '\0';
                 conn_ctx->remote_port = 0;
                 conn_ctx->session_resumed = 0;
+                conn_ctx->reliable_reset_negotiated = 0;
                 conn_ctx->resumption_ticket = NULL;
                 conn_ctx->resumption_ticket_length = 0;
 
@@ -721,9 +726,11 @@ quicsilver_open(VALUE self)
 static VALUE
 quicsilver_create_configuration(int argc, VALUE *argv, VALUE self)
 {
-    VALUE unsecure, datagram_receive_enabled;
-    rb_scan_args(argc, argv, "11", &unsecure, &datagram_receive_enabled);
-    if (argc == 1) datagram_receive_enabled = Qtrue;
+    VALUE unsecure, datagram_receive_enabled, reliable_reset_enabled, incoming_bidi, incoming_uni;
+    rb_scan_args(argc, argv, "14", &unsecure, &datagram_receive_enabled,
+        &reliable_reset_enabled, &incoming_bidi, &incoming_uni);
+    if (argc < 2) datagram_receive_enabled = Qtrue;
+    if (argc < 3) reliable_reset_enabled = Qtrue;
 
     if (MsQuic == NULL) {
         rb_raise(rb_eRuntimeError, "MSQUIC not initialized. Call Quicsilver.open_connection first.");
@@ -735,10 +742,27 @@ quicsilver_create_configuration(int argc, VALUE *argv, VALUE self)
     
     // Basic settings
     QUIC_SETTINGS Settings = {0};
+    Settings.ReliableResetEnabled = RTEST(reliable_reset_enabled);
+    Settings.IsSet.ReliableResetEnabled = TRUE;
     Settings.IdleTimeoutMs = 10000; // 10 second idle timeout to match server
     Settings.IsSet.IdleTimeoutMs = TRUE;
     Settings.DatagramReceiveEnabled = RTEST(datagram_receive_enabled);
     Settings.IsSet.DatagramReceiveEnabled = TRUE;
+
+    // Optional credit for server-initiated streams. Leave native defaults alone
+    // when omitted; the uni limit also covers HTTP/3 control and QPACK streams.
+    if (!NIL_P(incoming_bidi)) {
+        unsigned int count = NUM2UINT(incoming_bidi);
+        if (count > UINT16_MAX) rb_raise(rb_eArgError, "max_incoming_bidi_streams must be between 0 and 65535");
+        Settings.PeerBidiStreamCount = (uint16_t)count;
+        Settings.IsSet.PeerBidiStreamCount = TRUE;
+    }
+    if (!NIL_P(incoming_uni)) {
+        unsigned int count = NUM2UINT(incoming_uni);
+        if (count > UINT16_MAX) rb_raise(rb_eArgError, "max_incoming_uni_streams must be between 0 and 65535");
+        Settings.PeerUnidiStreamCount = (uint16_t)count;
+        Settings.IsSet.PeerUnidiStreamCount = TRUE;
+    }
     
     // Simple ALPN for now - Ruby can customize this later
     QUIC_BUFFER Alpn = { sizeof("h3") - 1, (uint8_t*)"h3" };
@@ -822,6 +846,8 @@ quicsilver_create_server_configuration(VALUE self, VALUE config_hash)
     uint64_t handshake_idle_timeout_ms = NUM2ULL(handshake_idle_timeout_ms_val);
 
     QUIC_SETTINGS Settings = {0};
+    Settings.ReliableResetEnabled = TRUE;
+    Settings.IsSet.ReliableResetEnabled = TRUE;
     Settings.IdleTimeoutMs = idle_timeout_ms;
     Settings.IsSet.IdleTimeoutMs = TRUE;
     Settings.ServerResumptionLevel = server_resumption_level;
@@ -921,6 +947,7 @@ quicsilver_create_connection(VALUE self, VALUE client_obj)
     ctx->remote_address[0] = '\0';
     ctx->remote_port = 0;
     ctx->session_resumed = 0;
+    ctx->reliable_reset_negotiated = 0;
     ctx->resumption_ticket = NULL;
     ctx->resumption_ticket_length = 0;
 
@@ -1253,6 +1280,29 @@ quicsilver_connection_datagram_send_enabled(VALUE self, VALUE connection_handle_
     QUIC_STATUS status = MsQuic->GetParam(
         Connection, QUIC_PARAM_CONN_DATAGRAM_SEND_ENABLED, &size, &enabled);
     return QUIC_SUCCEEDED(status) && enabled ? Qtrue : Qfalse;
+}
+
+static VALUE
+quicsilver_connection_reliable_reset_enabled(VALUE self, VALUE connection_handle_val)
+{
+    if (MsQuic == NULL) return Qfalse;
+    HQUIC connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle_val);
+    if (!connection) return Qfalse;
+    ConnectionContext* ctx = MsQuic->GetContext(connection);
+    return ctx && ctx->reliable_reset_negotiated ? Qtrue : Qfalse;
+}
+
+static VALUE
+quicsilver_set_stream_reliable_offset(VALUE self, VALUE stream_handle, VALUE offset_val)
+{
+    uint64_t token = NUM2ULL(stream_handle);
+    uint64_t offset = NUM2ULL(offset_val);
+    StreamContext* ctx = find_stream(token);
+    if (!MsQuic || !ctx) rb_raise(rb_eIOError, "QUIC stream is closed");
+    QUIC_STATUS status = MsQuic->SetParam(
+        ctx->stream, QUIC_PARAM_STREAM_RELIABLE_OFFSET, sizeof(offset), &offset);
+    if (QUIC_FAILED(status)) rb_raise(rb_eRuntimeError, "Setting reliable offset failed, 0x%x", status);
+    return offset_val;
 }
 
 // Returns [ip_string, port] or nil.
@@ -1927,6 +1977,8 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "connection_status", quicsilver_connection_status, 1);
     rb_define_singleton_method(mQuicsilver, "connection_statistics", quicsilver_connection_statistics, 1);
     rb_define_singleton_method(mQuicsilver, "transport_counters", quicsilver_transport_counters, 0);
+    rb_define_singleton_method(mQuicsilver, "connection_reliable_reset_enabled?", quicsilver_connection_reliable_reset_enabled, 1);
+    rb_define_singleton_method(mQuicsilver, "set_stream_reliable_offset", quicsilver_set_stream_reliable_offset, 2);
     rb_define_singleton_method(mQuicsilver, "connection_datagram_send_enabled?", quicsilver_connection_datagram_send_enabled, 1);
     rb_define_singleton_method(mQuicsilver, "connection_remote_address", quicsilver_connection_remote_address, 1);
     rb_define_singleton_method(mQuicsilver, "connection_ids", quicsilver_connection_ids, 1);

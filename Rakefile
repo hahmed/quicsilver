@@ -2,6 +2,7 @@ require "bundler/setup"
 require "bundler/gem_tasks"
 require "rake/testtask"
 require "rake/extensiontask"
+require_relative "ext/quicsilver/msquic_patch"
 
 Rake::ExtensionTask.new('quicsilver') do |ext|
   ext.lib_dir = 'lib/quicsilver'
@@ -38,6 +39,7 @@ task :setup do
 end
 
 task :build_msquic => :setup do
+  MsquicPatch.apply!(File.expand_path("vendor/msquic", __dir__))
   cmake_args = ['-B build', '-DCMAKE_BUILD_TYPE=Release', '-DQUIC_TLS_LIB=quictls', '-DQUIC_LINUX_IOURING_ENABLED=OFF']
   if RUBY_PLATFORM =~ /darwin/
     cmake_args << '-DCMAKE_EXE_LINKER_FLAGS="-framework CoreServices"'
@@ -50,6 +52,7 @@ task :build_msquic => :setup do
   env = { 'PATH' => "/usr/bin:#{ENV['PATH']}" }
   sh env, "cd vendor/msquic && cmake #{cmake_args.join(' ')}"
   sh env, 'cd vendor/msquic && cmake --build build --config Release'
+  MsquicPatch.record_build!(File.expand_path("vendor/msquic", __dir__))
 end
 
 task :build => [:build_msquic, :compile]

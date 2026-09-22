@@ -447,10 +447,14 @@ module Quicsilver
           session: self, stream: stream, stream_id: stream.stream_id,
           direction: unidirectional ? :send_only : :bidi
         )
+        type = unidirectional ? WT_STREAM_UNI : WT_STREAM_BIDI
+        prefix = Protocol.encode_varint(type) + Protocol.encode_varint(@stream_id)
+        stream.send(prefix)
+        stream.reliable_offset = prefix.bytesize if @connection.reliable_reset_enabled?
+        # Teardown may reset registered streams, so protect the header first.
+        # Registration also rejects and aborts if the session closed meanwhile.
         raise "Session not open" unless register_stream(wt_stream, outgoing: true)
 
-        type = unidirectional ? WT_STREAM_UNI : WT_STREAM_BIDI
-        stream.send(Protocol.encode_varint(type) + Protocol.encode_varint(@stream_id))
         @stream_manager&.stream_started(stream.stream_id, stream.handle)
         wt_stream
       rescue StandardError
