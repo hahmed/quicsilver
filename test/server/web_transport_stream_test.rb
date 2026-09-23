@@ -133,6 +133,33 @@ class WebTransportStreamTest < Minitest::Test
     )
   end
 
+  # A FIN can arrive after the read side is already closed, and a write racing
+  # that close lands in receive_data's rescue. Neither may re-close the half or
+  # fire on_close twice.
+  def test_receive_fin_after_the_read_side_closed_is_a_no_op
+    stream = stream_on(RecordingTransport.new)
+    closes = 0
+    stream.on_close { closes += 1 }
+    stream.notify_read_close
+    stream.close_write
+
+    stream.receive_fin("late")
+
+    assert_equal 1, closes
+    assert_nil stream.read
+  end
+
+  def test_receive_data_reports_no_consumption_when_the_write_races_a_close
+    stream = stream_on(RecordingTransport.new)
+    stream.instance_variable_get(:@input).define_singleton_method(:write) do |_chunk|
+      # The reader closes the stream while this write is in flight.
+      stream.instance_variable_set(:@read_open, false)
+      raise ::Protocol::HTTP::Body::Writable::Closed
+    end
+
+    refute stream.receive_data("late"), "a swallowed close must not report consumption"
+  end
+
   def test_backpressure_preserves_the_final_suffix_until_it_can_be_read
     transport = RecordingTransport.new
     stream = stream_on(transport, receive_buffer_bytes: 4, receive_backpressure: true)

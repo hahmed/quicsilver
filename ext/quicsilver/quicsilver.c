@@ -267,6 +267,7 @@ static void
 receive_with_credit(StreamContext* ctx, QUIC_STREAM_EVENT* event)
 {
     uint64_t token = ctx->token;
+    uint64_t stream_id = ctx->stream_id;
     uint64_t indicated = event->RECEIVE.TotalBufferLength;
     uint64_t accepted = indicated;
     if (ctx->receive_credit_enabled) {
@@ -292,6 +293,13 @@ receive_with_credit(StreamContext* ctx, QUIC_STREAM_EVENT* event)
     if (copied != accepted) goto failed;
 
     // Debit before Ruby dispatch: a callback may replenish credit synchronously.
+    //
+    // `admission` lives on this frame and ctx borrows a pointer to it for the
+    // duration of the dispatch below. That is safe only because the pointer is
+    // cleared before we return, MsQuic does not deliver RECEIVE for a stream
+    // re-entrantly, and tokens are never reused — so a ctx retired during
+    // dispatch cannot be resolved again by find_stream. defer_stream_receive
+    // additionally checks admission->thread before touching it.
     ReceiveAdmission admission = {accepted, 0, rb_thread_current(), ctx->receive_credit_enabled};
     ctx->receive_admission = &admission;
     if (admission.credit_enabled) {
@@ -323,7 +331,10 @@ receive_with_credit(StreamContext* ctx, QUIC_STREAM_EVENT* event)
 
 failed:
     free(combined);
-    fprintf(stderr, "Quicsilver: receive delivery failed; aborting stream\n");
+    // Last resort only: we are on the MsQuic thread with a failed or absent
+    // Ruby dispatch, so the Ruby logger is not safely reachable from here.
+    fprintf(stderr, "Quicsilver: receive delivery failed on stream %llu; aborting\n",
+        (unsigned long long)stream_id);
     // Ruby delivery may have shut down the connection; resolve the token again.
     ctx = find_stream(token);
     if (ctx) {

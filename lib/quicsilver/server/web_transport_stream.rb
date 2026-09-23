@@ -185,14 +185,22 @@ module Quicsilver
       rescue ::Protocol::HTTP::Body::Writable::Closed, ClosedQueueError, ResetError
         # Closing can race the write after the read-open check above.
         raise if @read_open
+
+        # The read side is already closed, so this data was not consumed and
+        # there is no read side left to close. Never report full consumption.
+        false
       end
 
+      # A FIN only ends the read side once its data is fully consumed; under
+      # backpressure a deferred suffix is still outstanding. :nodoc:
       def receive_fin(data)
         notify_read_close if receive_data(data)
       end
 
       # Called by Server when the peer has closed its write side. :nodoc:
       def notify_read_close
+        return unless @read_open
+
         @read_open = false
         @input.close_write
         notify_close_callback
@@ -220,6 +228,11 @@ module Quicsilver
       end
 
       # Called by Server when the stream is reset or fully closed. :nodoc:
+      #
+      # Paused input is not covered by our own abort: MsQuic is still holding a
+      # deferred suffix and the peer may keep sending, so tell it to stop. Our
+      # own STOP_SENDING is not echoed back as a peer event, so this cannot
+      # re-enter notify_peer_stop_sending.
       def notify_close(error: nil)
         if error && @receive_backpressure && @read_open
           @stream.stop_sending(error.http_error_code)
