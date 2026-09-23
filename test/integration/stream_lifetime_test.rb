@@ -1087,13 +1087,11 @@ class StreamLifetimeTest < Minitest::Test
     await_event(@server, "STREAM_SHUTDOWN_COMPLETE", reset.first)
   end
 
+  # Establish through the real CONNECT path so the session is registered and
+  # accepted exactly as it is for an application.
   def accept_backpressured_session
-    _, connect_stream, = open_stream
-    session = Quicsilver::Server::WebTransportSession.new(
-      connection: @server_connection, stream: connect_stream, headers: {}
-    )
-    @server.instance_variable_get(:@webtransport).for(@server_connection.handle).register(session)
-    session.accept!(receive_backpressure: true, receive_buffer_bytes: 4, receive_buffer_chunks: 1)
+    @wt_receive_options = {receive_backpressure: true, receive_buffer_bytes: 4, receive_buffer_chunks: 1}
+    _, session = open_webtransport_session
     session
   end
 
@@ -1113,8 +1111,27 @@ class StreamLifetimeTest < Minitest::Test
     incoming = accepted.pop(timeout: 3)
     refute_nil incoming, "WebTransport child was not accepted"
 
+    # A separate connection is unaffected by construction; the question is what
+    # happens to a sibling sharing the paused connection's credit.
     other = RecordingClient.new("localhost", @port, unsecure: true, request_timeout: 3)
     assert_equal 200, other.get("/").status
+
+    sibling_peer, sibling = open_webtransport_child(session)
+    sibling_peer.send("sibling data", fin: true)
+    assert_equal "sibling data", drain_stream(sibling, "sibling data".bytesize)
+
+    # Prove the reply actually reaches the peer, not just that write returned.
+    sibling.write("sibling reply")
+    sibling.close_write
+    reply = "".b
+    loop do
+      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN", "STREAM_RESET"], sibling.stream_id)
+      refute_equal "STREAM_RESET", event[1]
+      reply << decode_event(event).data
+      break if event[1] == "RECEIVE_FIN"
+    end
+    assert_equal "sibling reply", reply
+    assert_equal 200, @client.get("/").status
 
     reader = Thread.new do
       chunks = []
@@ -1240,6 +1257,22 @@ class StreamLifetimeTest < Minitest::Test
     stream = accepted.pop(timeout: 3)
     refute_nil stream, "WebTransport child stream was not accepted"
     [peer, stream]
+  end
+
+  # Read at least `bytes` from a WebTransport stream, failing rather than
+  # hanging the suite if delivery stalls.
+  def drain_stream(stream, bytes, timeout: 3)
+    reader = Thread.new do
+      buffer = "".b
+      buffer << stream.read while buffer.bytesize < bytes
+      buffer
+    end
+    reader.report_on_exception = false
+    assert reader.join(timeout), "Timed out draining #{bytes} bytes from stream #{stream.stream_id}"
+    reader.value
+  ensure
+    reader&.kill
+    reader&.join(timeout)
   end
 
   def assert_webtransport_usable(session, peer, stream)

@@ -166,9 +166,10 @@ module Quicsilver
       # fail its pending reads. Its write side stays open.
       #
       # Opt-in receive_backpressure pauses native delivery instead, so a slow
-      # reader stalls its own stream rather than losing it — overflow then only
-      # fires for a reader that never drains. Shared connection credit means a
-      # paused stream can still stall others while the app is not reading.
+      # reader stalls its own stream rather than losing it. A reader that never
+      # drains leaves the stream paused indefinitely — there is no timeout, and
+      # overflow is not reached. Shared connection credit means a paused stream
+      # can still stall others while the app is not reading.
       def accept!(receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0,
         receive_backpressure: false)
         raise IOError, "Session closed" if @closed
@@ -470,8 +471,9 @@ module Quicsilver
         )
         type = unidirectional ? WT_STREAM_UNI : WT_STREAM_BIDI
         prefix = Protocol.encode_varint(type) + Protocol.encode_varint(@stream_id)
-        # Grant receive credit before the prefix goes out: the peer may send as
-        # soon as it sees the prefix, and data arriving with no credit stalls.
+        # Grant receive credit before the prefix goes out. Native credit
+        # enforcement is off until the first grant, so data arriving in that
+        # window would bypass the budget entirely rather than be paused.
         wt_stream.enable_receive_backpressure
         stream.send(prefix)
         stream.reliable_offset = prefix.bytesize if @connection.reliable_reset_enabled?

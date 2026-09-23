@@ -229,10 +229,11 @@ module Quicsilver
 
       # Called by Server when the stream is reset or fully closed. :nodoc:
       #
-      # Paused input is not covered by our own abort: MsQuic is still holding a
-      # deferred suffix and the peer may keep sending, so tell it to stop. Our
-      # own STOP_SENDING is not echoed back as a peer event, so this cannot
-      # re-enter notify_peer_stop_sending.
+      # Under backpressure an errored close also sends STOP_SENDING. abort
+      # already requests a transport abort, so this is belt and braces for a
+      # stream with paused input; it is not known to be required. It cannot
+      # re-enter notify_peer_stop_sending, since our own STOP_SENDING is not
+      # delivered back to us as a peer event.
       def notify_close(error: nil)
         if error && @receive_backpressure && @read_open
           @stream.stop_sending(error.http_error_code)
