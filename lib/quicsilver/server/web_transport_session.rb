@@ -433,7 +433,7 @@ module Quicsilver
         stream = @streams_mutex.synchronize { @streams.delete(stream_id) }
         return unless stream
 
-        error_code ? stream.notify_reset(error_code) : stream.notify_close
+        error_code ? stream.notify_peer_reset(error_code) : stream.notify_close
       end
 
       private

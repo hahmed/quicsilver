@@ -59,11 +59,40 @@ class WebTransportStreamTest < Minitest::Test
   def test_a_peer_reset_reports_the_application_code
     stream = stream_on(RecordingTransport.new)
     received = nil
-    stream.on_reset { |code| received = code }
+    stream.on_peer_reset { |code| received = code }
 
-    stream.notify_reset(WT.application_error_to_http(42))
+    stream.notify_peer_reset(WT.application_error_to_http(42))
 
     assert_equal 42, received
+  end
+
+  def test_each_signal_reaches_its_own_callback
+    stream = stream_on(RecordingTransport.new)
+    received = []
+    stream.on_peer_reset { |code| received << [:reset, code] }
+    stream.on_peer_stop_sending { |code| received << [:stop_sending, code] }
+
+    stream.notify_peer_reset(WT.application_error_to_http(42))
+    stream.notify_peer_stop_sending(WT.application_error_to_http(43))
+
+    assert_equal [[:reset, 42], [:stop_sending, 43]], received
+  end
+
+  def test_stop_sending_does_not_invoke_the_reset_callback
+    stream = stream_on(RecordingTransport.new)
+    stream.on_peer_reset { flunk "reset callback ran for STOP_SENDING" }
+
+    stream.notify_peer_stop_sending(WT.application_error_to_http(42))
+  end
+
+  def test_a_peer_stop_sending_outside_the_range_reports_no_code
+    stream = stream_on(RecordingTransport.new)
+    received = :unset
+    stream.on_peer_stop_sending { |code| received = code }
+
+    stream.notify_peer_stop_sending(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+
+    assert_nil received
   end
 
   # §4.4: a code outside the reserved range is still a reset, but carries no
@@ -71,18 +100,24 @@ class WebTransportStreamTest < Minitest::Test
   def test_a_peer_reset_outside_the_range_reports_no_code
     stream = stream_on(RecordingTransport.new)
     received = :unset
-    stream.on_reset { |code| received = code }
+    stream.on_peer_reset { |code| received = code }
 
-    stream.notify_reset(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+    stream.notify_peer_reset(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
 
     assert_nil received
   end
 
-  def test_a_peer_reset_closes_the_stream
-    stream = stream_on(RecordingTransport.new)
+  def test_a_peer_reset_keeps_the_write_side_open
+    transport = RecordingTransport.new
+    stream = stream_on(transport)
 
-    stream.notify_reset(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
+    stream.notify_peer_reset(Quicsilver::Protocol::H3_REQUEST_CANCELLED)
 
+    assert stream.open?
+    assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
+    stream.write("response")
+    stream.close_write
+    assert_equal [["response", false], ["", true]], transport.writes
     refute stream.open?
   end
 
@@ -309,7 +344,7 @@ class WebTransportStreamTest < Minitest::Test
     stream = build_stream
     stream.receive_data("unread")
     code = WT.application_error_to_http(42)
-    stream.notify_reset(code)
+    stream.notify_peer_reset(code)
 
     error = assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
     assert_equal 42, error.application_error_code

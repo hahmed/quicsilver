@@ -46,7 +46,8 @@ module Quicsilver
         @write_open = direction != :receive_only
         @input = ::Protocol::HTTP::Body::Writable.new
         @close_callback = nil
-        @reset_callback = nil
+        @peer_reset_callback = nil
+        @peer_stop_sending_callback = nil
         @close_notified = false
       end
 
@@ -87,11 +88,22 @@ module Quicsilver
         @close_callback = block
       end
 
-      # The peer reset this stream. Yields the application error code, or nil
-      # when the peer used a code outside the WebTransport range (draft-16
-      # §4.4 — still a reset, just no application code to report).
-      def on_reset(&block)
-        @reset_callback = block
+      # The peer reset its sending side (RESET_STREAM): our read side is now
+      # closed and `read` raises ResetError. Writing is unaffected.
+      #
+      # Yields the application error code, or nil when the peer used a code
+      # outside the WebTransport range (draft-16 §4.4 — still a reset, just no
+      # application code to report).
+      def on_peer_reset(&block)
+        @peer_reset_callback = block
+      end
+
+      # The peer asked us to stop sending (STOP_SENDING): our write side is now
+      # closed and `write` raises IOError. Reading is unaffected.
+      #
+      # Yields the application error code on the same terms as on_peer_reset.
+      def on_peer_stop_sending(&block)
+        @peer_stop_sending_callback = block
       end
 
       # Reset this stream with an application error code.
@@ -130,13 +142,26 @@ module Quicsilver
         notify_close_callback
       end
 
-      # Called by Server when the peer resets this stream. :nodoc:
-      def notify_reset(http_error_code)
+      # RESET_STREAM ends our read side; the write side stays open. :nodoc:
+      def notify_peer_reset(http_error_code)
         error = ResetError.new(http_error_code)
+        @read_open = false
         begin
-          notify_close(error: error)
+          @input.close(error)
+          notify_close_callback unless open?
         ensure
-          @reset_callback&.call(error.application_error_code)
+          @peer_reset_callback&.call(error.application_error_code)
+        end
+      end
+
+      # STOP_SENDING ends our write side; MsQuic answers it, and we keep
+      # receiving on the read side. :nodoc:
+      def notify_peer_stop_sending(http_error_code)
+        @write_open = false
+        begin
+          notify_close_callback unless open?
+        ensure
+          @peer_stop_sending_callback&.call(Protocol::WebTransport.http_to_application_error(http_error_code))
         end
       end
 
@@ -153,6 +178,7 @@ module Quicsilver
 
         @stream.send("".b, fin: true)
         @write_open = false
+        notify_close_callback unless open?
       end
 
       private

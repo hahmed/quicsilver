@@ -708,13 +708,53 @@ class StreamLifetimeTest < Minitest::Test
     peer, reset_stream = open_webtransport_child(session)
     sibling_peer, sibling = open_webtransport_child(session)
     resets = Queue.new
-    reset_stream.on_reset { |code| resets << code }
+    reset_stream.on_peer_reset { |code| resets << code }
+    reset_stream.on_peer_stop_sending { |code| resets << code }
 
     peer.abort(Quicsilver::Protocol::WebTransport.application_error_to_http(42))
 
-    assert_equal 42, resets.pop(timeout: 3)
+    # Aborting both directions produces RESET_STREAM and STOP_SENDING.
+    assert_equal [42, 42], 2.times.map { resets.pop(timeout: 3) }
     refute reset_stream.open?
     assert_webtransport_usable(session, sibling_peer, sibling)
+  end
+
+  def test_peer_reset_keeps_the_stream_writable
+    _, session = open_webtransport_session
+    peer, stream = open_webtransport_child(session)
+    resets = Queue.new
+    stream.on_peer_reset { |code| resets << code }
+    stream.on_peer_stop_sending { flunk "STOP_SENDING reported for a RESET_STREAM" }
+
+    peer.reset(Quicsilver::Protocol::WebTransport.application_error_to_http(42))
+
+    assert_equal 42, resets.pop(timeout: 3)
+    assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
+    stream.write("response after reset")
+    stream.close_write
+    received = "".b
+    loop do
+      event = await_event(@client, ["RECEIVE", "RECEIVE_FIN"], stream.stream_id)
+      received << decode_event(event).data
+      break if event[1] == "RECEIVE_FIN"
+    end
+    assert_equal "response after reset", received
+  end
+
+  def test_peer_stop_sending_keeps_the_stream_readable
+    _, session = open_webtransport_session
+    peer, stream = open_webtransport_child(session)
+    resets = Queue.new
+    stream.on_peer_stop_sending { |code| resets << code }
+    stream.on_peer_reset { flunk "RESET_STREAM reported for a STOP_SENDING" }
+
+    peer.stop_sending(Quicsilver::Protocol::WebTransport.application_error_to_http(42))
+
+    assert_equal 42, resets.pop(timeout: 3)
+    assert_raises(IOError) { stream.write("too late") }
+    peer.send("request after stop", fin: true)
+    assert_equal "request after stop", stream.read
+    assert_nil stream.read
   end
 
   def test_session_close_aborts_bidi_and_receive_only_children

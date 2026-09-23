@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- WebTransport stream resets are directional. `RESET_STREAM` closes only the read side and invokes the new `on_peer_reset`; `STOP_SENDING` closes only the write side and invokes the new `on_peer_stop_sending`. `on_close` fires once both directions are closed. Previously either signal tore down the whole stream and both reported through `on_reset`, which is removed — the `peer_` prefix distinguishes these inbound events from the outbound `reset` and `abort` methods.
 - WebTransport CONNECT waits for peer SETTINGS before reaching Rack, including when headers arrive with FIN. The `webtransport-h3` token requires `WT_ENABLED=1` and `H3_DATAGRAM=1`; the legacy `webtransport` token requires `H3_DATAGRAM=1`. Waiting is limited to one CONNECT and 64 KiB of body data per connection, with cleanup on cancellation or connection closure.
 - WebTransport permits one active session per QUIC connection until session flow control is implemented. Additional CONNECT requests are rejected with `H3_REQUEST_REJECTED`; closing a session allows another. SETTINGS no longer advertise session flow-control credit, and the legacy session limit is one.
 - WebTransport `close(code:, reason:)` rejects invalid UTF-8 and codes outside the unsigned 32-bit range before changing session state. Valid UTF-8 binary strings remain supported; long valid reasons are truncated at a UTF-8 character boundary.

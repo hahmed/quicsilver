@@ -77,7 +77,7 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     server, connection = server_with_session
     stream = accept_stream(server, connection, COMMAND_STREAM)
     reported = :unset
-    stream.on_reset { |code| reported = code }
+    stream.on_peer_stop_sending { |code| reported = code }
 
     stop_sending(server, connection, COMMAND_STREAM,
       Quicsilver::Protocol::WebTransport.application_error_to_http(42))
@@ -85,13 +85,17 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     assert_equal 42, reported
   end
 
-  def test_stop_sending_removes_the_stream_from_its_session
+  def test_stop_sending_keeps_the_stream_routable_for_incoming_data
     server, connection = server_with_session
-    accept_stream(server, connection, COMMAND_STREAM)
+    receive(server, connection, COMMAND_STREAM, bidi_payload(""))
+    stream = session.stream(COMMAND_STREAM)
 
     stop_sending(server, connection, COMMAND_STREAM, Quicsilver::Protocol::H3_REQUEST_CANCELLED)
 
-    assert_nil session.stream(COMMAND_STREAM)
+    receive_fin(server, connection, COMMAND_STREAM, "still reading")
+
+    assert_equal "still reading", stream.read
+    assert_nil stream.read
   end
 
   def test_stop_sending_does_not_touch_http3_bookkeeping
