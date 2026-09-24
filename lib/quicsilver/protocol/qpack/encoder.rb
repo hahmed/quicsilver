@@ -26,37 +26,27 @@ module Quicsilver
           @huffman = huffman
           @field_cache = {}
           @block_cache = {}
-          @oid_cache = {}
         end
 
+        # Caches are keyed by header content, never by identity or object_id:
+        # callers may reuse and mutate the same array, and an identity hit
+        # would return the previous encoding.
+        #
+        # Caching a whole field block is only sound because encoding is
+        # static-table-only: Required Insert Count is always zero, so the bytes
+        # never depend on connection state. Implementing the dynamic table
+        # would invalidate @block_cache, since indices are relative to a Base.
         def encode(headers)
-          # Fastest path: exact same object as last call
-          return @last_result if headers.equal?(@last_headers)
-
-          # Fast path: check object_id cache (same array object reused)
-          oid = headers.object_id
-          cached = @oid_cache[oid]
-          if cached
-            @last_headers = headers
-            @last_result = cached
-            return cached
-          end
-
           if headers.is_a?(Array) && headers.size <= 16
             # Content-based caching for small header sets
             block_key = headers.map { |n, v| "#{n}\0#{v}" }.join("\x01")
             cached_block = @block_cache[block_key]
-            if cached_block
-              @oid_cache[oid] = cached_block if @oid_cache.size < BLOCK_CACHE_MAX
-              return cached_block
-            end
+            return cached_block if cached_block
 
-            result = encode_fields(headers)
-            result_frozen = result.freeze
+            result_frozen = encode_fields(headers).freeze
             if @block_cache.size < BLOCK_CACHE_MAX
               @block_cache[block_key.freeze] = result_frozen
             end
-            @oid_cache[oid] = result_frozen if @oid_cache.size < BLOCK_CACHE_MAX
             return result_frozen
           end
 

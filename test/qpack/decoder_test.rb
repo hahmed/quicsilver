@@ -76,6 +76,21 @@ class QpackDecoderTest < Minitest::Test
     end
   end
 
+  # The byte array is mutable, so a cache keyed on identity or object_id
+  # returned a stale decode after an in-place edit.
+  def test_decoding_a_mutated_byte_array_reflects_the_new_bytes
+    bytes = [1, "a".ord]
+    assert_equal "a", decode_qpack_string(bytes, 0).first
+
+    bytes[1] = "b".ord
+    assert_equal "b", decode_qpack_string(bytes, 0).first
+  end
+
+  def test_decoding_distinct_equal_arrays_stays_correct
+    decoded = 3.times.map { |i| decode_qpack_string([1, "a".ord + i], 0).first }
+    assert_equal %w[a b c], decoded
+  end
+
   # Full QPACK header block: Huffman encoder → request parser
   def test_request_parser_decodes_huffman_headers
     encoder = Quicsilver::Protocol::Qpack::Encoder.new(huffman: true)

@@ -38,41 +38,11 @@ module Quicsilver
           [str, len_bytes + length]
         end
 
-        # Cache for decode_qpack_string
-        DQS_CACHE = {}        # array-content → [str, consumed]
-        DQS_OID_CACHE = {}    # object_id|offset → [str, consumed]
-        DQS_CACHE_MAX = 128
-
-        # 2-slot last-result cache for decode_qpack_string
-        DQS_LAST_A = [nil, nil, nil] # [bytes, offset, result]
-        DQS_LAST_B = [nil, nil, nil]
-
+        # Byte-array variant. Results are not cached: the input is mutable, so
+        # keying on identity or object_id returns a stale decode after an
+        # in-place edit. Production decoding uses the String variant above.
         def decode_qpack_string(bytes, offset)
-          # 2-slot equal? fast path (covers alternating-object patterns)
-          return DQS_LAST_A[2] if bytes.equal?(DQS_LAST_A[0]) && offset == DQS_LAST_A[1]
-          return DQS_LAST_B[2] if bytes.equal?(DQS_LAST_B[0]) && offset == DQS_LAST_B[1]
-
-          # Object-id cache
-          oid_key = (bytes.object_id << 16) | offset
-          cached = DQS_OID_CACHE[oid_key]
-          if cached
-            # Rotate 2-slot cache
-            DQS_LAST_B[0], DQS_LAST_B[1], DQS_LAST_B[2] = DQS_LAST_A[0], DQS_LAST_A[1], DQS_LAST_A[2]
-            DQS_LAST_A[0], DQS_LAST_A[1], DQS_LAST_A[2] = bytes, offset, cached
-            return cached
-          end
-
-          # Dispatch to string variant if given a String
           return decode_qpack_string_from_str(bytes, offset) if bytes.is_a?(String)
-
-          # Content-based cache for offset=0
-          if offset == 0
-            cached = DQS_CACHE[bytes]
-            if cached
-              DQS_OID_CACHE[oid_key] = cached
-              return cached
-            end
-          end
 
           first = bytes[offset]
           huffman = (first & 0x80) != 0
@@ -100,15 +70,7 @@ module Quicsilver
             raw
           end
 
-          result = [str, len_bytes + length].freeze
-
-          # Cache for offset=0 (common case: standalone decode)
-          if offset == 0 && DQS_CACHE.size < DQS_CACHE_MAX
-            DQS_CACHE[bytes.frozen? ? bytes : bytes.dup.freeze] = result
-          end
-          DQS_OID_CACHE[oid_key] = result if DQS_OID_CACHE.size < DQS_CACHE_MAX
-
-          result
+          [str, len_bytes + length].freeze
         end
 
         # String-based prefix integer decoding

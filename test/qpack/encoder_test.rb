@@ -264,4 +264,27 @@ class QpackEncoderTest < Minitest::Test
     encoded = @encoder.encode({ ":method" => "GET" })
     assert_equal Encoding::BINARY, encoded.encoding
   end
+
+  # Callers may reuse and mutate one headers array. Caching on identity or
+  # object_id returned the previous encoding for the new contents.
+  def test_reusing_a_mutated_headers_array_encodes_the_new_values
+    headers = [[":method", "GET"], [":path", "/a"]]
+    first = @encoder.encode(headers)
+
+    headers[1] = [":path", "/b"]
+    second = @encoder.encode(headers)
+
+    refute_equal first, second
+    assert_equal @encoder.encode([[":method", "GET"], [":path", "/b"]]), second
+  end
+
+  def test_repeated_mutation_of_one_array_tracks_every_change
+    headers = [[":method", "GET"], [":path", "/0"]]
+    encodings = 5.times.map do |i|
+      headers[1] = [":path", "/#{i}"]
+      @encoder.encode(headers)
+    end
+
+    assert_equal encodings, encodings.uniq
+  end
 end
