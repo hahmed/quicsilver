@@ -24,10 +24,21 @@ module Quicsilver
         @idle_timeout = idle_timeout
         @checkout_timeout = checkout_timeout
         @mode = mode
-        @pools = {} # "host:port" => [{ client:, checked_out: }]
+        @pools = {} # connection key => [{ client:, checked_out: }]
+        @keys = {}.compare_by_identity # client => the key it was pooled under
         @mutex = Mutex.new
         @condition = ConditionVariable.new
       end
+
+      # Options that change the connection itself, so a pooled connection built
+      # with one set must never be handed to a caller asking for another.
+      # unsecure is the important one: it disables certificate validation.
+      CONNECTION_OPTIONS = %i[
+        unsecure
+        datagram_receive_enabled
+        reliable_reset_enabled
+        transport_cibir_id
+      ].freeze
 
       # Check out a connected Client. Reuses an idle one or creates a new one.
       # In :exclusive mode, blocks with timeout if pool is full.
@@ -37,7 +48,7 @@ module Quicsilver
       end
 
       private def checkout_exclusive(hostname, port, **options)
-        key = "#{hostname}:#{port}"
+        key = connection_key(hostname, port, options)
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @checkout_timeout
 
         @mutex.synchronize do
@@ -65,7 +76,10 @@ module Quicsilver
 
             # Pool full — wait for a checkin
             remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-            raise ConnectionError, "Connection pool full for #{key} (waited #{@checkout_timeout}s, max: #{@max_size})" if remaining <= 0
+            if remaining <= 0
+              raise ConnectionError,
+                "Connection pool full for #{hostname}:#{port} (waited #{@checkout_timeout}s, max: #{@max_size})"
+            end
             @condition.wait(@mutex, remaining)
           end
         end
@@ -76,6 +90,7 @@ module Quicsilver
 
         @mutex.synchronize do
           (@pools[key] ||= []) << { client: client, checked_out: true, last_used: Time.now }
+          @keys[client] = key
         end
 
         client
@@ -85,7 +100,7 @@ module Quicsilver
       # Each thread opens its own QUIC stream on the shared connection.
       # No checkout/checkin semantics — the connection is never "owned".
       private def checkout_shared(hostname, port, **options)
-        key = "#{hostname}:#{port}"
+        key = connection_key(hostname, port, options)
 
         @mutex.synchronize do
           entry = @pools[key]&.first
@@ -129,10 +144,10 @@ module Quicsilver
       # Return a Client to the pool. No-op in shared mode.
       def checkin(client)
         return if @mode == :shared
-        key = "#{client.hostname}:#{client.port}"
 
         @mutex.synchronize do
-          entries = @pools[key]
+          key = @keys[client]
+          entries = key && @pools[key]
           return unless entries
 
           entry = entries.find { |e| e[:client].equal?(client) }
@@ -143,6 +158,7 @@ module Quicsilver
             entry[:last_used] = Time.now
           else
             entries.delete(entry)
+            @keys.delete(client)
             client.close_connection
             @pools.delete(key) if entries.empty?
           end
@@ -158,18 +174,27 @@ module Quicsilver
             entries.each { |e| e[:client].close_connection }
           end
           @pools.clear
+          @keys.clear
         end
       end
 
-      # Total clients in the pool, optionally filtered by host:port.
+      # Total clients in the pool, optionally filtered by host and port across
+      # every option set pooled for them.
       def size(host = nil, port = nil)
         @mutex.synchronize do
           if host && port
-            (@pools["#{host}:#{port}"] || []).size
+            prefix = "#{host}:#{port}\0"
+            @pools.sum { |key, entries| key.start_with?(prefix) ? entries.size : 0 }
           else
             @pools.values.sum(&:size)
           end
         end
+      end
+
+      private def connection_key(hostname, port, options)
+        defaults = Client::DEFAULT_CONNECTION_OPTIONS
+        identity = CONNECTION_OPTIONS.map { |name| options.fetch(name, defaults[name]).inspect }
+        "#{hostname}:#{port}\0#{identity.join("\0")}"
       end
     end
   end

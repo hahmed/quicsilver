@@ -12,12 +12,24 @@ module Quicsilver
     DEFAULT_REQUEST_TIMEOUT = 30  # seconds
     DEFAULT_CONNECTION_TIMEOUT = 5000  # ms
 
+    # Options that shape the QUIC connection rather than a single request.
+    # ConnectionPool keys pooled connections on these, so a connection built
+    # with one set is never reused for a caller asking for another.
+    DEFAULT_CONNECTION_OPTIONS = {
+      unsecure: false,
+      datagram_receive_enabled: true,
+      reliable_reset_enabled: true,
+      transport_cibir_id: nil
+    }.freeze
+
     def initialize(hostname, port = 4433, **options)
       @hostname = hostname
       @port = port
-      @unsecure = options.fetch(:unsecure, false)
-      @datagram_receive_enabled = options.fetch(:datagram_receive_enabled, true)
-      @reliable_reset_enabled = options.fetch(:reliable_reset_enabled, true)
+      @unsecure = options.fetch(:unsecure, DEFAULT_CONNECTION_OPTIONS[:unsecure])
+      @datagram_receive_enabled = options.fetch(:datagram_receive_enabled,
+        DEFAULT_CONNECTION_OPTIONS[:datagram_receive_enabled])
+      @reliable_reset_enabled = options.fetch(:reliable_reset_enabled,
+        DEFAULT_CONNECTION_OPTIONS[:reliable_reset_enabled])
       @connection_timeout = options.fetch(:connection_timeout, DEFAULT_CONNECTION_TIMEOUT)
       @request_timeout = options.fetch(:request_timeout, DEFAULT_REQUEST_TIMEOUT)
       @max_body_size = options[:max_body_size]
