@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "test_helper"
+require_relative "../webtransport_helper"
 
 # Backpressure pauses native delivery when the application is not reading.
 # These cases run through real CONNECT establishment against a live peer.
@@ -9,6 +9,8 @@ require "test_helper"
 # exhaustion is reached deterministically, rather than by opening streams
 # until something times out.
 class WebTransportBackpressureTest < Minitest::Test
+  include WebTransportHelpers
+
   # Client#open_stream is private; expose it for raw WebTransport framing.
   class PeerClient < Quicsilver::Client
     attr_reader :events
@@ -95,7 +97,7 @@ class WebTransportBackpressureTest < Minitest::Test
     peer.reset(Quicsilver::Protocol::WebTransport.application_error_to_http(42))
 
     assert_equal 42, codes.pop(timeout: 3)
-    assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { drain(stream, 1) }
+    assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { drain_stream(stream, 1) }
     # The write half survives a peer reset, even with input paused, and the
     # response must actually reach the peer.
     assert stream.open?
@@ -113,7 +115,7 @@ class WebTransportBackpressureTest < Minitest::Test
 
     session.close(code: 0, reason: "done")
 
-    assert_raises(Quicsilver::Server::WebTransportStream::ResetError, IOError) { drain(stream, 1) }
+    assert_raises(Quicsilver::Server::WebTransportStream::ResetError, IOError) { drain_stream(stream, 1) }
     refute session.open?
     assert_equal 200, @client.get("/").status
   end
@@ -200,37 +202,6 @@ class WebTransportBackpressureTest < Minitest::Test
     [peer, stream]
   end
 
-  # Accumulate queued chunks up to `bytes`, failing rather than hanging.
-  def collect(chunks, bytes, timeout: 10)
-    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
-    buffer = "".b
-    while buffer.bytesize < bytes
-      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      break if remaining <= 0
-
-      chunk = chunks.pop(timeout: remaining)
-      break if chunk.nil?
-
-      buffer << chunk
-    end
-    buffer
-  end
-
-  # Read at least `bytes`, failing rather than hanging if delivery stalls.
-  def drain(stream, bytes, timeout: 10)
-    reader = Thread.new do
-      buffer = "".b
-      buffer << stream.read while buffer.bytesize < bytes
-      buffer
-    end
-    reader.report_on_exception = false
-    assert reader.join(timeout), "Timed out draining #{bytes} bytes from stream #{stream.stream_id}"
-    reader.value
-  ensure
-    reader&.kill
-    reader&.join(timeout)
-  end
-
   # Wait for the Ruby queue to fill, which is the precondition for MsQuic
   # deferring a suffix. Fails rather than proceeding without the precondition.
   # Note this proves the queue is full, not that a suffix is already deferred.
@@ -241,23 +212,6 @@ class WebTransportBackpressureTest < Minitest::Test
       Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
     assert_equal 0, queue.available_bytes,
       "receive queue never filled, so input was never paused"
-  end
-
-  # Read to EOF under a deadline, so a missing FIN fails instead of hanging.
-  def drain_to_eof(stream, timeout: 15)
-    reader = Thread.new do
-      buffer = "".b
-      while (chunk = stream.read)
-        buffer << chunk
-      end
-      buffer
-    end
-    reader.report_on_exception = false
-    assert reader.join(timeout), "Timed out reading stream #{stream.stream_id} to EOF"
-    reader.value
-  ensure
-    reader&.kill
-    reader&.join(timeout)
   end
 
   def await_peer_delivery(stream_id, timeout: 3)

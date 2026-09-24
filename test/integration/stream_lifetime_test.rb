@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
-require "test_helper"
+require_relative "../webtransport_helper"
 
 class StreamLifetimeTest < Minitest::Test
+  include WebTransportHelpers
+
   REJECTION = 0x3994bd84
   MARKER = "stream-lifetime-test".b
 
@@ -1247,22 +1249,6 @@ class StreamLifetimeTest < Minitest::Test
     stream = accepted.pop(timeout: 3)
     refute_nil stream, "WebTransport child stream was not accepted"
     [peer, stream]
-  end
-
-  # Read at least `bytes` from a WebTransport stream, failing rather than
-  # hanging the suite if delivery stalls.
-  def drain_stream(stream, bytes, timeout: 3)
-    reader = Thread.new do
-      buffer = "".b
-      buffer << stream.read while buffer.bytesize < bytes
-      buffer
-    end
-    reader.report_on_exception = false
-    assert reader.join(timeout), "Timed out draining #{bytes} bytes from stream #{stream.stream_id}"
-    reader.value
-  ensure
-    reader&.kill
-    reader&.join(timeout)
   end
 
   def assert_webtransport_usable(session, peer, stream)
