@@ -71,7 +71,7 @@ module Quicsilver
       end
 
       # Route an incoming WebTransport stream to the right session.
-      def self.accept_stream(sessions, stream_id, stream_handle, payload)
+      def self.accept_stream(sessions, stream_id, stream_handle, payload, fin: false)
         session_id, initial_data = parse_stream_prefix(payload)
         return unless session_id
 
@@ -79,7 +79,7 @@ module Quicsilver
         return unless session
 
         wt_stream = session.add_stream(stream_handle, stream_id)
-        wt_stream.receive_data(initial_data) if initial_data && !initial_data.empty?
+        fin ? wt_stream.receive_fin(initial_data) : wt_stream.receive_data(initial_data)
         wt_stream
       end
 
@@ -164,16 +164,25 @@ module Quicsilver
       # the whole connection. A child that overflows stops receiving: we send
       # STOP_SENDING with receive_overflow_code, discard its queued input, and
       # fail its pending reads. Its write side stays open.
-      def accept!(receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0)
+      #
+      # Opt-in receive_backpressure pauses native delivery instead, so a slow
+      # reader stalls its own stream rather than losing it. A reader that never
+      # drains leaves the stream paused indefinitely — there is no timeout, and
+      # overflow is not reached. Shared connection credit means a paused stream
+      # can still stall others while the app is not reading.
+      def accept!(receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0,
+        receive_backpressure: false)
         raise IOError, "Session closed" if @closed
         return if @accepted
 
         ReceiveQueue.validate_limits(receive_buffer_bytes, receive_buffer_chunks)
+        WebTransportStream.validate_backpressure(receive_backpressure, receive_buffer_bytes, receive_buffer_chunks)
         WebTransportStream.validate_overflow_code(receive_overflow_code)
         @receive_options = {
           receive_buffer_bytes: receive_buffer_bytes,
           receive_buffer_chunks: receive_buffer_chunks,
-          receive_overflow_code: receive_overflow_code
+          receive_overflow_code: receive_overflow_code,
+          receive_backpressure: receive_backpressure
         }
         frame = Protocol.build_headers_frame([[:":status", "200"]])
         @stream.send(frame, fin: false)
@@ -462,6 +471,10 @@ module Quicsilver
         )
         type = unidirectional ? WT_STREAM_UNI : WT_STREAM_BIDI
         prefix = Protocol.encode_varint(type) + Protocol.encode_varint(@stream_id)
+        # Grant receive credit before the prefix goes out. Native credit
+        # enforcement is off until the first grant, so data arriving in that
+        # window would bypass the budget entirely rather than be paused.
+        wt_stream.enable_receive_backpressure
         stream.send(prefix)
         stream.reliable_offset = prefix.bytesize if @connection.reliable_reset_enabled?
         # Teardown may reset registered streams, so protect the header first.

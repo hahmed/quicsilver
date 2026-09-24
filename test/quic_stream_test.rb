@@ -64,4 +64,31 @@ class QuicStreamTest < Minitest::Test
     stream.stream_handle = 12345
     assert stream.writable?
   end
+
+  # NUM2ULL wraps a negative Integer into enormous credit, so the native
+  # boundary rejects bad input before it is converted.
+  def test_receive_credit_rejects_non_integers
+    stream = Quicsilver::Transport::Stream.new(99_999)
+
+    [1.5, nil, "4", :four].each do |value|
+      assert_raises(TypeError) { stream.grant_receive_credit(value, 1) }
+      assert_raises(TypeError) { stream.grant_receive_credit(1, value) }
+      assert_raises(TypeError) { stream.defer_receive(value) }
+    end
+  end
+
+  def test_receive_credit_rejects_negative_values
+    stream = Quicsilver::Transport::Stream.new(99_999)
+
+    assert_raises(ArgumentError) { stream.grant_receive_credit(-1, 1) }
+    assert_raises(ArgumentError) { stream.grant_receive_credit(1, -1) }
+    assert_raises(ArgumentError) { stream.defer_receive(-1) }
+  end
+
+  def test_receive_credit_errors_name_the_offending_argument
+    stream = Quicsilver::Transport::Stream.new(99_999)
+
+    assert_match(/chunks/, assert_raises(ArgumentError) { stream.grant_receive_credit(1, -1) }.message)
+    assert_match(/Deferred/, assert_raises(TypeError) { stream.defer_receive(nil) }.message)
+  end
 end

@@ -47,9 +47,37 @@ class WebTransportSessionTest < Minitest::Test
     assert session.open?
   end
 
+  def test_outgoing_stream_applies_backpressure_before_sending_its_prefix
+    outgoing = Object.new
+    events = []
+    outgoing.define_singleton_method(:stream_id) { 1 }
+    outgoing.define_singleton_method(:handle) { 99998 }
+    outgoing.define_singleton_method(:grant_receive_credit) do |bytes, chunks|
+      events << [:capacity, bytes, chunks]
+      true
+    end
+    outgoing.define_singleton_method(:send) { |data, **| events << [:send, data] }
+    connection = Object.new
+    connection.define_singleton_method(:open_stream) { |**| outgoing }
+    connection.define_singleton_method(:reliable_reset_enabled?) { false }
+    session = build_session(connection: connection)
+    session.accept!(receive_backpressure: true, receive_buffer_bytes: 4, receive_buffer_chunks: 1)
+
+    child = session.open_stream
+    child.receive_fin("data")
+
+    assert_equal "data", child.read
+    assert_nil child.read
+    prefix = Quicsilver::Protocol.encode_varint(Session::WT_STREAM_BIDI) + Quicsilver::Protocol.encode_varint(0)
+    assert_equal [[:capacity, 4, 1], [:send, prefix]], events
+  end
+
   def test_accept_rejects_invalid_receive_configuration_before_sending_headers
     [{receive_buffer_bytes: 0}, {receive_buffer_chunks: -1},
-      {receive_overflow_code: -1}, {receive_overflow_code: 1 << 32}].each do |options|
+      {receive_overflow_code: -1}, {receive_overflow_code: 1 << 32},
+      {receive_backpressure: :enabled},
+      {receive_backpressure: true, receive_buffer_bytes: 1 << 64},
+      {receive_backpressure: true, receive_buffer_chunks: 1 << 64}].each do |options|
       session = build_session
       assert_raises(ArgumentError) { session.accept!(**options) }
       refute session.open?

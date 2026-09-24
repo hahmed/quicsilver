@@ -35,18 +35,34 @@ module Quicsilver
         self
       end
 
+      def available_bytes
+        @mutex.synchronize { @chunks < @chunk_limit ? @byte_limit - @bytes : 0 }
+      end
+
+      def release_capacity_to(&callback)
+        capacity = @mutex.synchronize do
+          return if @queue.closed? || @release_capacity
+
+          @release_capacity = callback
+          [@byte_limit - @bytes, @chunk_limit - @chunks]
+        end
+        callback.call(*capacity)
+      end
+
       def pop
         entry = @queue.pop
         return unless entry
 
         data, bytes, generation = entry
-        @mutex.synchronize do
+        release_capacity = @mutex.synchronize do
           # A concurrent discard already released entries from the old queue.
           if generation == @generation
             @bytes -= bytes
             @chunks -= 1
+            @release_capacity unless @queue.closed?
           end
         end
+        release_capacity&.call(bytes, 1)
         data
       end
 
@@ -54,6 +70,7 @@ module Quicsilver
         @mutex.synchronize do
           # Writable clears only when discarding input; prevent a racing push
           # between its clear and close calls.
+          @release_capacity = nil
           @queue.close
           @queue.clear
           @generation += 1
@@ -63,7 +80,10 @@ module Quicsilver
       end
 
       def close
-        @mutex.synchronize { @queue.close }
+        @mutex.synchronize do
+          @release_capacity = nil
+          @queue.close
+        end
         self
       end
 

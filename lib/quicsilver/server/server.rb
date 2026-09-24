@@ -620,8 +620,9 @@ module Quicsilver
       return if manager.route_owned_stream(stream_id, event.handle, event.data, fin: true)
 
       if connection.uni_stream_type(stream_id) == :webtransport_uni
-        stream = route_wt_uni_stream(connection_handle, stream_id, event.handle, event.data, fin: true)
-        stream&.notify_read_close
+        # receive_fin closes the read side only once the FIN's data is fully
+        # accepted; under backpressure a deferred suffix is still outstanding.
+        route_wt_uni_stream(connection_handle, stream_id, event.handle, event.data, fin: true)
         return
       end
 
@@ -630,8 +631,7 @@ module Quicsilver
         complete_streaming_request(pending, event)
       elsif Transport::StreamId.bidirectional?(stream_id) &&
           (wt_payload = manager.pending_payload(stream_id, event.handle, event.data))
-        accept_webtransport_stream(connection_handle, stream_id, event.handle, wt_payload)
-        manager.active_stream(stream_id)&.notify_read_close
+        accept_webtransport_stream(connection_handle, stream_id, event.handle, wt_payload, fin: true)
       elsif manager.pending_stream?(stream_id)
         manager.reject_stream(stream_id, event.handle)
       else
@@ -662,8 +662,7 @@ module Quicsilver
         begin
           stream_type, payload = connection.handle_unidirectional_stream(stream)
           if stream_type == :webtransport_uni
-            wt_stream = route_wt_uni_stream(connection_handle, stream_id, stream.stream_handle, payload, fin: true)
-            wt_stream&.notify_read_close
+            route_wt_uni_stream(connection_handle, stream_id, stream.stream_handle, payload, fin: true)
           end
         rescue Protocol::FrameError => e
           Quicsilver.logger.error("Control stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
@@ -1023,17 +1022,19 @@ module Quicsilver
       nil
     rescue => e
       Quicsilver.logger.error("WebTransport uni stream error: #{e.class} - #{e.message}")
+      raise
     end
 
     # Accept an incoming WebTransport stream — parse prefix and route to session
-    def accept_webtransport_stream(connection_handle, stream_id, stream_handle, payload)
-      @webtransport.for(connection_handle).accept_bidi_stream(stream_id, stream_handle, payload)
+    def accept_webtransport_stream(connection_handle, stream_id, stream_handle, payload, fin: false)
+      @webtransport.for(connection_handle).accept_bidi_stream(stream_id, stream_handle, payload, fin: fin)
     rescue Protocol::FrameError => e
       Quicsilver.logger.error("WebTransport stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
       Quicsilver.connection_shutdown(connection_handle, e.error_code, false)
       nil
     rescue => e
       Quicsilver.logger.error("WebTransport stream error: #{e.class} - #{e.message}")
+      raise
     end
 
     def contains_headers_frame?(data)
