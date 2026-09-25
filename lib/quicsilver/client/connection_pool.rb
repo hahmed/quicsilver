@@ -38,6 +38,7 @@ module Quicsilver
         datagram_receive_enabled
         reliable_reset_enabled
         transport_cibir_id
+        idle_timeout_ms
       ].freeze
 
       # Check out a connected Client. Reuses an idle one or creates a new one.

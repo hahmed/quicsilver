@@ -128,4 +128,15 @@ class ClientOpenStreamErrorTest < Minitest::Test
       assert_raises(RuntimeError) { client.send(:open_stream) }
     end
   end
+  # The client advertises its own idle timeout; the lower of the two endpoints'
+  # values applies, so it cannot be hardcoded to match the server.
+  def test_idle_timeout_defaults_to_the_shared_value
+    assert_equal Quicsilver::Transport::Configuration::DEFAULT_IDLE_TIMEOUT_MS,
+      Quicsilver::Client.new("example.com", 4433).idle_timeout_ms
+  end
+
+  def test_idle_timeout_is_configurable
+    client = Quicsilver::Client.new("example.com", 4433, idle_timeout_ms: 60_000)
+    assert_equal 60_000, client.idle_timeout_ms
+  end
 end

@@ -4,7 +4,7 @@ module Quicsilver
   class Client
     include Protocol::ControlStreamParser
 
-    attr_reader :hostname, :port, :unsecure, :connection_timeout, :request_timeout
+    attr_reader :hostname, :port, :unsecure, :connection_timeout, :request_timeout, :idle_timeout_ms
     attr_reader :peer_goaway_id, :peer_settings, :peer_max_field_section_size
 
     FINISHED_EVENTS = %w[RECEIVE_FIN RECEIVE STREAM_RESET STOP_SENDING DATAGRAM_RECEIVED STREAM_START_COMPLETE STREAM_PEER_ACCEPTED].freeze
@@ -19,7 +19,8 @@ module Quicsilver
       unsecure: false,
       datagram_receive_enabled: true,
       reliable_reset_enabled: true,
-      transport_cibir_id: nil
+      transport_cibir_id: nil,
+      idle_timeout_ms: Transport::Configuration::DEFAULT_IDLE_TIMEOUT_MS
     }.freeze
 
     def initialize(hostname, port = 4433, **options)
@@ -31,6 +32,7 @@ module Quicsilver
       @reliable_reset_enabled = options.fetch(:reliable_reset_enabled,
         DEFAULT_CONNECTION_OPTIONS[:reliable_reset_enabled])
       @connection_timeout = options.fetch(:connection_timeout, DEFAULT_CONNECTION_TIMEOUT)
+      @idle_timeout_ms = options.fetch(:idle_timeout_ms, DEFAULT_CONNECTION_OPTIONS[:idle_timeout_ms])
       @request_timeout = options.fetch(:request_timeout, DEFAULT_REQUEST_TIMEOUT)
       @max_body_size = options[:max_body_size]
       @max_header_size = options[:max_header_size]
@@ -310,7 +312,8 @@ module Quicsilver
     private
 
     def create_configuration
-      Quicsilver.create_configuration(@unsecure, @datagram_receive_enabled, @reliable_reset_enabled)
+      Quicsilver.create_configuration(@unsecure, @datagram_receive_enabled, @reliable_reset_enabled,
+        nil, nil, @idle_timeout_ms)
     end
 
     def ensure_connected!

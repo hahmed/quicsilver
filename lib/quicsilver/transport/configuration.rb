@@ -51,8 +51,12 @@ module Quicsilver
       DEFAULT_DISCONNECT_TIMEOUT_MS = 16_000     # How long to wait for ACK before path declared dead
       DEFAULT_HANDSHAKE_IDLE_TIMEOUT_MS = 10_000 # Handshake timeout (separate from connection idle)
 
+      # Matches MsQuic and quic-go. A handler slower than this loses its
+      # response: the lower of the two endpoints' values applies.
+      DEFAULT_IDLE_TIMEOUT_MS = 30_000
+
       def initialize(cert_file = nil, key_file = nil, options = {})
-        @idle_timeout_ms = options.fetch(:idle_timeout_ms, 10000)
+        @idle_timeout_ms = options.fetch(:idle_timeout_ms, DEFAULT_IDLE_TIMEOUT_MS)
         @server_resumption_level = options.fetch(:server_resumption_level, QUIC_SERVER_RESUME_AND_ZERORTT)
         # Maximum concurrent bidirectional streams the peer can open.
         # Matches quic-go and Chromium defaults. MsQuic ceiling: 65,535.

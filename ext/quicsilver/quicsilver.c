@@ -821,9 +821,10 @@ quicsilver_open(VALUE self)
 static VALUE
 quicsilver_create_configuration(int argc, VALUE *argv, VALUE self)
 {
-    VALUE unsecure, datagram_receive_enabled, reliable_reset_enabled, incoming_bidi, incoming_uni;
-    rb_scan_args(argc, argv, "14", &unsecure, &datagram_receive_enabled,
-        &reliable_reset_enabled, &incoming_bidi, &incoming_uni);
+    VALUE unsecure, datagram_receive_enabled, reliable_reset_enabled, incoming_bidi, incoming_uni,
+        idle_timeout_ms;
+    rb_scan_args(argc, argv, "15", &unsecure, &datagram_receive_enabled,
+        &reliable_reset_enabled, &incoming_bidi, &incoming_uni, &idle_timeout_ms);
     if (argc < 2) datagram_receive_enabled = Qtrue;
     if (argc < 3) reliable_reset_enabled = Qtrue;
 
@@ -839,8 +840,11 @@ quicsilver_create_configuration(int argc, VALUE *argv, VALUE self)
     QUIC_SETTINGS Settings = {0};
     Settings.ReliableResetEnabled = RTEST(reliable_reset_enabled);
     Settings.IsSet.ReliableResetEnabled = TRUE;
-    Settings.IdleTimeoutMs = 10000; // 10 second idle timeout to match server
-    Settings.IsSet.IdleTimeoutMs = TRUE;
+    // The peer advertises its own idle timeout and the lower of the two applies.
+    if (!NIL_P(idle_timeout_ms)) {
+        Settings.IdleTimeoutMs = NUM2ULL(idle_timeout_ms);
+        Settings.IsSet.IdleTimeoutMs = TRUE;
+    }
     Settings.DatagramReceiveEnabled = RTEST(datagram_receive_enabled);
     Settings.IsSet.DatagramReceiveEnabled = TRUE;
 

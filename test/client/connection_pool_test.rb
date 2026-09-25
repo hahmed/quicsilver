@@ -52,6 +52,7 @@ class ConnectionPoolTest < Minitest::Test
     refute_equal key(pool, datagram_receive_enabled: false), key(pool)
     refute_equal key(pool, reliable_reset_enabled: false), key(pool)
     refute_equal key(pool, transport_cibir_id: "\x01\x02\x03\x04"), key(pool)
+    refute_equal key(pool, idle_timeout_ms: 60_000), key(pool)
   end
 
   def test_options_matching_the_defaults_reuse_one_connection

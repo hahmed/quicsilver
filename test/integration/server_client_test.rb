@@ -845,8 +845,6 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
-  private
-
   def start_server(app, **options)
     3.times do |attempt|
       @port = find_available_port

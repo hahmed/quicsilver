@@ -7,7 +7,7 @@ class ServerConfigurationTest < Minitest::Test
 
     assert_equal cert_file_path, config.cert_file
     assert_equal key_file_path, config.key_file
-    assert_equal 10000, config.idle_timeout_ms
+    assert_equal Quicsilver::Transport::Configuration::DEFAULT_IDLE_TIMEOUT_MS, config.idle_timeout_ms
     assert_equal Quicsilver::Transport::Configuration::QUIC_SERVER_RESUME_AND_ZERORTT, config.server_resumption_level
     assert_equal 100, config.max_concurrent_requests
     assert_equal 10, config.max_unidirectional_streams
