@@ -50,8 +50,8 @@ module Quicsilver
 
         # RFC 9114 §4.4 forbids known non-DATA frames after CONNECT,
         # including HEADERS trailers; these are connection errors.
-        if FrameParser::CONTROL_ONLY_SET.key?(type) ||
-            FrameParser::HTTP2_RESERVED_FRAMES.key?(type) ||
+        if CONTROL_ONLY_FRAME_SET.key?(type) ||
+            HTTP2_RESERVED_FRAME_SET.key?(type) ||
             [FRAME_HEADERS, FRAME_PUSH_PROMISE, FRAME_PRIORITY_UPDATE].include?(type)
           raise FrameError, "Frame not allowed on CONNECT"
         end

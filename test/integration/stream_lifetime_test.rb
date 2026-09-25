@@ -377,6 +377,26 @@ class StreamLifetimeTest < Minitest::Test
     await_event(@server, "STREAM_SHUTDOWN_COMPLETE", session.stream_id)
   end
 
+  # A streamed request body is drained frame by frame. Frame types that are
+  # not allowed on a request stream must fail the connection there too, not
+  # just in the buffered parser (RFC 9114 7.2.8).
+  def test_reserved_http2_frame_in_a_streamed_body_closes_connection
+    peer = @client.open_raw_stream
+    headers = Quicsilver::Protocol.build_headers_frame([
+      [":method", "POST"], [":scheme", "https"],
+      [":authority", "localhost"], [":path", "/"]
+    ])
+    # Deliver the headers on their own, so the frame below lands in the
+    # streaming body reader rather than the buffered parser.
+    @server.record_receives_for = :all
+    peer.send(headers) # no FIN, so the body streams in
+    await_event(@server, "RECEIVE")
+    peer.send(Quicsilver::Protocol.encode_varint(0x02) + Quicsilver::Protocol.encode_varint(1) + "\x00".b)
+
+    await_event(@client, "CONNECTION_CLOSED")
+    assert_equal Quicsilver::Protocol::H3_FRAME_UNEXPECTED, @client.connection_error
+  end
+
   def test_invalid_bidi_session_id_closes_connection
     peer = @client.open_raw_stream
     peer.send(Quicsilver::Protocol.encode_varint(0x41) + Quicsilver::Protocol.encode_varint(1))

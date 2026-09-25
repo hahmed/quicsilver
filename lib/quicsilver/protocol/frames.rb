@@ -27,6 +27,11 @@ module Quicsilver
 
     # Frame types forbidden on request streams (RFC 9114 Section 7.2.4, 7.2.6, 7.2.7)
     CONTROL_ONLY_FRAMES = [FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID].freeze
+    CONTROL_ONLY_FRAME_SET = CONTROL_ONLY_FRAMES.to_h { |type| [type, true] }.freeze
+
+    # HTTP/2 frame types, reserved in HTTP/3 so that an HTTP/2 frame arriving
+    # here is rejected rather than mistaken for an extension (RFC 9114 7.2.8)
+    HTTP2_RESERVED_FRAME_SET = {0x02 => true, 0x06 => true, 0x08 => true, 0x09 => true}.freeze
     # HTTP/3 Datagram Error Code (RFC 9297 Section 5.2)
     H3_DATAGRAM_ERROR = 0x33
 
@@ -200,6 +205,20 @@ module Quicsilver
     MAX_STREAM_ID = (2**62) - 4
 
     class << self
+      # Frame types a request stream may carry. Unknown types are extensions and
+      # must be ignored (RFC 9114 9), so only the two reserved sets raise.
+      # Both the buffered parser and the streaming body reader validate here.
+      def reject_unexpected_request_frame!(type)
+        if CONTROL_ONLY_FRAME_SET.key?(type)
+          raise FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
+        end
+
+        if HTTP2_RESERVED_FRAME_SET.key?(type)
+          raise FrameError.new("Reserved HTTP/2 frame type 0x#{type.to_s(16)} not allowed in HTTP/3",
+            error_code: H3_FRAME_UNEXPECTED)
+        end
+      end
+
       # Precomputed varint encodings for single-byte values (0-63)
       VARINT_SMALL = Array.new(64) { |v| [v].pack('C').freeze }.freeze
       VARINT_MED = Array.new(16384 - 64) { |i| v = i + 64; [0x40 | (v >> 8), v & 0xFF].pack('C*').freeze }.freeze

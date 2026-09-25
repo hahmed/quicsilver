@@ -19,11 +19,6 @@ module Quicsilver
       # Inject a custom decoder via decoder: kwarg for dynamic QPACK support.
       DEFAULT_DECODER = Qpack::HeaderBlockDecoder.default
 
-      CONTROL_ONLY_SET = Protocol::CONTROL_ONLY_FRAMES.each_with_object({}) { |f, h| h[f] = true }.freeze
-
-      # Reserved HTTP/2 frame types that MUST be rejected on any stream (RFC 9114 §7.2.8)
-      HTTP2_RESERVED_FRAMES = { 0x02 => true, 0x06 => true, 0x08 => true, 0x09 => true }.freeze
-
       EMPTY_BODY = StringIO.new("".b).tap { |io| io.set_encoding(Encoding::ASCII_8BIT) }
 
       attr_reader :headers, :trailers, :bytes_consumed
@@ -77,17 +72,7 @@ module Quicsilver
 
           (@frames ||= []) << { type: type, length: payload.bytesize, payload: payload }
 
-          if CONTROL_ONLY_SET.key?(type)
-            raise Protocol::FrameError, "Frame type 0x#{type.to_s(16)} not allowed on request streams"
-          end
-
-          # RFC 9114 §7.2.8: Reserved HTTP/2 frame types MUST trigger H3_FRAME_UNEXPECTED
-          if HTTP2_RESERVED_FRAMES.key?(type)
-            raise Protocol::FrameError.new(
-              "Reserved HTTP/2 frame type 0x#{type.to_s(16)} not allowed in HTTP/3",
-              error_code: Protocol::H3_FRAME_UNEXPECTED
-            )
-          end
+          Protocol.reject_unexpected_request_frame!(type)
 
           case type
           when 0x01 # HEADERS

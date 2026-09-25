@@ -294,4 +294,33 @@ class HTTP3Test < Minitest::Test
     assert_equal 0, value
     assert_equal 0, length
   end
+  # --- request stream frame rule (shared by the parser, CONNECT decoder and
+  # the streaming body reader) ---
+
+  def test_control_only_frames_are_rejected_on_request_streams
+    Quicsilver::Protocol::CONTROL_ONLY_FRAMES.each do |type|
+      error = assert_raises(Quicsilver::Protocol::FrameError) { reject_request_frame(type) }
+      assert_match(/not allowed on request streams/, error.message)
+    end
+  end
+
+  # RFC 9114 7.2.8: an HTTP/2 frame arriving on an HTTP/3 stream is an error,
+  # not an unknown extension.
+  def test_reserved_http2_frames_are_rejected_as_unexpected
+    [0x02, 0x06, 0x08, 0x09].each do |type|
+      error = assert_raises(Quicsilver::Protocol::FrameError) { reject_request_frame(type) }
+      assert_equal Quicsilver::Protocol::H3_FRAME_UNEXPECTED, error.error_code
+    end
+  end
+
+  # RFC 9114 9: unknown frame types are extensions and must be ignored.
+  def test_data_headers_and_extension_frames_are_allowed
+    [Quicsilver::Protocol::FRAME_DATA, Quicsilver::Protocol::FRAME_HEADERS, 0x21, 0x2f].each do |type|
+      assert_nil reject_request_frame(type)
+    end
+  end
+
+  def reject_request_frame(type)
+    Quicsilver::Protocol.reject_unexpected_request_frame!(type)
+  end
 end

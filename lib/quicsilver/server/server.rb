@@ -603,7 +603,7 @@ module Quicsilver
       payload = connection.complete_stream(stream_id, payload) unless pending
       if pending
         pending.frame_buffer << payload
-        drain_data_frames(pending)
+        drain_pending_frames(pending)
       elsif (wt_payload = manager.pending_payload(stream_id, stream_handle, payload))
         accept_webtransport_stream(connection_handle, stream_id, stream_handle, wt_payload)
       elsif manager.pending_stream?(stream_id)
@@ -642,7 +642,7 @@ module Quicsilver
     def complete_streaming_request(pending, event)
       if event.data && !event.data.empty?
         pending.frame_buffer << event.data
-        drain_data_frames(pending)
+        drain_pending_frames(pending)
       end
       pending.body.close_write
       pending.complete(event.handle)
@@ -839,7 +839,7 @@ module Quicsilver
       remainder = data.byteslice(parser.bytes_consumed..-1)
       if remainder && remainder.bytesize > 0
         pending.frame_buffer << remainder
-        drain_data_frames(pending)
+        drain_pending_frames(pending)
       end
       @pending_mutex.synchronize { @pending_streams[[connection_handle, stream_id]] = pending }
 
@@ -902,6 +902,16 @@ module Quicsilver
       pending.connection.remove_stream(pending.stream_id)
     end
 
+    # Drain buffered body frames, failing the connection if the peer sends a
+    # frame type that is not allowed on a request stream.
+    def drain_pending_frames(pending)
+      drain_data_frames(pending)
+    rescue Protocol::FrameError => e
+      handle = pending.connection.handle
+      Quicsilver.logger.error("Request stream error: #{e.message} (0x#{e.error_code.to_s(16)})")
+      Quicsilver.connection_shutdown(handle, e.error_code, false) rescue nil
+    end
+
     # Incrementally extract complete DATA frame payloads from the frame buffer.
     # Handles MsQuic splitting frames across RECEIVE callbacks — partial frames
     # remain in the buffer until the next callback completes them.
@@ -934,10 +944,12 @@ module Quicsilver
         # Incomplete frame — wait for more data
         break if buf.bytesize < total
 
+        Protocol.reject_unexpected_request_frame!(type)
+
         if type == Protocol::FRAME_DATA
           pending.body.write(buf.byteslice(header_len, length))
         end
-        # Skip non-DATA frames (e.g. unknown extension frames)
+        # Anything else here is an extension frame, which RFC 9114 9 says to ignore.
 
         buf = buf.byteslice(total..-1) || "".b
       end
