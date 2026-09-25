@@ -912,49 +912,18 @@ module Quicsilver
       Quicsilver.connection_shutdown(handle, e.error_code, false) rescue nil
     end
 
-    # Incrementally extract complete DATA frame payloads from the frame buffer.
-    # Handles MsQuic splitting frames across RECEIVE callbacks — partial frames
-    # remain in the buffer until the next callback completes them.
+    # Drain complete frames from the buffer, keeping any partial trailing frame
+    # for the next RECEIVE callback. DATA payloads go to the request body;
+    # anything else is an extension frame, which RFC 9114 9 says to ignore.
     def drain_data_frames(pending)
-      buf = pending.frame_buffer
+      buffer = pending.frame_buffer
 
-      while buf.bytesize >= 2
-        type_byte = buf.getbyte(0)
-        if type_byte < 0x40
-          type = type_byte
-          type_len = 1
-        else
-          type, type_len = Protocol.decode_varint_str(buf, 0)
-          break if type_len == 0
-        end
-
-        len_byte = buf.getbyte(type_len)
-        break unless len_byte
-        if len_byte < 0x40
-          length = len_byte
-          length_len = 1
-        else
-          length, length_len = Protocol.decode_varint_str(buf, type_len)
-          break if length_len == 0
-        end
-
-        header_len = type_len + length_len
-        total = header_len + length
-
-        # Incomplete frame — wait for more data
-        break if buf.bytesize < total
-
+      consumed = Protocol::FrameReader.each(buffer) do |type, payload|
         Protocol.reject_unexpected_request_frame!(type)
-
-        if type == Protocol::FRAME_DATA
-          pending.body.write(buf.byteslice(header_len, length))
-        end
-        # Anything else here is an extension frame, which RFC 9114 9 says to ignore.
-
-        buf = buf.byteslice(total..-1) || "".b
+        pending.body.write(payload) if type == Protocol::FRAME_DATA
       end
 
-      pending.frame_buffer = buf
+      pending.frame_buffer = consumed.zero? ? buffer : (buffer.byteslice(consumed..) || "".b)
     end
 
     def accept_webtransport(connection, connection_handle, stream_id, stream_handle, headers, early_data: false)
