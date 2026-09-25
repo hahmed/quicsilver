@@ -45,10 +45,20 @@ module Quicsilver
               while @running
                 work = @queue.dequeue
                 break if work == :shutdown
-                @handler.call(work)
+
+                run(work)
               end
             end
           end
+        end
+
+        # One unit of work must not take the worker fiber down with it; see
+        # the thread scheduler for the same reasoning.
+        private def run(work)
+          @handler.call(work)
+        rescue => e
+          Quicsilver.logger.error("Unhandled error in worker: #{e.class} - #{e.message}")
+          Quicsilver.logger.debug(e.backtrace&.first(5)&.join("\n").to_s)
         end
 
         def drain(timeout: 5)

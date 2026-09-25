@@ -657,6 +657,22 @@ class ConnectionTest < Minitest::Test
     assert_equal "1", parser.headers["retry-after"]
   end
 
+  # The peer can tear a stream down while the app is still working, so writing
+  # the response raises. That is an expected race, not a server failure.
+  def test_responding_on_a_stream_the_peer_closed_is_not_an_error
+    stream = Object.new
+    stream.define_singleton_method(:send) { |*, **| raise IOError, "QUIC stream is closed" }
+
+    @connection.send_error(stream, 500, "Internal Server Error")
+  end
+
+  def test_an_unrelated_write_failure_still_raises
+    stream = Object.new
+    stream.define_singleton_method(:send) { |*, **| raise IOError, "disk on fire" }
+
+    assert_raises(IOError) { @connection.send_error(stream, 500, "Internal Server Error") }
+  end
+
   private
 
   def encode_varint(value)

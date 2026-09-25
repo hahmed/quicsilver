@@ -9,6 +9,8 @@ module Quicsilver
       # Stream already shut down by peer — raised by StreamSend when the
       # client has reset or closed the stream.
       MSQUIC_INVALID_STATE = "0x59"
+      # The peer tore the stream down before we finished responding.
+      STREAM_CLOSED = "QUIC stream is closed"
 
       attr_reader :handle, :data, :streams
       attr_reader :control_stream_id, :qpack_encoder_stream_id, :qpack_decoder_stream_id
@@ -190,7 +192,7 @@ module Quicsilver
       def send_informational(stream, status, headers)
         data = Protocol::ResponseEncoder.encode_informational(status, headers)
         stream.send(data, fin: false)
-      rescue RuntimeError => e
+      rescue RuntimeError, IOError => e
         raise unless stream_send_error?(e)
       end
 
@@ -205,7 +207,7 @@ module Quicsilver
             stream.send(frame_data, fin: fin) unless frame_data.empty? && !fin
           end
         end
-      rescue RuntimeError => e
+      rescue RuntimeError, IOError => e
         raise unless stream_send_error?(e)
       ensure
         # RFC 9110: Always close the body to release resources (file handles, fibers, etc.)
@@ -219,7 +221,7 @@ module Quicsilver
         headers["retry-after"] = "1" if status == 503
         encoder = Protocol::ResponseEncoder.new(status, headers, body)
         stream.send(encoder.encode, fin: true)
-      rescue RuntimeError => e
+      rescue RuntimeError, IOError => e
         raise unless stream_send_error?(e)
       end
 
@@ -417,7 +419,11 @@ module Quicsilver
 
       # Stream may have been reset by client — expected during normal operation.
       def stream_send_error?(error)
-        return false unless error.message.include?(MSQUIC_INVALID_STATE) || error.message.include?("StreamSend failed")
+        unless error.message.include?(MSQUIC_INVALID_STATE) ||
+            error.message.include?("StreamSend failed") ||
+            error.message.include?(STREAM_CLOSED)
+          return false
+        end
         Quicsilver.logger.debug("Stream send failed (client likely reset): #{error.message}")
         true
       end
