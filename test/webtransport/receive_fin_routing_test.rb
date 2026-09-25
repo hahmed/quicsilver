@@ -14,9 +14,14 @@ require_relative "../test_helper"
 class WebTransportReceiveFinRoutingTest < Minitest::Test
   Session = Quicsilver::Server::WebTransportSession
 
+  # Children default to backpressure, so a stand-in transport has to answer
+  # the credit calls Transport::Stream makes.
   RecordingOutboundStream = Struct.new(:stream_id, :handle) do
     def send(*) = true
     def abort(*) = true
+    def stop_sending(*) = true
+    def grant_receive_credit(*) = true
+    def defer_receive(*) = true
   end
 
   class RoutingConnection < Quicsilver::Transport::Connection
@@ -572,6 +577,10 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
       }
     )
     session.stub(:accept!, nil) { }
+    # These are routing tests over synthetic native handles, where granting
+    # receive credit cannot succeed. Backpressure is covered elsewhere.
+    session.instance_variable_set(:@receive_options,
+      Session::DEFAULT_RECEIVE_OPTIONS.merge(receive_backpressure: false))
     session.instance_variable_set(:@accepted, true)
     session.instance_variable_set(:@open, true)
     session

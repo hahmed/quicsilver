@@ -47,6 +47,15 @@ module Quicsilver
       ERROR_CODE_BYTES = 4
       MAX_CLOSE_MESSAGE_LENGTH = 1024
 
+      # The receive policy for every child stream. This is the only place these
+      # defaults live; WebTransportStream requires them to be passed in.
+      DEFAULT_RECEIVE_OPTIONS = {
+        receive_buffer_bytes: 1_048_576,
+        receive_buffer_chunks: 1024,
+        receive_overflow_code: 0,
+        receive_backpressure: true
+      }.freeze
+
       # Parse a bidirectional WebTransport stream prefix:
       # [type=0x41 varint][session_id varint][data...]
       # Returns [session_id, remainder] or nil if malformed.
@@ -146,7 +155,7 @@ module Quicsilver
         @received_close = false
         @connect_failed = false
         @closed = false
-        @receive_options = {}
+        @receive_options = DEFAULT_RECEIVE_OPTIONS
       end
 
       def stream_manager=(manager)
@@ -161,29 +170,29 @@ module Quicsilver
       # Call only after the app has checked Origin and authorized the request.
       #
       # Limits apply to each child's queued Ruby input, not native buffers or
-      # the whole connection. A child that overflows stops receiving: we send
-      # STOP_SENDING with receive_overflow_code, discard its queued input, and
-      # fail its pending reads. Its write side stays open.
+      # the whole connection.
       #
-      # Opt-in receive_backpressure pauses native delivery instead, so a slow
-      # reader stalls its own stream rather than losing it. A reader that never
-      # drains leaves the stream paused indefinitely — there is no timeout, and
-      # overflow is not reached. Shared connection credit means a paused stream
-      # can still stall others while the app is not reading.
-      def accept!(receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0,
-        receive_backpressure: false)
+      # By default a child that fills its buffer stops being delivered until
+      # the application reads, so a slow reader keeps its stream. A reader that
+      # never drains leaves it paused indefinitely, and a paused stream holds
+      # connection credit, which can stall its siblings.
+      #
+      # With receive_backpressure: false an overflowing child is reset instead:
+      # we send STOP_SENDING with receive_overflow_code, discard its queued
+      # input, and fail its pending reads. Its write side stays open.
+      def accept!(**receive_options)
         raise IOError, "Session closed" if @closed
         return if @accepted
 
-        ReceiveQueue.validate_limits(receive_buffer_bytes, receive_buffer_chunks)
-        WebTransportStream.validate_backpressure(receive_backpressure, receive_buffer_bytes, receive_buffer_chunks)
-        WebTransportStream.validate_overflow_code(receive_overflow_code)
-        @receive_options = {
-          receive_buffer_bytes: receive_buffer_bytes,
-          receive_buffer_chunks: receive_buffer_chunks,
-          receive_overflow_code: receive_overflow_code,
-          receive_backpressure: receive_backpressure
-        }
+        unknown = receive_options.keys - DEFAULT_RECEIVE_OPTIONS.keys
+        raise ArgumentError, "Unknown receive options: #{unknown.join(", ")}" if unknown.any?
+
+        options = DEFAULT_RECEIVE_OPTIONS.merge(receive_options)
+        ReceiveQueue.validate_limits(options[:receive_buffer_bytes], options[:receive_buffer_chunks])
+        WebTransportStream.validate_backpressure(options[:receive_backpressure],
+          options[:receive_buffer_bytes], options[:receive_buffer_chunks])
+        WebTransportStream.validate_overflow_code(options[:receive_overflow_code])
+        @receive_options = options
         frame = Protocol.build_headers_frame([[:":status", "200"]])
         @stream.send(frame, fin: false)
         @accepted = true

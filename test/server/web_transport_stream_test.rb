@@ -127,9 +127,16 @@ class WebTransportStreamTest < Minitest::Test
     refute stream.open?
   end
 
+  # These tests drive a stream over a stand-in transport that cannot answer the
+  # native credit calls backpressure makes, so they opt out of it. Sessions
+  # default to backpressure; see WebTransportSession::DEFAULT_RECEIVE_OPTIONS.
+  RECEIVE_WITHOUT_BACKPRESSURE =
+    Quicsilver::Server::WebTransportSession::DEFAULT_RECEIVE_OPTIONS
+      .merge(receive_backpressure: false).freeze
+
   def stream_on(transport, **options)
     Quicsilver::Server::WebTransportStream.new(
-      session: nil, stream: transport, stream_id: 4, **options
+      session: nil, stream: transport, stream_id: 4, **RECEIVE_WITHOUT_BACKPRESSURE, **options
     )
   end
 
@@ -415,7 +422,7 @@ class WebTransportStreamTest < Minitest::Test
   def test_close_receive_only_stream_only_requests_peer_to_stop
     transport = RecordingTransport.new
     stream = Quicsilver::Server::WebTransportStream.new(
-      session: nil, stream: transport, stream_id: 2, direction: :receive_only
+      session: nil, stream: transport, stream_id: 2, direction: :receive_only, **RECEIVE_WITHOUT_BACKPRESSURE
     )
     stream.close
 
@@ -426,7 +433,7 @@ class WebTransportStreamTest < Minitest::Test
   def test_close_send_only_stream_only_sends_fin
     transport = RecordingTransport.new
     stream = Quicsilver::Server::WebTransportStream.new(
-      session: nil, stream: transport, stream_id: 3, direction: :send_only
+      session: nil, stream: transport, stream_id: 3, direction: :send_only, **RECEIVE_WITHOUT_BACKPRESSURE
     )
     stream.close
 
@@ -449,7 +456,7 @@ class WebTransportStreamTest < Minitest::Test
     raw.expect(:send, true, ["hello"])
 
     stream = Quicsilver::Server::WebTransportStream.new(
-      session: Minitest::Mock.new, stream: raw, stream_id: 4
+      session: Minitest::Mock.new, stream: raw, stream_id: 4, **RECEIVE_WITHOUT_BACKPRESSURE
     )
     stream.write("hello")
 
@@ -477,7 +484,8 @@ class WebTransportStreamTest < Minitest::Test
 
   def test_send_only_stream_rejects_reads
     stream = Quicsilver::Server::WebTransportStream.new(
-      session: nil, stream: RecordingTransport.new, stream_id: 3, direction: :send_only
+      session: nil, stream: RecordingTransport.new, stream_id: 3, direction: :send_only,
+      **RECEIVE_WITHOUT_BACKPRESSURE
     )
     assert_raises(IOError) { stream.read }
   end
@@ -593,7 +601,7 @@ class WebTransportStreamTest < Minitest::Test
   def build_stream(variant = :bidi)
     Quicsilver::Server::WebTransportStream.new(
       session: nil, stream: RecordingTransport.new, stream_id: 4,
-      direction: variant == :receive_only ? :receive_only : :bidi
+      direction: variant == :receive_only ? :receive_only : :bidi, **RECEIVE_WITHOUT_BACKPRESSURE
     )
   end
 end
