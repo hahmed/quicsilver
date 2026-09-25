@@ -26,9 +26,12 @@ class WebTransportSessionTest < Minitest::Test
     refute session.open?
   end
 
-  def test_accept_configures_receive_limits_for_bidi_and_uni_children
+  # Overflow only resets a child when backpressure is turned off; by default
+  # the child pauses instead.
+  def test_accept_resets_overflowing_children_when_backpressure_is_off
     session = build_session
-    session.accept!(receive_buffer_bytes: 4, receive_buffer_chunks: 1, receive_overflow_code: 42)
+    session.accept!(receive_buffer_bytes: 4, receive_buffer_chunks: 1, receive_overflow_code: 42,
+      receive_backpressure: false)
     bidi = session.add_stream(99998, 4)
     uni = session.add_uni_stream(99997, 6)
     stops = []
@@ -45,6 +48,23 @@ class WebTransportSessionTest < Minitest::Test
       assert_raises(Quicsilver::Server::WebTransportStream::ResetError) { stream.read }
     end
     assert session.open?
+  end
+
+  def test_accept_defaults_children_to_backpressure
+    session = build_session
+    session.accept!(receive_buffer_bytes: 4, receive_buffer_chunks: 1, receive_overflow_code: 42)
+    stops = []
+
+    with_native_receive_credit do
+      Quicsilver.stub(:stream_stop_sending, ->(*args) { stops << args }) do
+        child = session.add_stream(99998, 4)
+        child.receive_data("12345")
+
+        assert_empty stops, "a full buffer must pause the child, not reset it"
+        assert child.open?, "the child keeps its stream instead of losing it"
+        assert_equal "1234", child.read
+      end
+    end
   end
 
   def test_outgoing_stream_applies_backpressure_before_sending_its_prefix
@@ -744,7 +764,9 @@ class WebTransportSessionTest < Minitest::Test
     prefix = Quicsilver::Protocol.encode_varint(0x41) +
              Quicsilver::Protocol.encode_varint(0)
 
-    result = Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
+    result = with_native_receive_credit do
+      Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
+    end
     assert_kind_of Quicsilver::Server::WebTransportStream, result
     assert_equal [result], accepted
   end
@@ -758,11 +780,13 @@ class WebTransportSessionTest < Minitest::Test
              Quicsilver::Protocol.encode_varint(0) +
              "hello"
 
-    result = Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
+    with_native_receive_credit do
+      result = Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
 
-    assert_kind_of Quicsilver::Server::WebTransportStream, result
-    assert_equal [result], received
-    assert_equal "hello", result.read
+      assert_kind_of Quicsilver::Server::WebTransportStream, result
+      assert_equal [result], received
+      assert_equal "hello", result.read
+    end
   end
 
   def test_accept_stream_ignores_unknown_session
@@ -770,7 +794,9 @@ class WebTransportSessionTest < Minitest::Test
     prefix = Quicsilver::Protocol.encode_varint(0x41) +
              Quicsilver::Protocol.encode_varint(1000)
 
-    result = Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
+    result = with_native_receive_credit do
+      Quicsilver::Server::WebTransportSession.accept_stream(sessions, 8, 99999, prefix)
+    end
     assert_nil result
   end
 
@@ -817,6 +843,16 @@ class WebTransportSessionTest < Minitest::Test
       Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE,
       [code].pack("N") + reason.b
     )
+  end
+
+  # Children default to backpressure, which grants credit on the native
+  # stream. These unit tests use synthetic handles, so the grant is stubbed.
+  def with_native_receive_credit
+    Quicsilver.stub(:grant_stream_receive_credit, ->(*) { true }) do
+      Quicsilver.stub(:defer_stream_receive, ->(*) { true }) do
+        yield
+      end
+    end
   end
 
   # Collect transport output without prescribing call counts or chunk boundaries.

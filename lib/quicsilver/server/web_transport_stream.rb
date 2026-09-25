@@ -53,9 +53,11 @@ module Quicsilver
         end
       end
 
+      # The receive policy has one home: WebTransportSession#accept! defines
+      # the defaults and passes them in, so there is nothing to keep in sync.
       def initialize(session:, stream:, stream_id:, direction: :bidi,
-        receive_buffer_bytes: 1_048_576, receive_buffer_chunks: 1024, receive_overflow_code: 0,
-        receive_backpressure: false)
+        receive_buffer_bytes:, receive_buffer_chunks:, receive_overflow_code:,
+        receive_backpressure:)
         @session = session
         @stream = stream
         @stream_id = stream_id

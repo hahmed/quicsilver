@@ -782,10 +782,12 @@ class StreamLifetimeTest < Minitest::Test
     assert_nil stream.read
   end
 
-  # An unread child overflows its queue. The peer must see STOP_SENDING with
-  # the configured code, and the rest of the connection must keep working.
+  # With backpressure turned off, an unread child that overflows is reset: the
+  # peer sees STOP_SENDING with the configured code, and the rest of the
+  # connection keeps working.
   def test_receive_overflow_stops_the_unread_child_and_leaves_the_session_usable
-    @wt_receive_options = {receive_buffer_bytes: 1024, receive_overflow_code: 42}
+    @wt_receive_options = {receive_buffer_bytes: 1024, receive_overflow_code: 42,
+                           receive_backpressure: false}
     _, session = open_webtransport_session
     starved_peer, starved = open_webtransport_child(session)
     sibling_peer, sibling = open_webtransport_child(session)
