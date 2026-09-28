@@ -301,7 +301,17 @@ module Quicsilver
       # Both endpoints must have advertised a non-zero WT_INITIAL_MAX_*
       # setting (§5.1). We advertise none, so this is false today.
       def flow_control_enabled?
-        @connection.respond_to?(:wt_flow_control_enabled?) && @connection.wt_flow_control_enabled?
+        @connection.wt_flow_control_enabled?
+      end
+
+      # What the peer permits us to send in this session. Seeded from its
+      # SETTINGS, then raised by capsules (§5.5, §5.6).
+      def flow_control
+        @flow_control ||= WebTransportFlowControl.from_settings(peer_settings)
+      end
+
+      def peer_settings
+        @connection.settings
       end
 
       # Look up a stream by ID within this session.
@@ -608,11 +618,9 @@ module Quicsilver
             return
           end
 
-          # Enforcement lands with the accounting; parsing here would reject
-          # limits nothing yet honours.
-          Quicsilver.logger.debug(
-            "WebTransport session #{@stream_id} received flow control capsule 0x#{type.to_s(16)}"
-          )
+          # Raises FlowControlError for a limit that does not increase, or a
+          # stream count above 2^60 (§5.6.2, §5.6.4).
+          flow_control.apply(Protocol::WebTransport.parse_flow_control_capsule(type, payload))
         when WT_DRAIN_SESSION
           # Advisory only. The session stays open and usable; it is up to the
           # application to wind down (draft-16 §4.7).

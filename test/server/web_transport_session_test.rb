@@ -337,6 +337,55 @@ class WebTransportSessionTest < Minitest::Test
     end
   end
 
+  # With flow control negotiated the same capsules are applied, so a limit
+  # that does not increase fails the session (5.6.2, 5.6.4). This is also what
+  # makes the ignore rule above observable: identical bytes, opposite outcomes.
+  def test_a_non_increasing_limit_fails_the_session_once_flow_control_is_on
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings
+    session = build_session(stream: stream, connection: connection)
+    session.accept!
+
+    with_flow_control_negotiated(connection) do
+      session.receive_connect_data(max_data_capsule(4096))
+      assert_nil stream.error_code, "the first grant is an increase"
+
+      session.receive_connect_data(max_data_capsule(4096))
+    end
+
+    assert_equal Quicsilver::Protocol::WebTransport::FLOW_CONTROL_ERROR, stream.error_code
+  end
+
+  def test_the_same_capsule_is_ignored_while_flow_control_is_off
+    stream = RecordingConnectStream.new
+    session = build_session(stream: stream)
+    session.accept!
+
+    2.times { session.receive_connect_data(max_data_capsule(4096)) }
+
+    assert_nil stream.error_code
+    assert session.open?
+  end
+
+  # The peer's WT_INITIAL_MAX_* is the starting limit, before any capsule
+  # (5.5). Here 4096 is already granted, so a capsule repeating it is not an
+  # increase and fails the session.
+  def test_peer_settings_seed_the_initial_limits
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings(
+      Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA => 4096
+    )
+    session = build_session(stream: stream, connection: connection)
+    session.accept!
+
+    with_flow_control_negotiated(connection) do
+      session.receive_connect_data(max_data_capsule(4096))
+    end
+
+    assert_equal Quicsilver::Protocol::WebTransport::FLOW_CONTROL_ERROR, stream.error_code,
+      "the initial limit from SETTINGS must already count as granted"
+  end
+
   # The prohibited pair is not in the set 5.1 tells us to ignore, so it still
   # fails the session even with flow control off.
   def test_prohibited_capsules_are_rejected_even_with_flow_control_off
@@ -344,7 +393,6 @@ class WebTransportSessionTest < Minitest::Test
     session = build_session(stream: stream)
     session.accept!
 
-    refute session.send(:flow_control_enabled?)
     session.receive_connect_data(
       Quicsilver::Protocol::Capsule.encode(
         Quicsilver::Protocol::WebTransport::MAX_STREAM_DATA_CAPSULE,
@@ -919,7 +967,28 @@ class WebTransportSessionTest < Minitest::Test
     end
   end
 
-  def build_session(headers: nil, connection: Object.new, stream: RecordingConnectStream.new)
+  def max_data_capsule(limit)
+    Quicsilver::Protocol::Capsule.encode(
+      Quicsilver::Protocol::WebTransport::MAX_DATA_CAPSULE,
+      Quicsilver::Protocol.encode_varint(limit)
+    )
+  end
+
+  # A real connection carrying the peer's SETTINGS. Flow control is only
+  # enabled when both endpoints advertise a non-zero WT_INITIAL_MAX_*, and we
+  # advertise none yet, so the negotiated state is unreachable in production
+  # and the tests that need it stub that one predicate.
+  def connection_with_peer_settings(settings = {})
+    connection = Quicsilver::Transport::Connection.new(12_345, [12_345, 67_890])
+    connection.send(:on_settings_received, settings)
+    connection
+  end
+
+  def with_flow_control_negotiated(connection, &block)
+    connection.stub(:wt_flow_control_enabled?, true, &block)
+  end
+
+  def build_session(headers: nil, connection: connection_with_peer_settings, stream: RecordingConnectStream.new)
     headers ||= {
       ":method" => "CONNECT", ":protocol" => "webtransport",
       ":scheme" => "https", ":authority" => "localhost:4433", ":path" => "/cable"

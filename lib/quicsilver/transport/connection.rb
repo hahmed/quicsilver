@@ -43,10 +43,10 @@ module Quicsilver
           Protocol.wt_flow_control_opt_in?(@settings)
       end
 
-      # What we advertised to the peer. Set when the control stream is opened;
-      # empty on a connection that never sent SETTINGS.
+      # What we advertise to the peer. Derived rather than captured when the
+      # control stream opens, so there is one source for the promise we make.
       def local_settings
-        @local_settings ||= {}
+        Protocol.control_stream_settings(max_field_section_size: @max_header_size)
       end
 
       def webtransport_settings_valid?(protocol)
@@ -136,7 +136,6 @@ module Quicsilver
       def setup_http3_streams
         # Control stream (required)
         @server_control_stream = open_stream(unidirectional: true)
-        @local_settings = Protocol.control_stream_settings(max_field_section_size: @max_header_size)
         @server_control_stream.send(Protocol.build_control_stream(max_field_section_size: @max_header_size))
 
         # QPACK encoder/decoder streams
