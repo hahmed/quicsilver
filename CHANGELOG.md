@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - WebTransport CLOSE and DRAIN capsules use HTTP/3 DATA frames. Session close sends FIN, validates peer close payloads, and terminates both directions on protocol errors.
 
+### Fixed
+
+- WT_STREAM (`0x41`) is rejected with the connection error `H3_FRAME_ERROR` when it appears anywhere other than the first bytes of a request stream, including on the control stream (draft-ietf-webtrans-http3-16 §4.3). It is only a signal value at the front of a WebTransport stream, never a frame elsewhere.
+- WebTransport capsules sent optimistically on the CONNECT stream are no longer processed before the server responds. They are held unparsed, then processed once `accept!` sends the 2xx or discarded if the session is rejected (§3.2). The hold is bounded at 64 KiB; exceeding it fails the session with `H3_MESSAGE_ERROR`. Previously a CLOSE capsule arriving before the application responded would terminate the session and make it unacceptable.
+
 ### Changed
 
 - WebTransport child streams have bounded receive queues, and a child that fills its buffer now pauses instead of losing its stream. `accept!` takes `receive_buffer_bytes` (default 1 MiB), `receive_buffer_chunks` (default 1024), `receive_overflow_code` and `receive_backpressure` (default `true`); delivery stops until the application reads. A reader that never drains leaves its stream paused indefinitely, and a paused stream holds connection credit, so it can stall its siblings. `receive_backpressure: false` restores the previous policy: an overflowing child is sent `STOP_SENDING` with `receive_overflow_code`, its queued input is discarded and its pending reads fail, while its write side stays open. Limits apply to each child's queued Ruby input, not to native buffers or the whole connection. `WebTransportStream#initialize` now requires these four options rather than defaulting them, so the defaults have a single home in `WebTransportSession::DEFAULT_RECEIVE_OPTIONS`.

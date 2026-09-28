@@ -310,14 +310,50 @@ class WebTransportSessionTest < Minitest::Test
     end
   end
 
-  def test_close_before_accept_terminates_connect_and_cannot_be_accepted_later
+  # draft-16 3.2: a client may send capsules optimistically, and the server
+  # MUST NOT process them as capsules until it has sent a 2xx. So a close
+  # capsule arriving first neither closes the session nor blocks acceptance.
+  def test_capsules_before_the_response_are_held_until_the_session_is_accepted
     stream = RecordingConnectStream.new
     session = build_session(stream: stream)
+    closed_with = nil
+    session.on_close { |info| closed_with = info }
+
     session.receive_connect_data(close_capsule(7, "bye"))
-    assert session.closed?
-    assert_equal Quicsilver::Protocol::H3_REQUEST_REJECTED, stream.error_code
-    assert_raises(IOError) { session.accept! }
-    assert_empty stream.bytes
+
+    refute session.closed?, "an unaccepted session must not act on optimistic capsules"
+    assert_nil closed_with
+    assert_empty stream.bytes, "nothing is sent before the application responds"
+
+    session.accept!
+
+    assert_equal 7, closed_with&.code
+    assert_equal "bye", closed_with&.reason
+  end
+
+  # "...or discarded if the session is rejected" (3.2).
+  def test_capsules_before_a_rejection_are_discarded
+    stream = RecordingConnectStream.new
+    session = build_session(stream: stream)
+    closed_with = nil
+    session.on_close { |info| closed_with = info }
+
+    session.receive_connect_data(close_capsule(7, "bye"))
+    session.reject!(403)
+
+    assert_nil closed_with, "a rejected session never processes the held bytes"
+    refute session.open?
+  end
+
+  # Holding bytes until acceptance must not be an unbounded buffer.
+  def test_optimistic_capsule_bytes_are_bounded_before_acceptance
+    stream = RecordingConnectStream.new
+    session = build_session(stream: stream)
+
+    oversized = "x".b * (Quicsilver::Server::WebTransportSession::MAX_OPTIMISTIC_CONNECT_BYTES + 1)
+    session.receive_connect_data(oversized)
+
+    assert_equal Quicsilver::Protocol::H3_MESSAGE_ERROR, stream.error_code
   end
 
   def test_connect_handles_unknown_frames_and_capsules_split_across_data_frames

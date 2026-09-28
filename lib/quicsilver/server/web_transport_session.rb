@@ -47,6 +47,12 @@ module Quicsilver
       ERROR_CODE_BYTES = 4
       MAX_CLOSE_MESSAGE_LENGTH = 1024
 
+      # A client may send capsules before we answer CONNECT, and we must hold
+      # them unparsed until then (§3.2). Bound that hold so an unaccepted
+      # session cannot buffer without limit; matches the pre-SETTINGS cap in
+      # WebTransportManager.
+      MAX_OPTIMISTIC_CONNECT_BYTES = 65_536
+
       # The receive policy for every child stream. This is the only place these
       # defaults live; WebTransportStream requires them to be passed in.
       DEFAULT_RECEIVE_OPTIONS = {
@@ -197,6 +203,10 @@ module Quicsilver
         @stream.send(frame, fin: false)
         @accepted = true
         @open = true
+        # A client may send capsules optimistically before our response. We held
+        # those bytes unparsed; now that the 2xx is out they can be processed
+        # (draft-ietf-webtrans-http3-16 §3.2).
+        drain_connect_capsules
       end
 
       # Send a datagram to the client (unreliable, no retransmission).
@@ -284,6 +294,8 @@ module Quicsilver
         headers.each { |name, value| response_headers << [name.to_s.downcase, value.to_s] }
         @stream.send(Protocol.build_headers_frame(response_headers), fin: true)
         @open = false
+        # Optimistic capsules are discarded when the session is rejected (§3.2).
+        @connect_buffer = "".b
       end
 
       # Look up a stream by ID within this session.
@@ -360,7 +372,22 @@ module Quicsilver
         end
         return if closed?
         @connect_buffer << data if data && !data.empty?
+        # Hold optimistic capsules unparsed until we have sent the 2xx (§3.2).
+        unless @accepted
+          if @connect_buffer.bytesize > MAX_OPTIMISTIC_CONNECT_BYTES
+            handle_capsule_error(
+              Protocol::Capsule::ParseError.new("Too many capsule bytes before the session was accepted")
+            )
+          end
+          return
+        end
 
+        drain_connect_capsules
+      end
+
+      # Parse whatever complete capsules the CONNECT buffer holds. Only reached
+      # once the session is accepted. :nodoc:
+      def drain_connect_capsules
         while (capsule = Protocol::Capsule.parse(@connect_buffer))
           type, payload, @connect_buffer = capsule
           begin
@@ -379,7 +406,11 @@ module Quicsilver
       # Called by Server when the CONNECT/session stream receives FIN. :nodoc:
       def receive_connect_fin(data)
         receive_connect_data(data)
-        handle_capsule_error(Protocol::Capsule::ParseError.new("Truncated capsule")) unless @connect_buffer.empty?
+        # An unaccepted session never parsed these bytes, so a partial capsule
+        # is not a peer error we can report (§3.2).
+        if @accepted && !@connect_buffer.empty?
+          handle_capsule_error(Protocol::Capsule::ParseError.new("Truncated capsule"))
+        end
         finish_connect if @accepted && !@connect_failed
         notify_close
       end
