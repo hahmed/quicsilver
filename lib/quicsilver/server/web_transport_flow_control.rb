@@ -139,6 +139,22 @@ module Quicsilver
 
       attr_reader :data_received, :streams_opened_bidi, :streams_opened_uni
 
+      private def increment_closed(direction)
+        if direction == :bidi
+          @streams_closed_bidi += 1
+        else
+          @streams_closed_uni += 1
+        end
+      end
+
+      private def set_max_streams(direction, value)
+        if direction == :bidi
+          @max_streams_bidi = value
+        else
+          @max_streams_uni = value
+        end
+      end
+
       def self.from_settings(settings)
         new(
           max_data: settings[Protocol::SETTINGS_WT_INITIAL_MAX_DATA].to_i,
@@ -147,6 +163,11 @@ module Quicsilver
         )
       end
 
+      # Grant more once half the window has been used up, the way QUIC paces
+      # MAX_DATA (§5.6 refers to RFC 9000 §4.2). Waiting until it is exhausted
+      # would stall the peer for a round trip.
+      GRANT_THRESHOLD = 2
+
       def initialize(max_data: 0, max_streams_bidi: 0, max_streams_uni: 0)
         @max_data = max_data
         @max_streams_bidi = max_streams_bidi
@@ -154,6 +175,47 @@ module Quicsilver
         @data_received = 0
         @streams_opened_bidi = 0
         @streams_opened_uni = 0
+        @data_consumed = 0
+        @streams_closed_bidi = 0
+        @streams_closed_uni = 0
+        # The windows we advertised are the increment we extend by.
+        @data_window = max_data
+        @stream_window_bidi = max_streams_bidi
+        @stream_window_uni = max_streams_uni
+      end
+
+      attr_reader :data_consumed, :max_data, :max_streams_bidi, :max_streams_uni
+
+      # The application read `bytes`, so that much of the window is free
+      # again. Returns the new limit to advertise, or nil when it is not yet
+      # worth a capsule. "Endpoints SHOULD send WT_MAX_DATA... as they consume
+      # data" (§5.6).
+      def consume_data(bytes)
+        return if bytes.zero? || @data_window.zero?
+
+        @data_consumed += bytes
+        extended = @data_consumed + @data_window
+        return unless extended - @max_data >= @data_window / GRANT_THRESHOLD
+
+        @max_data = extended
+      end
+
+      # A stream closed, so the session can afford another. Returns the new
+      # limit to advertise, or nil.
+      def close_stream(direction)
+        window = (direction == :bidi) ? @stream_window_bidi : @stream_window_uni
+        return if window.zero?
+
+        closed = increment_closed(direction)
+        extended = closed + window
+        current = max_streams(direction)
+        return unless extended - current >= [window / GRANT_THRESHOLD, 1].max
+
+        set_max_streams(direction, extended)
+      end
+
+      def max_streams(direction)
+        (direction == :bidi) ? @max_streams_bidi : @max_streams_uni
       end
 
       # "If an endpoint receives an incoming stream for a session that would

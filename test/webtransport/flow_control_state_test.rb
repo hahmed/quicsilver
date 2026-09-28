@@ -367,6 +367,76 @@ class WebTransportFlowControlStateTest < Minitest::Test
     assert_equal 50, limits.data_received
   end
 
+  # === granting more as we consume (§5.6) ===
+  #
+  # "An endpoint MUST NOT wait for a WT_DATA_BLOCKED or WT_STREAMS_BLOCKED
+  # capsule before sending a WT_MAX_DATA or WT_MAX_STREAMS capsule; doing so
+  # could result in the sender being blocked for at least an entire round
+  # trip. Endpoints SHOULD send [them] as they consume data or close streams."
+
+  def test_consuming_half_the_window_grants_more
+    limits = Limits.new(max_data: 100)
+
+    assert_nil limits.consume_data(10), "too little consumed to be worth a capsule"
+
+    assert_equal 150, limits.consume_data(40)
+  end
+
+  def test_the_new_limit_stays_a_window_ahead_of_what_was_consumed
+    limits = Limits.new(max_data: 100)
+
+    granted = limits.consume_data(50)
+
+    assert_equal limits.data_consumed + 100, granted
+  end
+
+  def test_grants_keep_pace_with_a_steady_reader
+    limits = Limits.new(max_data: 100)
+    grants = 10.times.map { limits.consume_data(25) }.compact
+
+    refute_empty grants
+    assert_equal grants.sort, grants, "limits must only ever increase"
+    assert_equal grants.uniq, grants
+  end
+
+  def test_no_grants_when_no_window_was_advertised
+    limits = Limits.new(max_data: 0)
+
+    assert_nil limits.consume_data(1000)
+  end
+
+  def test_closing_streams_grants_more_streams
+    limits = Limits.new(max_streams_uni: 2)
+
+    granted = limits.close_stream(:uni)
+
+    assert_equal 3, granted
+    assert_equal 3, limits.max_streams(:uni)
+  end
+
+  def test_stream_grants_are_per_direction
+    limits = Limits.new(max_streams_bidi: 2, max_streams_uni: 2)
+
+    limits.close_stream(:bidi)
+
+    assert_equal 2, limits.max_streams(:uni), "closing a bidi stream must not move the uni limit"
+  end
+
+  def test_no_stream_grants_when_none_were_advertised
+    assert_nil Limits.new.close_stream(:uni)
+  end
+
+  # A grant has to leave room above what has already been used, or the peer
+  # would be blocked the moment it acted on it.
+  def test_a_grant_always_exceeds_what_has_been_received
+    limits = Limits.new(max_data: 100)
+    limits.receive_data!(80)
+
+    granted = limits.consume_data(80)
+
+    assert_operator granted, :>, limits.data_received
+  end
+
   private
 
   def limit(kind, direction, value)

@@ -244,6 +244,15 @@ module Quicsilver
         open_outgoing_stream(unidirectional: true)
       end
 
+      # Called when the peer raises our send credit, so an application that
+      # hit SendBlocked knows to retry. Writes are all or nothing, so there is
+      # no partial progress to resume from.
+      #
+      #   session.on_writable { flush_pending }
+      def on_writable(&block)
+        @writable_callback = block
+      end
+
       # Register a callback for session close.
       def on_close(&block)
         @close_callback = block
@@ -392,6 +401,25 @@ module Quicsilver
         )
       end
 
+      # The application read `bytes`, freeing that much of the window. Grant
+      # the peer more without waiting to be told we blocked it: "An endpoint
+      # MUST NOT wait for a WT_DATA_BLOCKED... capsule before sending a
+      # WT_MAX_DATA" (§5.6).
+      def count_consumed_data(bytes) # :nodoc:
+        return unless flow_control_enabled?
+
+        granted = receive_limits.consume_data(bytes)
+        send_capsule(Protocol::WebTransport.build_max_data(granted)) if granted
+      end
+
+      # A child closed, so the session can afford another (§5.6).
+      def count_closed_stream(direction) # :nodoc:
+        return unless flow_control_enabled?
+
+        granted = receive_limits.close_stream(direction)
+        send_capsule(Protocol::WebTransport.build_max_streams(direction, granted)) if granted
+      end
+
       # A reset charges what the sender counted, not what reached us (§5.4).
       def count_reset_stream(final_size, delivered) # :nodoc:
         return unless flow_control_enabled?
@@ -399,6 +427,12 @@ module Quicsilver
         receive_limits.reset_stream!(final_size, delivered)
       rescue Protocol::WebTransport::FlowControlError => error
         handle_capsule_error(error)
+      end
+
+      def notify_writable
+        @writable_callback&.call
+      rescue StandardError => error
+        Quicsilver.logger.error("WebTransport on_writable callback failed: #{error.message}")
       end
 
       def peer_settings
@@ -714,7 +748,9 @@ module Quicsilver
 
           # Raises FlowControlError for a limit that does not increase, or a
           # stream count above 2^60 (§5.6.2, §5.6.4).
+          before = flow_control.data_remaining
           flow_control.apply(Protocol::WebTransport.parse_flow_control_capsule(type, payload))
+          notify_writable if flow_control.data_remaining > before
         when WT_DRAIN_SESSION
           # Advisory only. The session stays open and usable; it is up to the
           # application to wind down (draft-16 §4.7).

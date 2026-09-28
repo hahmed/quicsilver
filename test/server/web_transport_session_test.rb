@@ -514,6 +514,83 @@ class WebTransportSessionTest < Minitest::Test
       "a blocked open must send WT_STREAMS_BLOCKED"
   end
 
+  # 5.6: grants must be proactive. Reading frees window, and the peer is told
+  # without waiting for it to report being blocked.
+  def test_reading_grants_the_peer_more_data_without_being_asked
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings
+    session = build_session(stream: stream, connection: connection)
+    advertised = {
+      Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA => 10,
+      Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => 1
+    }
+
+    with_flow_control_negotiated(connection, advertised: advertised) do
+      session.accept!
+      child = with_native_receive_credit { session.add_uni_stream(99_997, 6) }
+      with_native_receive_credit { child.receive_data("12345678") }
+
+      # Reading releases queue capacity, which grants native receive credit.
+      with_native_receive_credit { child.read }
+    end
+
+    assert_includes stream.bytes, Quicsilver::Protocol::WebTransport.build_max_data(18),
+      "consuming 8 of a 10 byte window must grant more"
+  end
+
+  # A closed stream frees a slot, which is granted back the same way.
+  def test_closing_a_stream_grants_the_peer_another
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings
+    session = build_session(stream: stream, connection: connection)
+    advertised = {Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => 1}
+
+    with_flow_control_negotiated(connection, advertised: advertised) do
+      session.accept!
+      child = with_native_receive_credit { session.add_uni_stream(99_997, 6) }
+
+      child.notify_close
+    end
+
+    assert_includes stream.bytes,
+      Quicsilver::Protocol::WebTransport.build_max_streams(:uni, 2)
+  end
+
+  # Writes are all or nothing, so a blocked application needs telling when
+  # there is credit again rather than resuming a partial write.
+  def test_on_writable_fires_when_the_peer_raises_our_limit
+    connection = connection_with_peer_settings
+    session = build_session(connection: connection)
+    woken = 0
+    session.on_writable { woken += 1 }
+
+    with_flow_control_negotiated(connection) do
+      session.accept!
+      session.receive_connect_data(max_data_capsule(4096))
+    end
+
+    assert_equal 1, woken
+  end
+
+  def test_on_writable_does_not_fire_for_a_capsule_that_grants_nothing
+    connection = connection_with_peer_settings
+    session = build_session(connection: connection)
+    woken = 0
+    session.on_writable { woken += 1 }
+
+    with_flow_control_negotiated(connection) do
+      session.accept!
+      session.receive_connect_data(
+        Quicsilver::Protocol::Capsule.encode(
+          Quicsilver::Protocol::WebTransport::DATA_BLOCKED_CAPSULE,
+          Quicsilver::Protocol.encode_varint(0)
+        )
+      )
+    end
+
+    assert_equal 0, woken
+  end
+
   # The prohibited pair is not in the set 5.1 tells us to ignore, so it still
   # fails the session even with flow control off.
   def test_prohibited_capsules_are_rejected_even_with_flow_control_off

@@ -63,6 +63,7 @@ module Quicsilver
         @stream_id = stream_id
         # Stream body bytes accepted from the peer, for session accounting.
         @body_received = 0
+        @session_stream_closed = false
         @direction = direction
         @read_open = direction != :send_only
         @write_open = direction != :receive_only
@@ -122,7 +123,11 @@ module Quicsilver
       def read
         raise IOError, "Cannot read from a send-only stream" if @direction == :send_only
 
-        @input.read
+        chunk = @input.read
+        # Reading frees session window, which is what the peer is granted more
+        # against (draft-16 §5.6).
+        @session&.count_consumed_data(chunk.bytesize) if chunk
+        chunk
       end
 
       def on_close(&block)
@@ -298,10 +303,18 @@ module Quicsilver
         notify_close_callback
       end
 
+      def notify_session_stream_closed
+        return if @session_stream_closed
+
+        @session_stream_closed = true
+        @session&.count_closed_stream(@direction == :bidi ? :bidi : :uni)
+      end
+
       def notify_close_callback
         return if @close_notified
 
         @close_notified = true
+        notify_session_stream_closed
         @close_callback&.call
       end
     end
