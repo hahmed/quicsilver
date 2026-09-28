@@ -117,6 +117,21 @@ class ConnectionTest < Minitest::Test
     assert_equal 0, @connection.settings[0x07]
   end
 
+  # draft-ietf-webtrans-http3-16 4.3: WT_STREAM outside the first bytes of a
+  # request stream is a connection error of type H3_FRAME_ERROR. The control
+  # stream gets that code, not the H3_FRAME_UNEXPECTED used for frames that are
+  # merely on the wrong stream.
+  def test_rejects_wt_stream_frame_on_control_stream
+    @connection.set_control_stream(1, build_settings_frame)
+    wt_stream_frame = encode_varint(Quicsilver::Protocol::FRAME_WT_STREAM) + encode_varint(0)
+
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      @connection.send(:parse_control_frames, wt_stream_frame)
+    end
+
+    assert_equal Quicsilver::Protocol::H3_FRAME_ERROR, error.error_code
+  end
+
   def test_rejects_duplicate_settings_frame
     @connection.set_control_stream(1, build_settings_frame)
 

@@ -32,6 +32,12 @@ module Quicsilver
     # HTTP/2 frame types, reserved in HTTP/3 so that an HTTP/2 frame arriving
     # here is rejected rather than mistaken for an extension (RFC 9114 7.2.8)
     HTTP2_RESERVED_FRAME_SET = {0x02 => true, 0x06 => true, 0x08 => true, 0x09 => true}.freeze
+
+    # WT_STREAM is registered as a frame type to reserve the code point, but it
+    # carries no length and is only legal as the very first bytes of a request
+    # stream, where the server classifies it before any frame parsing. Anywhere
+    # else it is a connection error (draft-ietf-webtrans-http3-16 §4.3).
+    FRAME_WT_STREAM = 0x41
     # HTTP/3 Datagram Error Code (RFC 9297 Section 5.2)
     H3_DATAGRAM_ERROR = 0x33
 
@@ -216,6 +222,13 @@ module Quicsilver
         if HTTP2_RESERVED_FRAME_SET.key?(type)
           raise FrameError.new("Reserved HTTP/2 frame type 0x#{type.to_s(16)} not allowed in HTTP/3",
             error_code: H3_FRAME_UNEXPECTED)
+        end
+
+        # Reaching here means the stream already parsed as HTTP/3, so this
+        # WT_STREAM is not at the front of the stream (draft-16 §4.3).
+        if type == FRAME_WT_STREAM
+          raise FrameError.new("WT_STREAM is only allowed as the first bytes of a request stream",
+            error_code: H3_FRAME_ERROR)
         end
       end
 

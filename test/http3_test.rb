@@ -313,6 +313,17 @@ class HTTP3Test < Minitest::Test
     end
   end
 
+  # draft-ietf-webtrans-http3-16 4.3: WT_STREAM is legal only as the very first
+  # bytes of a request stream, which the server classifies before it parses any
+  # frame. Anything reaching the frame parser is misplaced.
+  def test_wt_stream_frame_type_is_a_connection_error_on_a_request_stream
+    error = assert_raises(Quicsilver::Protocol::FrameError) do
+      reject_request_frame(Quicsilver::Protocol::FRAME_WT_STREAM)
+    end
+
+    assert_equal Quicsilver::Protocol::H3_FRAME_ERROR, error.error_code
+  end
+
   # RFC 9114 9: unknown frame types are extensions and must be ignored.
   def test_data_headers_and_extension_frames_are_allowed
     [Quicsilver::Protocol::FRAME_DATA, Quicsilver::Protocol::FRAME_HEADERS, 0x21, 0x2f].each do |type|

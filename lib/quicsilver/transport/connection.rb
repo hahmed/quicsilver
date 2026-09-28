@@ -449,6 +449,16 @@ module Quicsilver
       end
 
       def handle_control_frame(type, payload)
+        # WT_STREAM belongs at the front of a request stream and nowhere else;
+        # on the control stream it is H3_FRAME_ERROR, not H3_FRAME_UNEXPECTED
+        # (draft-ietf-webtrans-http3-16 §4.3).
+        if type == Protocol::FRAME_WT_STREAM
+          raise Protocol::FrameError.new(
+            "WT_STREAM is not allowed on the control stream",
+            error_code: Protocol::H3_FRAME_ERROR
+          )
+        end
+
         if FORBIDDEN_ON_CONTROL.include?(type)
           raise Protocol::FrameError.new(
             "Frame type 0x#{type.to_s(16)} not allowed on control stream",
