@@ -28,6 +28,13 @@ module Quicsilver
     # WebTransport session flow control (draft-16 §5.1). It is a promise to
     # implement the whole of §5, so do not advertise one until the capsules
     # and accounting exist.
+    # The session flow control window we advertise. 16 MiB leaves room for
+    # many children above the 1 MiB each queues, and 100 streams per direction
+    # bounds concurrency without being a limit an application trips over.
+    # Both are our choice; the draft only defines the mechanism.
+    WT_INITIAL_MAX_DATA = 16 * 1024 * 1024
+    WT_INITIAL_MAX_STREAMS = 100
+
     WT_FLOW_CONTROL_SETTINGS = [
       SETTINGS_WT_INITIAL_MAX_DATA,
       SETTINGS_WT_INITIAL_MAX_STREAMS_UNI,
@@ -312,9 +319,21 @@ module Quicsilver
           SETTINGS_H3_DATAGRAM => datagram_receive_enabled ? 1 : 0,
           SETTINGS_ENABLE_WEBTRANSPORT => 1,
           SETTINGS_WT_ENABLED => 1,
-          # No WT_INITIAL_MAX_* here: a non-zero value enables session flow
-          # control, whose capsules and accounting are not implemented yet.
-          # Draft-16 §5.1 therefore limits us to one session per connection.
+          # Declaring these enables session flow control when the peer also
+          # does (§5.1). They are the initial limits a session grants its
+          # peer, raised by capsules as we consume data and close streams.
+          #
+          # The data window is well above the 1 MiB a single child stream
+          # queues, so one stream cannot exhaust a session's credit, in the
+          # same spirit as QUIC keeping its connection window above any one
+          # stream's. The stream counts bound concurrent children; both are
+          # ours to choose, not values the draft sets.
+          SETTINGS_WT_INITIAL_MAX_DATA => WT_INITIAL_MAX_DATA,
+          SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => WT_INITIAL_MAX_STREAMS,
+          SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => WT_INITIAL_MAX_STREAMS,
+          # Still one session per connection. Flow control now permits more
+          # (§5.1), but sharing a connection between sessions is a separate
+          # change.
           SETTINGS_WT_MAX_SESSIONS => 1
         }
         settings[SETTINGS_MAX_FIELD_SECTION_SIZE] = max_field_section_size if max_field_section_size

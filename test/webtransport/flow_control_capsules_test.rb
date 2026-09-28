@@ -250,10 +250,30 @@ class WebTransportFlowControlCapsulesTest < Minitest::Test
     refute Frames.wt_flow_control_opt_in?(Frames::SETTINGS_WT_ENABLED => 1)
   end
 
-  # We do not implement §5 yet, so we must not advertise any of them.
-  def test_we_do_not_advertise_flow_control_today
-    refute Frames.wt_flow_control_opt_in?(Frames.control_stream_settings),
-      "advertising a non-zero WT_INITIAL_MAX_* promises the whole of section 5"
+  # Advertising a non-zero limit is the promise that the whole of §5 works.
+  def test_we_declare_intent_to_use_flow_control
+    assert Frames.wt_flow_control_opt_in?(Frames.control_stream_settings)
+  end
+
+  # A single child queues 1 MiB, so the session window has to be well above
+  # that or one stream could consume the whole session's credit.
+  def test_the_session_window_is_larger_than_one_streams_queue
+    per_stream = Quicsilver::Server::WebTransportSession::DEFAULT_RECEIVE_OPTIONS[:receive_buffer_bytes]
+
+    assert_operator Frames::WT_INITIAL_MAX_DATA, :>, per_stream * 4
+  end
+
+  def test_both_stream_directions_are_advertised
+    settings = Frames.control_stream_settings
+
+    assert_operator settings[Frames::SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI], :>, 0
+    assert_operator settings[Frames::SETTINGS_WT_INITIAL_MAX_STREAMS_UNI], :>, 0
+  end
+
+  # §5.1 permits more than one session once flow control is on, but sharing a
+  # connection between sessions is a separate change.
+  def test_still_one_session_per_connection
+    assert_equal 1, Frames.control_stream_settings[Frames::SETTINGS_WT_MAX_SESSIONS]
   end
 
   def test_advertised_settings_match_what_the_control_stream_sends
