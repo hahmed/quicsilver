@@ -446,6 +446,74 @@ class WebTransportSessionTest < Minitest::Test
     assert session.open?
   end
 
+  # 5.6.4: we must not send more stream body than the peer granted, and 5.6.3
+  # says to tell it we were blocked so it can raise the limit.
+  def test_writing_past_the_granted_limit_is_refused_and_reported
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings
+    session = build_session(stream: stream, connection: connection)
+    advertised = {Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => 1}
+
+    with_flow_control_negotiated(connection, advertised: advertised) do
+      session.accept!
+      child = with_native_receive_credit { session.add_stream(99_998, 4) }
+
+      assert_raises(Quicsilver::Protocol::WebTransport::SendBlocked) { child.write("payload") }
+    end
+
+    assert_includes stream.bytes,
+      Quicsilver::Protocol::WebTransport.build_data_blocked(0),
+      "a blocked write must send WT_DATA_BLOCKED"
+    assert session.open?, "being out of credit is not a protocol error"
+  end
+
+  # Writes are all or nothing, so an application needs a way to ask before it
+  # writes rather than handling the refusal.
+  def test_writable_reports_the_remaining_credit_before_a_write
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings(
+      Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA => 10
+    )
+    session = build_session(stream: stream, connection: connection)
+    advertised = {Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => 1}
+
+    with_flow_control_negotiated(connection, advertised: advertised) do
+      session.accept!
+      child = with_native_receive_credit { session.add_stream(99_998, 4) }
+
+      assert child.writable?(10), "10 bytes of credit were granted"
+      refute child.writable?(11), "a write past the credit would send nothing"
+      assert_raises(Quicsilver::Protocol::WebTransport::SendBlocked) { child.write("x" * 11) }
+    end
+  end
+
+  # With no flow control there is no budget to be short of.
+  def test_writable_is_true_while_flow_control_is_off
+    session = build_session
+    session.accept!
+    child = with_native_receive_credit { session.add_stream(99_998, 4) }
+
+    assert child.writable?(1_000_000)
+  end
+
+  # The peer granted data but no streams, so opening one is blocked and
+  # reported with WT_STREAMS_BLOCKED (5.6.3).
+  def test_opening_a_stream_past_the_granted_limit_is_refused_and_reported
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings
+    session = build_session(stream: stream, connection: connection)
+
+    with_flow_control_negotiated(connection) do
+      session.accept!
+
+      assert_raises(Quicsilver::Protocol::WebTransport::SendBlocked) { session.open_uni_stream }
+    end
+
+    assert_includes stream.bytes,
+      Quicsilver::Protocol::WebTransport.build_streams_blocked(:uni, 0),
+      "a blocked open must send WT_STREAMS_BLOCKED"
+  end
+
   # The prohibited pair is not in the set 5.1 tells us to ignore, so it still
   # fails the session even with flow control off.
   def test_prohibited_capsules_are_rejected_even_with_flow_control_off

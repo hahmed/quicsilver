@@ -94,7 +94,21 @@ module Quicsilver
         raise "Cannot write to a receive-only stream" if @direction == :receive_only
         raise IOError, "Stream is closed for writing" unless @write_open
 
-        @stream.send(data.to_s.b)
+        payload = data.to_s.b
+        # Charge the session budget before the bytes leave. Raises SendBlocked
+        # when the peer has not granted enough, having told it so (draft-16
+        # §5.6.4); nothing is sent in that case.
+        @session&.count_sent_data(payload.bytesize)
+        @stream.send(payload)
+      end
+
+      # Whether `bytes` can be written now. Writes are all or nothing, so a
+      # write past the session's remaining credit raises SendBlocked and sends
+      # nothing; check here to avoid that.
+      def writable?(bytes = 1)
+        return false unless @write_open && @direction != :receive_only
+
+        @session.nil? || @session.can_send?(bytes)
       end
 
       # Finish sending and discard unread input; use close_write to keep reading.

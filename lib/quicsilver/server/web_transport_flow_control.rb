@@ -19,6 +19,7 @@ module Quicsilver
       WT = Protocol::WebTransport
 
       attr_reader :max_data, :max_streams_bidi, :max_streams_uni
+      attr_reader :data_sent
 
       def self.from_settings(settings)
         new(
@@ -32,6 +33,9 @@ module Quicsilver
         @max_data = max_data
         @max_streams_bidi = max_streams_bidi
         @max_streams_uni = max_streams_uni
+        @data_sent = 0
+        @streams_opened_bidi = 0
+        @streams_opened_uni = 0
       end
 
       # Apply a limit the peer sent. Capsules travel on the CONNECT stream and
@@ -53,6 +57,49 @@ module Quicsilver
       def max_streams(direction)
         (direction == :bidi) ? @max_streams_bidi : @max_streams_uni
       end
+
+      def streams_opened(direction)
+        (direction == :bidi) ? @streams_opened_bidi : @streams_opened_uni
+      end
+
+      # "An endpoint MUST NOT open more streams than permitted by the current
+      # stream limit set by its peer" (§5.6.2). The limit counts closed
+      # streams too, so this only ever rises.
+      def open_stream!(direction)
+        opened = streams_opened(direction)
+        limit = max_streams(direction)
+        if opened + 1 > limit
+          raise WT::SendBlocked.new(
+            "cannot open a #{direction} stream: #{opened} of #{limit} used",
+            limit: limit, needed: 1
+          )
+        end
+
+        if direction == :bidi
+          @streams_opened_bidi += 1
+        else
+          @streams_opened_uni += 1
+        end
+      end
+
+      # "The sum of the lengths of Stream Body data sent on all streams
+      # associated with this session MUST NOT exceed the Maximum Data value
+      # advertised by a receiver" (§5.6.4). Stream bodies only: the prefix
+      # linking a stream to its session is excluded (§5.4).
+      def send_data!(bytes)
+        return if bytes.zero?
+
+        if @data_sent + bytes > @max_data
+          raise WT::SendBlocked.new(
+            "cannot send #{bytes} bytes: #{@data_sent} of #{@max_data} used",
+            limit: @max_data, needed: bytes
+          )
+        end
+
+        @data_sent += bytes
+      end
+
+      def data_remaining = @max_data - @data_sent
 
       private
 

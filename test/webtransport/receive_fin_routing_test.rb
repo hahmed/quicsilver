@@ -576,13 +576,15 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
         ":scheme" => "https", ":authority" => "localhost", ":path" => "/transports/drop"
       }
     )
-    session.stub(:accept!, nil) { }
-    # These are routing tests over synthetic native handles, where granting
-    # receive credit cannot succeed. Backpressure is covered elsewhere.
-    session.instance_variable_set(:@receive_options,
-      Session::DEFAULT_RECEIVE_OPTIONS.merge(receive_backpressure: false))
-    session.instance_variable_set(:@accepted, true)
-    session.instance_variable_set(:@open, true)
+    # Accept for real rather than setting the accepted, open and receive
+    # option ivars by hand: accept! is where session state is established, and
+    # a hand-built session silently misses whatever it sets next.
+    #
+    # Backpressure is off because these are routing tests over synthetic
+    # native handles, which cannot be granted receive credit. It is covered
+    # elsewhere.
+    # There is no native transport here, so the 200 cannot actually go out.
+    stream.stub(:send, true) { session.accept!(receive_backpressure: false) }
     session
   end
 end

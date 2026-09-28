@@ -69,6 +69,20 @@ module Quicsilver
         def error_code = FLOW_CONTROL_ERROR
       end
 
+      # We wanted to send but the peer's session limit forbids it (§5.3,
+      # §5.4). Local and recoverable: nothing is wrong on the wire, there is
+      # simply no credit. Distinct from FlowControlError, which means the peer
+      # broke a rule and the session must close.
+      class SendBlocked < StandardError
+        attr_reader :limit, :needed
+
+        def initialize(message, limit:, needed:)
+          super(message)
+          @limit = limit
+          @needed = needed
+        end
+      end
+
       # What a flow control capsule says. `limit` is cumulative for MAX_DATA
       # and MAX_STREAMS, and for the BLOCKED capsules it is the limit that was
       # in force when the sender was blocked.

@@ -146,6 +146,88 @@ class WebTransportFlowControlStateTest < Minitest::Test
     3.times { state.apply(limit(:data_blocked, nil, 0)) }
   end
 
+  # === spending what a peer granted (§5.6.2, §5.6.4) ===
+  #
+  # "An endpoint MUST NOT open more streams than permitted by the current
+  # stream limit set by its peer." Same for data against Maximum Data.
+
+  def test_streams_can_be_opened_up_to_the_granted_limit
+    state = FlowControl.new
+    state.apply(limit(:max_streams, :uni, 2))
+
+    2.times { state.open_stream!(:uni) }
+
+    assert_equal 2, state.streams_opened(:uni)
+  end
+
+  def test_opening_past_the_granted_limit_is_blocked
+    state = FlowControl.new
+    state.apply(limit(:max_streams, :uni, 1))
+    state.open_stream!(:uni)
+
+    blocked = assert_raises(WT::SendBlocked) { state.open_stream!(:uni) }
+
+    assert_equal 1, blocked.limit
+    assert_equal 1, state.streams_opened(:uni), "a blocked open must not be counted"
+  end
+
+  # A blocked send is local and recoverable; the peer has broken no rule.
+  def test_blocked_is_not_a_protocol_error
+    refute_kind_of WT::FlowControlError, WT::SendBlocked.new("x", limit: 0, needed: 1)
+  end
+
+  def test_a_raised_limit_unblocks_further_streams
+    state = FlowControl.new
+    state.apply(limit(:max_streams, :bidi, 1))
+    state.open_stream!(:bidi)
+    assert_raises(WT::SendBlocked) { state.open_stream!(:bidi) }
+
+    state.apply(limit(:max_streams, :bidi, 2))
+
+    state.open_stream!(:bidi)
+    assert_equal 2, state.streams_opened(:bidi)
+  end
+
+  def test_data_can_be_sent_up_to_the_granted_limit
+    state = FlowControl.new
+    state.apply(limit(:max_data, nil, 100))
+
+    state.send_data!(60)
+    state.send_data!(40)
+
+    assert_equal 100, state.data_sent
+    assert_equal 0, state.data_remaining
+  end
+
+  def test_sending_past_the_granted_limit_is_blocked
+    state = FlowControl.new
+    state.apply(limit(:max_data, nil, 100))
+    state.send_data!(100)
+
+    blocked = assert_raises(WT::SendBlocked) { state.send_data!(1) }
+
+    assert_equal 100, blocked.limit
+    assert_equal 1, blocked.needed
+    assert_equal 100, state.data_sent, "a blocked write must not be counted"
+  end
+
+  # All or nothing: a write that does not fit is refused outright rather than
+  # sent in part, so the peer never sees more than it allowed.
+  def test_a_write_larger_than_the_remaining_credit_sends_nothing
+    state = FlowControl.new
+    state.apply(limit(:max_data, nil, 100))
+    state.send_data!(90)
+
+    assert_raises(WT::SendBlocked) { state.send_data!(20) }
+
+    assert_equal 90, state.data_sent
+  end
+
+  def test_nothing_can_be_sent_before_a_grant
+    assert_raises(WT::SendBlocked) { FlowControl.new.send_data!(1) }
+    assert_raises(WT::SendBlocked) { FlowControl.new.open_stream!(:bidi) }
+  end
+
   # === limits we advertised to the peer (§5.3, §5.4) ===
 
   def test_seeds_from_the_settings_we_advertised

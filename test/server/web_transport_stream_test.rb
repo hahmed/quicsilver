@@ -454,13 +454,17 @@ class WebTransportStreamTest < Minitest::Test
   def test_write_sends_raw_bytes
     raw = Minitest::Mock.new
     raw.expect(:send, true, ["hello"])
+    # Writing charges the session's send budget before the bytes leave.
+    session = Minitest::Mock.new
+    session.expect(:count_sent_data, nil, [5])
 
     stream = Quicsilver::Server::WebTransportStream.new(
-      session: Minitest::Mock.new, stream: raw, stream_id: 4, **RECEIVE_WITHOUT_BACKPRESSURE
+      session: session, stream: raw, stream_id: 4, **RECEIVE_WITHOUT_BACKPRESSURE
     )
     stream.write("hello")
 
     raw.verify
+    session.verify
   end
 
   # === Direction enforcement ===

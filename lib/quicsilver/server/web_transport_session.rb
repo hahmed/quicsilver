@@ -347,6 +347,51 @@ module Quicsilver
         handle_capsule_error(error)
       end
 
+      # Charge an outgoing stream against what the peer granted. Tells the peer
+      # we were blocked before raising, so it can raise the limit (§5.6.3).
+      def count_outgoing_stream(direction) # :nodoc:
+        return unless flow_control_enabled?
+
+        flow_control.open_stream!(direction)
+      rescue Protocol::WebTransport::SendBlocked => blocked
+        send_capsule(Protocol::WebTransport.build_streams_blocked(direction, blocked.limit))
+        raise
+      end
+
+      # Can this session send `bytes` right now? Ask before writing to avoid
+      # handling SendBlocked; writes are all or nothing, so a write larger
+      # than the remaining credit sends nothing.
+      #
+      # Credit rises only when the peer sends a WT_MAX_DATA capsule, so an
+      # application that is blocked has to retry. A notification for that
+      # arrives with grant handling.
+      def can_send?(bytes = 1) # :nodoc:
+        return true unless flow_control_enabled?
+
+        flow_control.data_remaining >= bytes
+      end
+
+      # Charge outgoing stream body bytes (§5.6.4). Body only: the prefix that
+      # links a stream to this session costs nothing.
+      def count_sent_data(bytes) # :nodoc:
+        return unless flow_control_enabled?
+
+        flow_control.send_data!(bytes)
+      rescue Protocol::WebTransport::SendBlocked => blocked
+        send_capsule(Protocol::WebTransport.build_data_blocked(blocked.limit))
+        raise
+      end
+
+      # Capsules ride the CONNECT stream as HTTP/3 DATA, like CLOSE and DRAIN.
+      # Signalling is advisory, so a send failure must not break the session.
+      def send_capsule(capsule)
+        @stream.send(Protocol.build_frame(Protocol::FRAME_DATA, capsule), fin: false)
+      rescue StandardError => error
+        Quicsilver.logger.debug(
+          "WebTransport session #{@stream_id} could not send a flow control capsule: #{error.message}"
+        )
+      end
+
       # A reset charges what the sender counted, not what reached us (§5.4).
       def count_reset_stream(final_size, delivered) # :nodoc:
         return unless flow_control_enabled?
@@ -568,6 +613,7 @@ module Quicsilver
         raise "Session not accepted" unless @accepted
         raise "Session not open" unless accepts_new_streams?
 
+        count_outgoing_stream(unidirectional ? :uni : :bidi)
         stream = @connection.open_stream(unidirectional: unidirectional)
         wt_stream = WebTransportStream.new(
           session: self, stream: stream, stream_id: stream.stream_id,
