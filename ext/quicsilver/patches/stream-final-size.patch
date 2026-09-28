@@ -1,0 +1,81 @@
+Expose the received final size of a stream.
+
+RFC 9000 4.5 settles a stream's final size when a FIN or RESET_STREAM
+arrives, and draft-ietf-webtrans-http3-16 5.4 requires it to implement
+WT_MAX_DATA: without it the two endpoints disagree about how much
+session credit a reset stream consumed. MsQuic already keeps the value
+as Stream->RecvMaxLength, documented there as the immutable final size,
+but PEER_SEND_ABORTED carries only an error code and the statistics
+struct has no byte counts, so there is no public way to read it.
+
+Google quiche (QuicRstStreamFrame::byte_offset), Cloudflare quiche
+(RecvBuf::reset returning final_size - len) and aioquic (final_size in
+_handle_reset_stream_frame) all surface it for the same reason.
+
+Read-only accessor; no state changes. QUIC_STATUS_INVALID_STATE while
+the final size is still unknown, matching how 0RTT_LENGTH reports a
+value that is not yet settled.
+
+The identifier is deliberately 0x08000046 rather than the next free
+0x08000006. Upstream allocates stream parameters sequentially and has no
+reserved vendor range, so the next number MsQuic itself adds would
+collide with ours. Sitting well above the sequence keeps an MsQuic
+upgrade from quietly meaning something else. A collision would still be
+a compile error, not silent, but it is cheaper to avoid it.
+Renumber to the next sequential value if this is ever upstreamed.
+
+Note: MsQuic PR branch 37ea3bcaf ("Added final size to
+QuicStreamProcessReliableResetFrame") touches related internals and is
+not merged. Check it before submitting this upstream.
+
+
+diff --git a/src/inc/msquic.h b/src/inc/msquic.h
+--- a/src/inc/msquic.h
++++ b/src/inc/msquic.h
+@@ -1108,6 +1108,7 @@ typedef struct QUIC_SCHANNEL_CONTEXT_ATTRIBUTE_EX {
+ #define QUIC_PARAM_STREAM_STATISTICS                    0X08000004  // QUIC_STREAM_STATISTICS
+ #ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+ #define QUIC_PARAM_STREAM_RELIABLE_OFFSET               0x08000005  // uint64_t
++#define QUIC_PARAM_STREAM_FINAL_SIZE                    0x08000046  // uint64_t - bytes
+ #endif
+ 
+ typedef
+diff --git a/src/core/stream.c b/src/core/stream.c
+--- a/src/core/stream.c
++++ b/src/core/stream.c
+@@ -800,6 +800,35 @@ QuicStreamParamGet(
+         Status = QUIC_STATUS_SUCCESS;
+         break;
+ 
++    case QUIC_PARAM_STREAM_FINAL_SIZE:
++
++        if (*BufferLength < sizeof(uint64_t)) {
++            *BufferLength = sizeof(uint64_t);
++            Status = QUIC_STATUS_BUFFER_TOO_SMALL;
++            break;
++        }
++
++        if (Buffer == NULL) {
++            Status = QUIC_STATUS_INVALID_PARAMETER;
++            break;
++        }
++
++        //
++        // RecvMaxLength is UINT64_MAX until a FIN or RESET_STREAM settles the
++        // final size (RFC 9000 4.5). Report that as an invalid state rather
++        // than handing the caller a sentinel it has to know about.
++        //
++        if (!Stream->Flags.Started || Stream->RecvMaxLength == UINT64_MAX) {
++            Status = QUIC_STATUS_INVALID_STATE;
++            break;
++        }
++
++        *BufferLength = sizeof(uint64_t);
++        *(uint64_t*)Buffer = Stream->RecvMaxLength;
++
++        Status = QUIC_STATUS_SUCCESS;
++        break;
++
+     case QUIC_PARAM_STREAM_0RTT_LENGTH:
+ 
+         if (*BufferLength < sizeof(uint64_t)) {

@@ -137,6 +137,36 @@ class StreamLifetimeTest < Minitest::Test
     assert_equal REJECTION, decode_event(event).error_code
   end
 
+  # RFC 9000 4.5: RESET_STREAM carries the stream's final size, so both
+  # endpoints agree how many bytes it consumed. WebTransport session flow
+  # control needs that number to charge the bytes a reset discarded
+  # (draft-ietf-webtrans-http3-16 5.4).
+  def test_reset_reports_the_final_size_the_peer_sent
+    @server.record_receives_for = :all
+    outgoing, _, id = open_stream(unidirectional: true)
+    extra = "x".b * 100
+    outgoing.send(extra)
+    # Abort discards anything still unsent, so the final size only covers bytes
+    # that actually left. Wait for delivery to pin the number.
+    await_event(@server, "RECEIVE", id)
+    assert outgoing.abort(REJECTION)
+
+    event = await_event(@server, "STREAM_RESET", id)
+
+    assert_equal MARKER.bytesize + extra.bytesize, decode_event(event).final_size
+  end
+
+  # STOP_SENDING says nothing about how much the peer sent, so there is no
+  # final size to report and we must not invent one.
+  def test_stop_sending_reports_no_final_size
+    _, incoming, id = open_stream(unidirectional: true)
+    assert incoming.abort(REJECTION)
+
+    event = await_event(@client, "STOP_SENDING", id)
+
+    assert_nil decode_event(event).final_size
+  end
+
   def test_aborting_bidi_stream_closes_both_directions
     _, incoming, id = open_stream
 

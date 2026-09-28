@@ -3,6 +3,19 @@
 #include <ruby/st.h>
 #define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 #include "msquic.h"
+
+// Reads Stream->RecvMaxLength, the settled final size of a received stream.
+// Added by patches/stream-final-size.patch, which owns the identifier; this
+// fallback only keeps the extension compiling against an unpatched header.
+// The value sits above MsQuic's sequential stream parameters so an upstream
+// addition cannot claim the same number.
+#ifndef QUIC_PARAM_STREAM_FINAL_SIZE
+#define QUIC_PARAM_STREAM_FINAL_SIZE 0x08000046
+#endif
+
+// Reported when the final size is not settled, so Ruby is never handed a
+// length it would have to sanity check.
+#define QUICSILVER_FINAL_SIZE_UNKNOWN UINT64_MAX
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -548,11 +561,24 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
         case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED: {
-            // Peer sent RESET_STREAM — pack [stream_handle(8)][error_code(8)]
+            // Peer sent RESET_STREAM — pack
+            // [stream_handle(8)][error_code(8)][final_size(8)]
+            //
+            // RESET_STREAM carries the stream's final size, and WebTransport
+            // session accounting needs it: without it the two endpoints
+            // disagree about how much credit a reset stream consumed
+            // (draft-ietf-webtrans-http3-16 5.4, RFC 9000 4.5).
             uint64_t error_code = Event->PEER_SEND_ABORTED.ErrorCode;
-            char combined[sizeof(token) + sizeof(uint64_t)];
+            uint64_t final_size = QUICSILVER_FINAL_SIZE_UNKNOWN;
+            uint32_t final_size_length = sizeof(final_size);
+            if (QUIC_FAILED(MsQuic->GetParam(ctx->stream, QUIC_PARAM_STREAM_FINAL_SIZE,
+                    &final_size_length, &final_size))) {
+                final_size = QUICSILVER_FINAL_SIZE_UNKNOWN;
+            }
+            char combined[sizeof(token) + sizeof(uint64_t) + sizeof(uint64_t)];
             memcpy(combined, &token, sizeof(token));
             memcpy(combined + sizeof(token), &error_code, sizeof(uint64_t));
+            memcpy(combined + sizeof(token) + sizeof(uint64_t), &final_size, sizeof(uint64_t));
             dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj, "STREAM_RESET", ctx->stream_id, combined, sizeof(combined), 0);
             break;
         }

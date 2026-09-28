@@ -7,12 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Transport::StreamEvent#final_size` reports how many bytes the peer sent on a stream the peer reset, from the RESET_STREAM frame (RFC 9000 §4.5); `nil` when the final size is not settled. WebTransport session flow control needs it to charge the bytes a reset discarded (draft-ietf-webtrans-http3-16 §5.4). MsQuic keeps the value but does not expose it, so it is read through a new vendored patch, `ext/quicsilver/patches/stream-final-size.patch`.
+
 ### Fixed
 
 - WebTransport CLOSE and DRAIN capsules use HTTP/3 DATA frames. Session close sends FIN, validates peer close payloads, and terminates both directions on protocol errors.
-
-### Fixed
-
 - WT_STREAM (`0x41`) is rejected with the connection error `H3_FRAME_ERROR` when it appears anywhere other than the first bytes of a request stream, including on the control stream (draft-ietf-webtrans-http3-16 §4.3). It is only a signal value at the front of a WebTransport stream, never a frame elsewhere.
 - WebTransport capsules sent optimistically on the CONNECT stream are no longer processed before the server responds. They are held unparsed, then processed once `accept!` sends the 2xx or discarded if the session is rejected (§3.2). The hold is bounded at 64 KiB; exceeding it fails the session with `H3_MESSAGE_ERROR`. Previously a CLOSE capsule arriving before the application responded would terminate the session and make it unacceptable.
 
