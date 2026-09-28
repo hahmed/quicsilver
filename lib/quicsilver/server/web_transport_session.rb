@@ -161,6 +161,7 @@ module Quicsilver
         @received_close = false
         @connect_failed = false
         @closed = false
+        @flow_control_enabled = false
         @receive_options = DEFAULT_RECEIVE_OPTIONS
       end
 
@@ -203,6 +204,7 @@ module Quicsilver
         @stream.send(frame, fin: false)
         @accepted = true
         @open = true
+        @flow_control_enabled = @connection.wt_flow_control_enabled?
         # A client may send capsules optimistically before our response. We held
         # those bytes unparsed; now that the 2xx is out they can be processed
         # (draft-ietf-webtrans-http3-16 §3.2).
@@ -300,14 +302,58 @@ module Quicsilver
 
       # Both endpoints must have advertised a non-zero WT_INITIAL_MAX_*
       # setting (§5.1). We advertise none, so this is false today.
+      # Resolved once when the session is accepted, not asked per chunk: the
+      # answer cannot change afterwards, and the receive path reads it for
+      # every arriving byte.
       def flow_control_enabled?
-        @connection.wt_flow_control_enabled?
+        @flow_control_enabled
       end
 
       # What the peer permits us to send in this session. Seeded from its
       # SETTINGS, then raised by capsules (§5.5, §5.6).
       def flow_control
         @flow_control ||= WebTransportFlowControl.from_settings(peer_settings)
+      end
+
+      # What the peer may send us, from the limits we advertised (§5.3, §5.4).
+      def receive_limits
+        @receive_limits ||= WebTransportReceiveLimits.from_settings(@connection.local_settings)
+      end
+
+      # Charge an incoming child stream against the limit we advertised
+      # (§5.6.2). Returns false when the limit is exceeded, having failed the
+      # session; the caller must not deliver the stream to the application.
+      #
+      # Exceeding a limit is a session error, so it must not escape into the
+      # transport callback that routed the stream: that runs on the poll
+      # thread and would take the whole connection down with it.
+      def count_incoming_stream(direction) # :nodoc:
+        return true unless flow_control_enabled?
+
+        receive_limits.open_stream!(direction)
+        true
+      rescue Protocol::WebTransport::FlowControlError => error
+        handle_capsule_error(error)
+        false
+      end
+
+      # Charge received stream body bytes (§5.6.4). Called per chunk, so it
+      # stays a plain integer add when flow control is off.
+      def count_received_data(bytes) # :nodoc:
+        return unless flow_control_enabled?
+
+        receive_limits.receive_data!(bytes)
+      rescue Protocol::WebTransport::FlowControlError => error
+        handle_capsule_error(error)
+      end
+
+      # A reset charges what the sender counted, not what reached us (§5.4).
+      def count_reset_stream(final_size, delivered) # :nodoc:
+        return unless flow_control_enabled?
+
+        receive_limits.reset_stream!(final_size, delivered)
+      rescue Protocol::WebTransport::FlowControlError => error
+        handle_capsule_error(error)
       end
 
       def peer_settings
@@ -467,6 +513,7 @@ module Quicsilver
         wt_stream = WebTransportStream.new(
           session: self, stream: stream, stream_id: stream_id, **@receive_options
         )
+        return wt_stream unless count_incoming_stream(:bidi)
         return wt_stream unless register_stream(wt_stream)
         @stream_callback&.call(wt_stream)
         wt_stream
@@ -484,6 +531,7 @@ module Quicsilver
           session: self, stream: stream, stream_id: stream_id,
           direction: :receive_only, **@receive_options
         )
+        return wt_stream unless count_incoming_stream(:uni)
         return wt_stream unless register_stream(wt_stream)
         @uni_stream_callback&.call(wt_stream)
         wt_stream

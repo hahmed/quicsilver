@@ -61,6 +61,8 @@ module Quicsilver
         @session = session
         @stream = stream
         @stream_id = stream_id
+        # Stream body bytes accepted from the peer, for session accounting.
+        @body_received = 0
         @direction = direction
         @read_open = direction != :send_only
         @write_open = direction != :receive_only
@@ -172,7 +174,13 @@ module Quicsilver
           abort(@receive_overflow_error)
           return false
         end
-        @input.write(data.byteslice(0, accepted)) if accepted.positive?
+        if accepted.positive?
+          @input.write(data.byteslice(0, accepted))
+          # Stream body only; the prefix that links this stream to its session
+          # is stripped before we see it and costs no credit (draft-16 §5.4).
+          @body_received += accepted
+          @session&.count_received_data(accepted)
+        end
         enable_receive_backpressure
         deferred.zero?
       rescue ReceiveQueue::Full
@@ -209,9 +217,13 @@ module Quicsilver
       end
 
       # RESET_STREAM ends our read side; the write side stays open. :nodoc:
-      def notify_peer_reset(http_error_code)
+      def notify_peer_reset(http_error_code, final_size = nil)
         error = ResetError.new(http_error_code)
         begin
+          # The sender counted everything up to the final size, including what
+          # never reached us, so the session owes credit for the difference
+          # (§5.4).
+          @session&.count_reset_stream(final_size, @body_received)
           close_read(error)
         ensure
           @peer_reset_callback&.call(error.application_error_code)

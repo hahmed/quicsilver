@@ -2,13 +2,15 @@
 
 require_relative "../test_helper"
 
-# The limits a peer grants a session (draft-ietf-webtrans-http3-16 §5.5, §5.6).
+# Session flow control state (draft-ietf-webtrans-http3-16 §5).
 #
-# This is what we are permitted to send. What the peer may send us is counted
-# separately, against the limits we advertised.
+# Two directions with different rules: limits a peer grants us, which must
+# increase and are never spent here, and limits we advertised to the peer,
+# which are spent and never move on their own.
 class WebTransportFlowControlStateTest < Minitest::Test
   FlowControl = Quicsilver::Server::WebTransportFlowControl
   WT = Quicsilver::Protocol::WebTransport
+  Limits = Quicsilver::Server::WebTransportReceiveLimits
 
   # === initial limits come from SETTINGS (§5.5) ===
 
@@ -142,6 +144,145 @@ class WebTransportFlowControlStateTest < Minitest::Test
     state = FlowControl.new
 
     3.times { state.apply(limit(:data_blocked, nil, 0)) }
+  end
+
+  # === limits we advertised to the peer (§5.3, §5.4) ===
+
+  def test_seeds_from_the_settings_we_advertised
+    limits = Limits.from_settings(
+      Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA => 100,
+      Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => 2
+    )
+
+    limits.receive_data!(100)
+    2.times { limits.open_stream!(:bidi) }
+
+    assert_raises(WT::FlowControlError) { limits.receive_data!(1) }
+  end
+
+  # === stream counts (§5.6.2) ===
+
+  def test_streams_up_to_the_limit_are_allowed
+    limits = Limits.new(max_streams_uni: 3)
+
+    3.times { limits.open_stream!(:uni) }
+
+    assert_equal 3, limits.streams_opened_uni
+  end
+
+  def test_one_stream_past_the_limit_is_a_flow_control_error
+    limits = Limits.new(max_streams_uni: 3)
+    3.times { limits.open_stream!(:uni) }
+
+    error = assert_raises(WT::FlowControlError) { limits.open_stream!(:uni) }
+
+    assert_equal WT::FLOW_CONTROL_ERROR, error.error_code
+  end
+
+  def test_the_two_directions_are_counted_separately
+    limits = Limits.new(max_streams_bidi: 1, max_streams_uni: 1)
+
+    limits.open_stream!(:bidi)
+    limits.open_stream!(:uni)
+
+    assert_raises(WT::FlowControlError) { limits.open_stream!(:bidi) }
+  end
+
+  # "Note that this limit includes streams that have been closed as well as
+  # those that are open." Nothing gives credit back.
+  def test_the_count_never_decreases
+    limits = Limits.new(max_streams_bidi: 1)
+    limits.open_stream!(:bidi)
+
+    assert_raises(WT::FlowControlError) { limits.open_stream!(:bidi) }
+    assert_raises(WT::FlowControlError) { limits.open_stream!(:bidi) }
+  end
+
+  # A zero limit is the default and forbids every stream until a capsule
+  # raises it (§5.5).
+  def test_a_zero_limit_admits_no_streams
+    assert_raises(WT::FlowControlError) { Limits.new.open_stream!(:uni) }
+  end
+
+  # === data (§5.6.4) ===
+
+  def test_data_up_to_the_limit_is_allowed
+    limits = Limits.new(max_data: 100)
+
+    limits.receive_data!(60)
+    limits.receive_data!(40)
+
+    assert_equal 100, limits.data_received
+  end
+
+  def test_one_byte_past_the_limit_is_a_flow_control_error
+    limits = Limits.new(max_data: 100)
+    limits.receive_data!(100)
+
+    error = assert_raises(WT::FlowControlError) { limits.receive_data!(1) }
+
+    assert_equal WT::FLOW_CONTROL_ERROR, error.error_code
+  end
+
+  def test_empty_chunks_cost_nothing
+    limits = Limits.new(max_data: 0)
+
+    limits.receive_data!(0)
+
+    assert_equal 0, limits.data_received
+  end
+
+  # === reset streams (§5.4) ===
+  #
+  # "For streams that were reset, implementing WT_MAX_DATA requires that the
+  # QUIC stack provide the WebTransport implementation with information about
+  # the final size of streams... This guarantees that both endpoints agree on
+  # how much WebTransport session flow control credit was consumed."
+
+  def test_a_reset_charges_the_bytes_that_never_arrived
+    limits = Limits.new(max_data: 100)
+    limits.receive_data!(10)
+
+    limits.reset_stream!(50, 10)
+
+    assert_equal 50, limits.data_received
+  end
+
+  def test_a_reset_past_the_limit_is_a_flow_control_error
+    limits = Limits.new(max_data: 100)
+    limits.receive_data!(10)
+
+    assert_raises(WT::FlowControlError) { limits.reset_stream!(200, 10) }
+  end
+
+  def test_a_reset_charges_nothing_when_everything_arrived
+    limits = Limits.new(max_data: 100)
+    limits.receive_data!(50)
+
+    limits.reset_stream!(50, 50)
+
+    assert_equal 50, limits.data_received
+  end
+
+  # MsQuic reports no final size until one is settled, and a stream can be
+  # reset before that. Guessing would diverge from the sender's count.
+  def test_an_unknown_final_size_charges_nothing
+    limits = Limits.new(max_data: 100)
+    limits.receive_data!(10)
+
+    limits.reset_stream!(nil, 10)
+
+    assert_equal 10, limits.data_received
+  end
+
+  # Defensive: a final size below what we already took would refund credit.
+  def test_a_final_size_below_what_arrived_charges_nothing
+    limits = Limits.new(max_data: 100)
+    limits.receive_data!(50)
+
+    limits.reset_stream!(20, 50)
+
+    assert_equal 50, limits.data_received
   end
 
   private

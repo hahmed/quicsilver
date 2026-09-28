@@ -349,13 +349,21 @@ class WebTransportManagerTest < Minitest::Test
       Quicsilver::Protocol.encode_varint(session_id)
   end
 
-  def build_session(stream_id:, connection: Object.new)
+  # The connection interface a session uses. These tests care about routing,
+  # not flow control, and the manager never reads session.connection: the
+  # labels passed in identify registries, not this object.
+  class FakeConnection
+    def wt_flow_control_enabled? = false
+    def local_settings = {}
+  end
+
+  def build_session(stream_id:, connection: FakeConnection.new)
     stream = Minitest::Mock.new
     stream.expect(:stream_id, stream_id)
     stream.expect(:stream_handle, 99999)
 
     Quicsilver::Server::WebTransportSession.new(
-      connection: connection,
+      connection: FakeConnection.new,
       stream: stream,
       headers: {
         ":method" => "CONNECT", ":protocol" => "webtransport",

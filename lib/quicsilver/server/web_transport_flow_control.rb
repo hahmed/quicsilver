@@ -7,8 +7,11 @@ module Quicsilver
     # connection and each stream, this bounds one session across all of its
     # streams.
     #
-    # This side of it is what we are permitted to send. What the peer may send
-    # us is counted separately, against the limits we advertised.
+    # This is what we are permitted to send. WebTransportReceiveLimits below
+    # is the mirror: what the peer may send us, against limits we advertised.
+    # The two are kept apart because the rules differ. A granted limit must
+    # increase and is never spent here; an advertised one is spent and never
+    # moves on its own.
     #
     # Limits start at the peer's WT_INITIAL_MAX_* settings, default 0, which
     # means nothing can be sent until a capsule raises them (§5.5).
@@ -72,6 +75,86 @@ module Quicsilver
         end
 
         value
+      end
+    end
+
+    # What a peer is permitted to send us in one session, and what it has used
+    # (draft-ietf-webtrans-http3-16 §5.3, §5.4).
+    #
+    # The mirror of WebTransportFlowControl: that holds limits the peer grants
+    # us, this holds limits we granted the peer and enforces them.
+    #
+    # Limits start at the WT_INITIAL_MAX_* values we advertised and rise as we
+    # issue capsules. Counting is deliberately plain integer arithmetic: this
+    # runs on every received chunk.
+    class WebTransportReceiveLimits
+      WT = Protocol::WebTransport
+
+      attr_reader :data_received, :streams_opened_bidi, :streams_opened_uni
+
+      def self.from_settings(settings)
+        new(
+          max_data: settings[Protocol::SETTINGS_WT_INITIAL_MAX_DATA].to_i,
+          max_streams_bidi: settings[Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI].to_i,
+          max_streams_uni: settings[Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_UNI].to_i
+        )
+      end
+
+      def initialize(max_data: 0, max_streams_bidi: 0, max_streams_uni: 0)
+        @max_data = max_data
+        @max_streams_bidi = max_streams_bidi
+        @max_streams_uni = max_streams_uni
+        @data_received = 0
+        @streams_opened_bidi = 0
+        @streams_opened_uni = 0
+      end
+
+      # "If an endpoint receives an incoming stream for a session that would
+      # exceed the advertised Maximum Streams value, it MUST close the
+      # WebTransport session with a WT_FLOW_CONTROL_ERROR error code" (§5.6.2).
+      #
+      # The limit counts closed streams as well as open ones, so this only ever
+      # goes up. The CONNECT stream itself is not included (§5.3).
+      def open_stream!(direction)
+        if direction == :bidi
+          @streams_opened_bidi += 1
+          exceeded!(:max_streams_bidi, @streams_opened_bidi, @max_streams_bidi)
+        else
+          @streams_opened_uni += 1
+          exceeded!(:max_streams_uni, @streams_opened_uni, @max_streams_uni)
+        end
+      end
+
+      # "The sum of the lengths of Stream Body data sent on all streams
+      # associated with this session MUST NOT exceed the Maximum Data value
+      # advertised by a receiver... If an endpoint receives Stream Body data in
+      # excess of this limit, it MUST close the WebTransport session with a
+      # WT_FLOW_CONTROL_ERROR error code" (§5.6.4).
+      #
+      # Body only: the signal value, stream type and session ID are excluded so
+      # that linking a stream to its session never costs credit (§5.4).
+      def receive_data!(bytes)
+        return if bytes.zero?
+
+        @data_received += bytes
+        exceeded!(:max_data, @data_received, @max_data)
+      end
+
+      # A reset stream consumed credit for everything its sender counted, not
+      # just what reached us. Without charging the difference the two endpoints
+      # disagree about the session total (§5.4, RFC 9000 §4.5).
+      def reset_stream!(final_size, delivered)
+        return if final_size.nil? || final_size <= delivered
+
+        receive_data!(final_size - delivered)
+      end
+
+      private
+
+      def exceeded!(name, used, limit)
+        return if used <= limit
+
+        raise WT::FlowControlError, "#{name} exceeded: #{used} of #{limit}"
       end
     end
   end

@@ -77,7 +77,7 @@ class WebTransportSessionTest < Minitest::Test
       true
     end
     outgoing.define_singleton_method(:send) { |data, **| events << [:send, data] }
-    connection = Object.new
+    connection = connection_with_peer_settings
     connection.define_singleton_method(:open_stream) { |**| outgoing }
     connection.define_singleton_method(:reliable_reset_enabled?) { false }
     session = build_session(connection: connection)
@@ -111,7 +111,10 @@ class WebTransportSessionTest < Minitest::Test
 
   def test_send_datagram_prefixes_payload_with_quarter_stream_id
     connection_data = Object.new
-    connection = Struct.new(:data).new(connection_data)
+    connection = Struct.new(:data) do
+      def wt_flow_control_enabled? = false
+      def local_settings = {}
+    end.new(connection_data)
     session = build_session(connection: connection)
     session.accept!
 
@@ -344,9 +347,9 @@ class WebTransportSessionTest < Minitest::Test
     stream = RecordingConnectStream.new
     connection = connection_with_peer_settings
     session = build_session(stream: stream, connection: connection)
-    session.accept!
 
     with_flow_control_negotiated(connection) do
+      session.accept!
       session.receive_connect_data(max_data_capsule(4096))
       assert_nil stream.error_code, "the first grant is an increase"
 
@@ -376,14 +379,71 @@ class WebTransportSessionTest < Minitest::Test
       Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA => 4096
     )
     session = build_session(stream: stream, connection: connection)
-    session.accept!
 
     with_flow_control_negotiated(connection) do
+      session.accept!
       session.receive_connect_data(max_data_capsule(4096))
     end
 
     assert_equal Quicsilver::Protocol::WebTransport::FLOW_CONTROL_ERROR, stream.error_code,
       "the initial limit from SETTINGS must already count as granted"
+  end
+
+  # 5.6.2: an incoming stream beyond the limit we advertised fails the
+  # session. We advertise 0, so with flow control negotiated the first child
+  # already exceeds it.
+  def test_an_incoming_stream_beyond_the_advertised_limit_fails_the_session
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings
+    session = build_session(stream: stream, connection: connection)
+
+    delivered = []
+    session.on_uni_stream { |child| delivered << child }
+
+    with_flow_control_negotiated(connection) do
+      session.accept!
+      # Exceeding a limit fails the session, but must not raise: this runs on
+      # the transport callback that routed the stream, and an exception there
+      # would take the connection down with it.
+      session.add_uni_stream(99_997, 6)
+    end
+
+    assert_equal Quicsilver::Protocol::WebTransport::FLOW_CONTROL_ERROR, stream.error_code
+    assert_empty delivered, "a stream past the limit must not reach the application"
+    refute session.open?
+  end
+
+  # 5.6.4: stream body bytes past the advertised limit fail the session. The
+  # prefix linking the stream to its session is excluded and never counted.
+  def test_received_data_beyond_the_advertised_limit_fails_the_session
+    stream = RecordingConnectStream.new
+    connection = connection_with_peer_settings
+    session = build_session(stream: stream, connection: connection)
+    child = nil
+    # Room for the stream itself, but no data allowance.
+    advertised = {Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => 1}
+
+    with_flow_control_negotiated(connection, advertised: advertised) do
+      session.accept!
+      child = with_native_receive_credit { session.add_uni_stream(99_997, 6) }
+      with_native_receive_credit { child.receive_data("payload") }
+    end
+
+    assert_equal Quicsilver::Protocol::WebTransport::FLOW_CONTROL_ERROR, stream.error_code
+  end
+
+  # Counting is skipped entirely while flow control is off, so the same
+  # traffic is fine.
+  def test_no_accounting_happens_while_flow_control_is_off
+    stream = RecordingConnectStream.new
+    session = build_session(stream: stream)
+    session.accept!
+
+    child = with_native_receive_credit { session.add_uni_stream(99_997, 6) }
+    with_native_receive_credit { child.receive_data("payload") }
+
+    assert_nil stream.error_code
+    assert session.open?
   end
 
   # The prohibited pair is not in the set 5.1 tells us to ignore, so it still
@@ -984,8 +1044,13 @@ class WebTransportSessionTest < Minitest::Test
     connection
   end
 
-  def with_flow_control_negotiated(connection, &block)
-    connection.stub(:wt_flow_control_enabled?, true, &block)
+  # Flow control needs both endpoints to advertise a non-zero WT_INITIAL_MAX_*.
+  # We advertise none yet, so both what we granted and the fact of negotiation
+  # have to be stubbed. Delete this once the SETTINGS land.
+  def with_flow_control_negotiated(connection, advertised: {}, &block)
+    connection.stub(:wt_flow_control_enabled?, true) do
+      connection.stub(:local_settings, advertised, &block)
+    end
   end
 
   def build_session(headers: nil, connection: connection_with_peer_settings, stream: RecordingConnectStream.new)
@@ -1057,5 +1122,10 @@ class WebTransportSessionTest < Minitest::Test
 
     def initialize = @error_code = nil
     def shutdown(code) = @error_code = code
+
+    # Part of the connection interface a session uses. We advertise no
+    # WT_INITIAL_MAX_*, so no real connection negotiates flow control yet.
+    def wt_flow_control_enabled? = false
+    def local_settings = {}
   end
 end

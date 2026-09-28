@@ -389,7 +389,7 @@ module Quicsilver
           wt.notify_close
           connection.remove_stream(stream_id)
         elsif (wt_session = @webtransport.for(connection_handle).session_for_stream(stream_id))
-          wt_session.stream(stream_id)&.notify_peer_reset(event.error_code)
+          wt_session.stream(stream_id)&.notify_peer_reset(event.error_code, event.final_size)
         elsif !@webtransport.for(connection_handle).known_stream?(stream_id)
           cancel_stream(connection, stream_id)
         end
