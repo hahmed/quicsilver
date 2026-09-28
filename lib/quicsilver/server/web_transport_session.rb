@@ -298,6 +298,12 @@ module Quicsilver
         @connect_buffer = "".b
       end
 
+      # Both endpoints must have advertised a non-zero WT_INITIAL_MAX_*
+      # setting (§5.1). We advertise none, so this is false today.
+      def flow_control_enabled?
+        @connection.respond_to?(:wt_flow_control_enabled?) && @connection.wt_flow_control_enabled?
+      end
+
       # Look up a stream by ID within this session.
       def stream(stream_id)
         @streams[stream_id]
@@ -589,6 +595,24 @@ module Quicsilver
           # session error however flow control was negotiated (draft-16 §5.4).
           raise Protocol::WebTransport::FlowControlError,
             "Capsule 0x#{type.to_s(16)} is prohibited over HTTP/3"
+        when *Protocol::WebTransport::FLOW_CONTROL_CAPSULES.keys
+          # "if flow control is not enabled, an endpoint MUST ignore receipt
+          # of any flow control capsules... since the peer might not have
+          # received SETTINGS at the time they were sent" (§5.1). Ignoring is
+          # deliberate here, not a side effect of the type being unknown.
+          unless flow_control_enabled?
+            Quicsilver.logger.debug(
+              "WebTransport session #{@stream_id} ignoring flow control capsule " \
+              "0x#{type.to_s(16)}: flow control was not negotiated"
+            )
+            return
+          end
+
+          # Enforcement lands with the accounting; parsing here would reject
+          # limits nothing yet honours.
+          Quicsilver.logger.debug(
+            "WebTransport session #{@stream_id} received flow control capsule 0x#{type.to_s(16)}"
+          )
         when WT_DRAIN_SESSION
           # Advisory only. The session stays open and usable; it is up to the
           # application to wind down (draft-16 §4.7).

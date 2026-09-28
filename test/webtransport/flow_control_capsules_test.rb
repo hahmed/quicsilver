@@ -223,6 +223,49 @@ class WebTransportFlowControlCapsulesTest < Minitest::Test
     end
   end
 
+  # === negotiation (§5.1) ===
+  #
+  # "Flow control is enabled when both endpoints declare their intent to use
+  # flow control" by sending a non-zero value for any of the three
+  # WT_INITIAL_MAX_* settings. A non-zero value is therefore a promise to
+  # implement the whole of §5.
+
+  Frames = Quicsilver::Protocol
+
+  def test_the_three_settings_that_declare_intent
+    assert_equal [0x2b61, 0x2b64, 0x2b65].sort, Frames::WT_FLOW_CONTROL_SETTINGS.sort
+  end
+
+  def test_any_one_non_zero_setting_declares_intent
+    Frames::WT_FLOW_CONTROL_SETTINGS.each do |id|
+      assert Frames.wt_flow_control_opt_in?(id => 1), "0x#{id.to_s(16)} should opt in"
+    end
+  end
+
+  # "0" is the default and means the endpoint needs capsules before anything
+  # can be opened or sent (§5.5), so it is not an opt-in.
+  def test_zero_or_absent_settings_do_not_declare_intent
+    refute Frames.wt_flow_control_opt_in?({})
+    refute Frames.wt_flow_control_opt_in?(Frames::WT_FLOW_CONTROL_SETTINGS.to_h { |id| [id, 0] })
+    refute Frames.wt_flow_control_opt_in?(Frames::SETTINGS_WT_ENABLED => 1)
+  end
+
+  # We do not implement §5 yet, so we must not advertise any of them.
+  def test_we_do_not_advertise_flow_control_today
+    refute Frames.wt_flow_control_opt_in?(Frames.control_stream_settings),
+      "advertising a non-zero WT_INITIAL_MAX_* promises the whole of section 5"
+  end
+
+  def test_advertised_settings_match_what_the_control_stream_sends
+    settings = Frames.control_stream_settings(max_field_section_size: 4096)
+    wire = Frames.build_control_stream(max_field_section_size: 4096)
+
+    settings.each do |id, value|
+      assert_includes wire, Frames.encode_varint(id) + Frames.encode_varint(value),
+        "0x#{id.to_s(16)} missing from the control stream"
+    end
+  end
+
   private
 
   def varint(value) = Quicsilver::Protocol.encode_varint(value)

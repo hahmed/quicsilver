@@ -318,6 +318,43 @@ class WebTransportSessionTest < Minitest::Test
     end
   end
 
+  # draft-16 5.1: "if flow control is not enabled, an endpoint MUST ignore
+  # receipt of any flow control capsules... since the peer might not have
+  # received SETTINGS at the time they were sent or packets might have been
+  # reordered." We advertise no WT_INITIAL_MAX_*, so it is never enabled.
+  def test_flow_control_capsules_are_ignored_when_flow_control_is_off
+    Quicsilver::Protocol::WebTransport::FLOW_CONTROL_CAPSULES.each_key do |type|
+      stream = RecordingConnectStream.new
+      session = build_session(stream: stream)
+      session.accept!
+
+      session.receive_connect_data(
+        Quicsilver::Protocol::Capsule.encode(type, Quicsilver::Protocol.encode_varint(4096))
+      )
+
+      assert_nil stream.error_code, "0x#{type.to_s(16)} must be ignored, not rejected"
+      assert session.open?, "0x#{type.to_s(16)} must leave the session usable"
+    end
+  end
+
+  # The prohibited pair is not in the set 5.1 tells us to ignore, so it still
+  # fails the session even with flow control off.
+  def test_prohibited_capsules_are_rejected_even_with_flow_control_off
+    stream = RecordingConnectStream.new
+    session = build_session(stream: stream)
+    session.accept!
+
+    refute session.send(:flow_control_enabled?)
+    session.receive_connect_data(
+      Quicsilver::Protocol::Capsule.encode(
+        Quicsilver::Protocol::WebTransport::MAX_STREAM_DATA_CAPSULE,
+        Quicsilver::Protocol.encode_varint(1)
+      )
+    )
+
+    assert_equal Quicsilver::Protocol::WebTransport::FLOW_CONTROL_ERROR, stream.error_code
+  end
+
   # An unknown capsule is still ignored; only the two named types are barred.
   def test_an_unknown_capsule_is_still_ignored
     stream = RecordingConnectStream.new

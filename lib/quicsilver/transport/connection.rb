@@ -31,6 +31,24 @@ module Quicsilver
         Quicsilver.connection_reliable_reset_enabled?(@handle)
       end
 
+      # WebTransport session flow control is on only when both endpoints have
+      # declared intent by advertising a non-zero WT_INITIAL_MAX_* setting
+      # (draft-16 §5.1). Until it is, at most one session may share the
+      # connection and flow control capsules must be ignored, because the peer
+      # may have sent them before seeing our SETTINGS.
+      def wt_flow_control_enabled?
+        return false unless settings_received?
+
+        Protocol.wt_flow_control_opt_in?(local_settings) &&
+          Protocol.wt_flow_control_opt_in?(@settings)
+      end
+
+      # What we advertised to the peer. Set when the control stream is opened;
+      # empty on a connection that never sent SETTINGS.
+      def local_settings
+        @local_settings ||= {}
+      end
+
       def webtransport_settings_valid?(protocol)
         return false unless settings_received? && @settings[Protocol::SETTINGS_H3_DATAGRAM] == 1
 
@@ -118,6 +136,7 @@ module Quicsilver
       def setup_http3_streams
         # Control stream (required)
         @server_control_stream = open_stream(unidirectional: true)
+        @local_settings = Protocol.control_stream_settings(max_field_section_size: @max_header_size)
         @server_control_stream.send(Protocol.build_control_stream(max_field_section_size: @max_header_size))
 
         # QPACK encoder/decoder streams

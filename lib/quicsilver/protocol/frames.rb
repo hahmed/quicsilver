@@ -23,6 +23,16 @@ module Quicsilver
     SETTINGS_WT_INITIAL_MAX_DATA = 0x2b61
     SETTINGS_WT_INITIAL_MAX_STREAMS_UNI = 0x2b64
     SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI = 0x2b65
+
+    # Declaring a non-zero value for any of these is how an endpoint opts into
+    # WebTransport session flow control (draft-16 §5.1). It is a promise to
+    # implement the whole of §5, so do not advertise one until the capsules
+    # and accounting exist.
+    WT_FLOW_CONTROL_SETTINGS = [
+      SETTINGS_WT_INITIAL_MAX_DATA,
+      SETTINGS_WT_INITIAL_MAX_STREAMS_UNI,
+      SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI
+    ].freeze
     SETTINGS_MAX_FIELD_SECTION_SIZE = 0x06   # RFC 9114 §7.2.4.1
 
     # Frame types forbidden on request streams (RFC 9114 Section 7.2.4, 7.2.6, 7.2.7)
@@ -283,23 +293,41 @@ module Quicsilver
         31 * rand(0..20) + 33
       end
 
-      # Build control stream data
+      # Has this endpoint declared intent to use session flow control? Both
+      # endpoints must, for it to be enabled.
+      def wt_flow_control_opt_in?(settings)
+        WT_FLOW_CONTROL_SETTINGS.any? { |id| settings[id].to_i > 0 }
+      end
+
+      # The SETTINGS we advertise. Kept separate from the frame so a connection
+      # can ask what it promised the peer without re-parsing the wire.
+      #
       # @param max_field_section_size [Integer, nil] Advertise SETTINGS_MAX_FIELD_SECTION_SIZE (0x06)
       #   to the peer (RFC 9114 §4.2.2 / §7.2.4.1). nil = don't advertise.
-      def build_control_stream(max_field_section_size: nil, datagram_receive_enabled: true)
-        stream_type = [0x00].pack('C')  # Control stream type
-        settings_hash = {
+      def control_stream_settings(max_field_section_size: nil, datagram_receive_enabled: true)
+        settings = {
           SETTINGS_QPACK_MAX_TABLE_CAPACITY => 0,
           SETTINGS_QPACK_BLOCKED_STREAMS => 0,
           SETTINGS_ENABLE_CONNECT_PROTOCOL => 1,
           SETTINGS_H3_DATAGRAM => datagram_receive_enabled ? 1 : 0,
           SETTINGS_ENABLE_WEBTRANSPORT => 1,
           SETTINGS_WT_ENABLED => 1,
-          # No session flow control until its capsules are implemented.
+          # No WT_INITIAL_MAX_* here: a non-zero value enables session flow
+          # control, whose capsules and accounting are not implemented yet.
           # Draft-16 §5.1 therefore limits us to one session per connection.
-          SETTINGS_WT_MAX_SESSIONS => 1,
+          SETTINGS_WT_MAX_SESSIONS => 1
         }
-        settings_hash[SETTINGS_MAX_FIELD_SECTION_SIZE] = max_field_section_size if max_field_section_size
+        settings[SETTINGS_MAX_FIELD_SECTION_SIZE] = max_field_section_size if max_field_section_size
+        settings
+      end
+
+      # Build control stream data.
+      def build_control_stream(max_field_section_size: nil, datagram_receive_enabled: true)
+        stream_type = [0x00].pack("C")  # Control stream type
+        settings_hash = control_stream_settings(
+          max_field_section_size: max_field_section_size,
+          datagram_receive_enabled: datagram_receive_enabled
+        )
         settings_hash[grease_id] = grease_id  # GREASE setting (RFC 9114 §7.2.4.1)
 
         stream_type + build_settings_frame(settings_hash)
