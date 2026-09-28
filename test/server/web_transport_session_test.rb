@@ -298,6 +298,38 @@ class WebTransportSessionTest < Minitest::Test
     assert_nil stream.error_code
   end
 
+  # draft-16 5.4: per-stream data limits are QUIC's job over HTTP/3, so
+  # WT_MAX_STREAM_DATA and WT_STREAM_DATA_BLOCKED are prohibited and receipt
+  # is a session error. It carries WT_FLOW_CONTROL_ERROR, not the
+  # H3_MESSAGE_ERROR used for a capsule we simply cannot parse.
+  def test_prohibited_capsules_fail_the_session_with_a_flow_control_error
+    Quicsilver::Protocol::WebTransport::PROHIBITED_CAPSULES.each do |type|
+      stream = RecordingConnectStream.new
+      session = build_session(stream: stream)
+      session.accept!
+
+      session.receive_connect_data(
+        Quicsilver::Protocol::Capsule.encode(type, Quicsilver::Protocol.encode_varint(1024))
+      )
+
+      assert_equal Quicsilver::Protocol::WebTransport::FLOW_CONTROL_ERROR, stream.error_code,
+        "0x#{type.to_s(16)} must fail the session with WT_FLOW_CONTROL_ERROR"
+      refute session.open?
+    end
+  end
+
+  # An unknown capsule is still ignored; only the two named types are barred.
+  def test_an_unknown_capsule_is_still_ignored
+    stream = RecordingConnectStream.new
+    session = build_session(stream: stream)
+    session.accept!
+
+    session.receive_connect_data(Quicsilver::Protocol::Capsule.encode(0x190B4D99, "ignored"))
+
+    assert_nil stream.error_code
+    assert session.open?
+  end
+
   def test_data_after_close_is_an_error_even_in_the_same_chunk
     [true, false].each do |together|
       stream = RecordingConnectStream.new

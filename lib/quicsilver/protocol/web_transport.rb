@@ -31,6 +31,30 @@ module Quicsilver
       # A flow control violation closes the session, not the connection (§5.6).
       FLOW_CONTROL_ERROR = 0x045d4487
 
+      # Per-stream data limits belong to the HTTP/2 binding. Over HTTP/3 every
+      # WebTransport stream is a real QUIC stream, so QUIC provides them
+      # natively and these two capsules are prohibited: receipt is a session
+      # error (§5.4).
+      #
+      # Defined in draft-ietf-webtrans-http2-14 §6.6 and §6.9, which the HTTP/3
+      # draft cites without restating the code points. They fill the two gaps
+      # in the 0x190B4D3D..0x190B4D44 block the §9.6 registry allocates.
+      #
+      # That draft is not in docs/specs, so these are the only values here
+      # without a local citation. Re-verify them when it is vendored.
+      MAX_STREAM_DATA_CAPSULE = 0x190B4D3E
+      STREAM_DATA_BLOCKED_CAPSULE = 0x190B4D42
+
+      PROHIBITED_CAPSULES = [MAX_STREAM_DATA_CAPSULE, STREAM_DATA_BLOCKED_CAPSULE].freeze
+
+      # Prohibited whether or not flow control was negotiated. §5.1 says to
+      # ignore "flow control capsules" when flow control is off, but §5.6
+      # defines that term as MAX_DATA, MAX_STREAMS, DATA_BLOCKED and
+      # STREAMS_BLOCKED only. These two are never legal over HTTP/3.
+      def self.prohibited_capsule?(type)
+        PROHIBITED_CAPSULES.include?(type)
+      end
+
       # Stream limits cannot exceed 2^60: a larger count could not be encoded
       # as a stream ID (§5.6.2, §5.6.3).
       MAX_STREAMS_LIMIT = 1 << 60

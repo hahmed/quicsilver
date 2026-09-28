@@ -399,7 +399,7 @@ module Quicsilver
           end
           break if @received_close
         end
-      rescue Protocol::Capsule::ParseError => error
+      rescue Protocol::Capsule::ParseError, Protocol::WebTransport::FlowControlError => error
         handle_capsule_error(error)
       end
 
@@ -584,6 +584,11 @@ module Quicsilver
             abort_connect(Protocol::H3_REQUEST_REJECTED)
           end
           notify_close(**closed_with.to_h)
+        when *Protocol::WebTransport::PROHIBITED_CAPSULES
+          # Per-stream limits are QUIC's job over HTTP/3, so these are a
+          # session error however flow control was negotiated (draft-16 §5.4).
+          raise Protocol::WebTransport::FlowControlError,
+            "Capsule 0x#{type.to_s(16)} is prohibited over HTTP/3"
         when WT_DRAIN_SESSION
           # Advisory only. The session stays open and usable; it is up to the
           # application to wind down (draft-16 §4.7).
@@ -594,13 +599,16 @@ module Quicsilver
         end
       end
 
+      # A malformed capsule is a message error; a capsule whose contents break
+      # a flow control rule closes the session with its own code (§5.6).
       def handle_capsule_error(error)
         return if @connect_failed
         @connect_failed = true
         Quicsilver.logger.debug("WebTransport session #{@stream_id} capsule error: #{error.message}")
         @connect_buffer.clear
         @connect_decoder.clear
-        abort_connect(Protocol::H3_MESSAGE_ERROR)
+        code = error.respond_to?(:error_code) ? error.error_code : Protocol::H3_MESSAGE_ERROR
+        abort_connect(code)
         notify_close
       end
 

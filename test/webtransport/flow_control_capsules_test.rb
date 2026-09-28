@@ -189,6 +189,40 @@ class WebTransportFlowControlCapsulesTest < Minitest::Test
     assert_raises(ArgumentError) { WT.build_max_streams(:sideways, 1) }
   end
 
+  # === prohibited capsules (§5.4) ===
+  #
+  # "The WT_MAX_STREAM_DATA and WT_STREAM_DATA_BLOCKED capsules... are not
+  # used and are prohibited. Endpoints MUST treat receipt of a
+  # WT_MAX_STREAM_DATA or a WT_STREAM_DATA_BLOCKED capsule as a session
+  # error." Over HTTP/3 each WebTransport stream is a QUIC stream, so QUIC
+  # already provides per-stream limits.
+
+  def test_prohibited_capsule_types_fill_the_gaps_in_the_registered_block
+    assert_equal 0x190B4D3E, WT::MAX_STREAM_DATA_CAPSULE
+    assert_equal 0x190B4D42, WT::STREAM_DATA_BLOCKED_CAPSULE
+  end
+
+  def test_recognises_the_prohibited_capsules
+    assert WT.prohibited_capsule?(WT::MAX_STREAM_DATA_CAPSULE)
+    assert WT.prohibited_capsule?(WT::STREAM_DATA_BLOCKED_CAPSULE)
+  end
+
+  # §5.6 names only MAX_DATA, MAX_STREAMS, DATA_BLOCKED and STREAMS_BLOCKED as
+  # "the flow control capsules", which is what §5.1 says to ignore when flow
+  # control is off. The prohibited pair is not in that set.
+  def test_prohibited_capsules_are_not_flow_control_capsules
+    refute WT.flow_control_capsule?(WT::MAX_STREAM_DATA_CAPSULE)
+    refute WT.flow_control_capsule?(WT::STREAM_DATA_BLOCKED_CAPSULE)
+  end
+
+  def test_permitted_capsules_are_not_prohibited
+    [WT::MAX_DATA_CAPSULE, WT::MAX_STREAMS_BIDI_CAPSULE, WT::DATA_BLOCKED_CAPSULE,
+      WT::STREAMS_BLOCKED_UNI_CAPSULE, WT::CLOSE_SESSION_CAPSULE,
+      WT::DRAIN_SESSION_CAPSULE].each do |type|
+      refute WT.prohibited_capsule?(type), "0x#{type.to_s(16)} should be allowed"
+    end
+  end
+
   private
 
   def varint(value) = Quicsilver::Protocol.encode_varint(value)

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- WebTransport rejects the `WT_MAX_STREAM_DATA` and `WT_STREAM_DATA_BLOCKED` capsules. Per-stream data limits belong to the HTTP/2 binding; over HTTP/3 each WebTransport stream is a QUIC stream with its own limits, so receipt is a session error carrying `WT_FLOW_CONTROL_ERROR` (draft-ietf-webtrans-http3-16 §5.4). They were previously ignored as unknown capsule types. Unknown types are still ignored.
 - WebTransport CLOSE and DRAIN capsules use HTTP/3 DATA frames. Session close sends FIN, validates peer close payloads, and terminates both directions on protocol errors.
 - WT_STREAM (`0x41`) is rejected with the connection error `H3_FRAME_ERROR` when it appears anywhere other than the first bytes of a request stream, including on the control stream (draft-ietf-webtrans-http3-16 §4.3). It is only a signal value at the front of a WebTransport stream, never a frame elsewhere.
 - WebTransport capsules sent optimistically on the CONNECT stream are no longer processed before the server responds. They are held unparsed, then processed once `accept!` sends the 2xx or discarded if the session is rejected (§3.2). The hold is bounded at 64 KiB; exceeding it fails the session with `H3_MESSAGE_ERROR`. Previously a CLOSE capsule arriving before the application responded would terminate the session and make it unacceptable.
