@@ -521,6 +521,12 @@ module Quicsilver
       nil
     end
 
+    # A request answered without reading its body. Later data and the FIN are
+    # dropped rather than treated as a new request.
+    def answer_without_body(connection, stream_id)
+      @cancelled_mutex.synchronize { @cancelled_streams.add([connection.handle, stream_id]) }
+    end
+
     def cancel_stream(connection, stream_id)
       @cancelled_mutex.synchronize { @cancelled_streams.add([connection.handle, stream_id]) }
       pending = @pending_mutex.synchronize { @pending_streams.delete([connection.handle, stream_id]) }
@@ -597,6 +603,8 @@ module Quicsilver
     end
 
     def handle_bidi_receive(connection, connection_handle, stream_id, stream_handle, payload, early_data: false)
+      return if cancelled_stream?(stream_id, connection_handle)
+
       manager = @webtransport.for(connection_handle)
 
       pending = @pending_mutex.synchronize { @pending_streams[[connection_handle, stream_id]] }
@@ -615,6 +623,8 @@ module Quicsilver
     end
 
     def handle_receive_fin(connection, connection_handle, stream_id, data, early_data: false)
+      return if cancelled_stream?(stream_id, connection_handle)
+
       event = Transport::StreamEvent.new(data, "RECEIVE_FIN")
       manager = @webtransport.for(connection_handle)
       return if manager.route_owned_stream(stream_id, event.handle, event.data, fin: true)
@@ -810,6 +820,12 @@ module Quicsilver
       # Reject before tracking the request so overload cannot leave orphaned state.
       if @scheduler.full?
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), shedding stream #{stream_id}")
+        # The response is already complete, so the rest of the request body is
+        # of no interest. Record that before sending, so body that arrives
+        # while we answer is discarded rather than buffered: its HEADERS have
+        # been consumed, so parsing what is left would report "DATA frame
+        # before HEADERS" and take down the whole connection.
+        answer_without_body(connection, stream_id)
         send_stream_error(connection, stream_id, stream_handle, 503, "Service Unavailable")
         return
       end

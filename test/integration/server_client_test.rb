@@ -845,6 +845,38 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # A shed request has already been answered, so its remaining body must be
+  # discarded. Buffering it loses the HEADERS that were consumed with the
+  # first chunk, and parsing the rest at FIN reports "DATA frame before
+  # HEADERS", which is a connection error and killed every other stream.
+  #
+  # Sequenced rather than raced: the 503 is read before the rest of the body
+  # is sent, so the ordering that used to break the connection is guaranteed.
+  def test_shed_request_body_after_the_response_does_not_break_the_connection
+    app = ->(_env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+
+    @server.scheduler.stub(:full?, true) do
+      request = client.build_request("POST", "/upload", body: :stream)
+      response = nil
+      request.stream_body do |writer|
+        writer.write("x" * 4096)
+        # Read the 503 first, so the body below is guaranteed to arrive after
+        # the request was answered and its HEADERS consumed.
+        response = request.response(timeout: 5)
+        16.times { writer.write("x" * 4096) }
+      end
+
+      assert_equal 503, response.status
+    end
+
+    # The connection must still serve requests once the queue drains.
+    assert_equal 200, client.get("/after").status
+  ensure
+    client&.disconnect
+  end
+
   def start_server(app, **options)
     3.times do |attempt|
       @port = find_available_port
