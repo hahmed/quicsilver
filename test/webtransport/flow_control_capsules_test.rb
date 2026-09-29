@@ -51,7 +51,11 @@ class WebTransportFlowControlCapsulesTest < Minitest::Test
       limit = WT.parse_flow_control_capsule(type, varint(1234))
 
       assert_equal kind, limit.kind
-      assert_equal direction, limit.direction
+      if direction.nil?
+        assert_nil limit.direction, "#{kind} covers the session, not one stream type"
+      else
+        assert_equal direction, limit.direction
+      end
       assert_equal 1234, limit.limit
     end
   end
@@ -160,7 +164,11 @@ class WebTransportFlowControlCapsulesTest < Minitest::Test
 
       assert_empty remainder
       assert_equal kind, parsed.kind
-      assert_equal direction, parsed.direction
+      if direction.nil?
+        assert_nil parsed.direction
+      else
+        assert_equal direction, parsed.direction
+      end
       assert_equal limit, parsed.limit
     end
   end
