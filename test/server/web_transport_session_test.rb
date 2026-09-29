@@ -77,7 +77,7 @@ class WebTransportSessionTest < Minitest::Test
       true
     end
     outgoing.define_singleton_method(:send) { |data, **| events << [:send, data] }
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     connection.define_singleton_method(:open_stream) { |**| outgoing }
     connection.define_singleton_method(:reliable_reset_enabled?) { false }
     session = build_session(connection: connection)
@@ -345,7 +345,7 @@ class WebTransportSessionTest < Minitest::Test
   # makes the ignore rule above observable: identical bytes, opposite outcomes.
   def test_a_non_increasing_limit_fails_the_session_once_flow_control_is_on
     stream = RecordingConnectStream.new
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(stream: stream, connection: connection)
 
     with_flow_control_negotiated(connection) do
@@ -394,17 +394,13 @@ class WebTransportSessionTest < Minitest::Test
   # already exceeds it.
   def test_an_incoming_stream_beyond_the_advertised_limit_fails_the_session
     stream = RecordingConnectStream.new
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(stream: stream, connection: connection)
 
     delivered = []
     session.on_uni_stream { |child| delivered << child }
 
-    # A non-zero limit is what declares intent, so grant a byte of data and
-    # no streams at all.
-    advertised = {Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA => 1}
-
-    with_flow_control_negotiated(connection, advertised: advertised) do
+    with_flow_control_negotiated(connection) do
       session.accept!
       # Exceeding a limit fails the session, but must not raise: this runs on
       # the transport callback that routed the stream, and an exception there
@@ -421,7 +417,7 @@ class WebTransportSessionTest < Minitest::Test
   # prefix linking the stream to its session is excluded and never counted.
   def test_received_data_beyond_the_advertised_limit_fails_the_session
     stream = RecordingConnectStream.new
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(stream: stream, connection: connection)
     child = nil
     # Room for the stream itself, but no data allowance.
@@ -454,7 +450,7 @@ class WebTransportSessionTest < Minitest::Test
   # says to tell it we were blocked so it can raise the limit.
   def test_writing_past_the_granted_limit_is_refused_and_reported
     stream = RecordingConnectStream.new
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(stream: stream, connection: connection)
     advertised = {Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => 1}
 
@@ -504,13 +500,12 @@ class WebTransportSessionTest < Minitest::Test
   # reported with WT_STREAMS_BLOCKED (5.6.3).
   def test_opening_a_stream_past_the_granted_limit_is_refused_and_reported
     stream = RecordingConnectStream.new
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(stream: stream, connection: connection)
 
     with_flow_control_negotiated(connection) do
       session.accept!
 
-      # The peer granted a bidi stream and no unidirectional ones.
       assert_raises(Quicsilver::Protocol::WebTransport::SendBlocked) { session.open_uni_stream }
     end
 
@@ -523,7 +518,7 @@ class WebTransportSessionTest < Minitest::Test
   # without waiting for it to report being blocked.
   def test_reading_grants_the_peer_more_data_without_being_asked
     stream = RecordingConnectStream.new
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(stream: stream, connection: connection)
     advertised = {
       Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA => 10,
@@ -546,7 +541,7 @@ class WebTransportSessionTest < Minitest::Test
   # A closed stream frees a slot, which is granted back the same way.
   def test_closing_a_stream_grants_the_peer_another
     stream = RecordingConnectStream.new
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(stream: stream, connection: connection)
     advertised = {Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => 1}
 
@@ -564,7 +559,7 @@ class WebTransportSessionTest < Minitest::Test
   # Writes are all or nothing, so a blocked application needs telling when
   # there is credit again rather than resuming a partial write.
   def test_on_writable_fires_when_the_peer_raises_our_limit
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(connection: connection)
     woken = 0
     session.on_writable { woken += 1 }
@@ -578,7 +573,7 @@ class WebTransportSessionTest < Minitest::Test
   end
 
   def test_on_writable_does_not_fire_for_a_capsule_that_grants_nothing
-    connection = connection_with_peer_settings(peer_flow_control)
+    connection = connection_with_peer_settings
     session = build_session(connection: connection)
     woken = 0
     session.on_writable { woken += 1 }
@@ -1188,37 +1183,19 @@ class WebTransportSessionTest < Minitest::Test
   # enabled when both endpoints advertise a non-zero WT_INITIAL_MAX_*, and we
   # advertise none yet, so the negotiated state is unreachable in production
   # and the tests that need it stub that one predicate.
-  # A peer that has declared intent to use session flow control (§5.1).
-  def peer_flow_control(max_data: 0)
-    {
-      Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => 1,
-      Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA => max_data
-    }
-  end
-
-  # Deliver the peer's SETTINGS the way the wire does, so settings_received?
-  # is true and flow control can actually negotiate.
   def connection_with_peer_settings(settings = {})
     connection = Quicsilver::Transport::Connection.new(12_345, [12_345, 67_890])
-    payload = settings.map { |id, value|
-      Quicsilver::Protocol.encode_varint(id) + Quicsilver::Protocol.encode_varint(value)
-    }.join
-    connection.set_control_stream(
-      1,
-      Quicsilver::Protocol.encode_varint(Quicsilver::Protocol::FRAME_SETTINGS) +
-        Quicsilver::Protocol.encode_varint(payload.bytesize) + payload
-    )
+    connection.send(:on_settings_received, settings)
     connection
   end
 
-  # Both endpoints declaring a non-zero WT_INITIAL_MAX_* is what enables flow
-  # control (§5.1). We advertise ours for real now, so only the peer's half
-  # is arranged here; `advertised` overrides what we granted when a test needs
-  # a smaller window than production uses.
-  def with_flow_control_negotiated(connection, advertised: nil, &block)
-    return yield if advertised.nil?
-
-    connection.stub(:local_settings, advertised, &block)
+  # Flow control needs both endpoints to advertise a non-zero WT_INITIAL_MAX_*.
+  # We advertise none yet, so both what we granted and the fact of negotiation
+  # have to be stubbed. Delete this once the SETTINGS land.
+  def with_flow_control_negotiated(connection, advertised: {}, &block)
+    connection.stub(:wt_flow_control_enabled?, true) do
+      connection.stub(:local_settings, advertised, &block)
+    end
   end
 
   def build_session(headers: nil, connection: connection_with_peer_settings, stream: RecordingConnectStream.new)

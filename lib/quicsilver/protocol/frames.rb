@@ -319,21 +319,16 @@ module Quicsilver
           SETTINGS_H3_DATAGRAM => datagram_receive_enabled ? 1 : 0,
           SETTINGS_ENABLE_WEBTRANSPORT => 1,
           SETTINGS_WT_ENABLED => 1,
-          # Declaring these enables session flow control when the peer also
-          # does (§5.1). They are the initial limits a session grants its
-          # peer, raised by capsules as we consume data and close streams.
-          #
-          # The data window is well above the 1 MiB a single child stream
-          # queues, so one stream cannot exhaust a session's credit, in the
-          # same spirit as QUIC keeping its connection window above any one
-          # stream's. The stream counts bound concurrent children; both are
-          # ours to choose, not values the draft sets.
-          SETTINGS_WT_INITIAL_MAX_DATA => WT_INITIAL_MAX_DATA,
-          SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => WT_INITIAL_MAX_STREAMS,
-          SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => WT_INITIAL_MAX_STREAMS,
-          # Still one session per connection. Flow control now permits more
-          # (§5.1), but sharing a connection between sessions is a separate
-          # change.
+          # WT_INITIAL_MAX_* is deliberately not advertised yet. Declaring it
+          # enables session flow control (§5.1), and the whole mechanism is
+          # implemented, but adding these three settings to every SETTINGS
+          # frame shifts connection timing enough to expose a race when an
+          # overloaded server sheds a request whose body is still uploading:
+          # the 503 is written and the peer's next stream then stalls. On
+          # Linux that took the shedding test from 0/10 to 6/10 failures.
+          # Advertise once that race is fixed; nothing else has to change.
+          # Draft-16 §5.1 therefore still limits us to one session per
+          # connection.
           SETTINGS_WT_MAX_SESSIONS => 1
         }
         settings[SETTINGS_MAX_FIELD_SECTION_SIZE] = max_field_section_size if max_field_section_size
