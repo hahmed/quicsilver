@@ -15,12 +15,9 @@ require "open3"
 #
 # 1. Did upstream implement what a patch works around? Delete the patch
 #    rather than carrying a shim that shadows the real feature.
-# 2. stream-final-size.patch invents the identifier QUIC_PARAM_STREAM_FINAL_SIZE
-#    = 0x08000046. Upstream allocates stream parameters sequentially from
-#    0x08000000 and has no reserved vendor range. If upstream defines the same
-#    NAME elsewhere with a different value, the compiler only warns
-#    (-Wmacro-redefined) and our value silently wins. Grep the new headers for
-#    QUIC_PARAM_STREAM_ and confirm nothing collides by name or by value.
+# 2. stream-final-size.patch adds a field to the PEER_SEND_ABORTED event
+#    struct. Check upstream has not added its own field there, and that
+#    QuicStreamIndicatePeerSendAbortedEvent still has the stream in scope.
 # 3. A patch can still apply cleanly onto changed semantics. Re-read the hunks
 #    against the new source; "it applied" is not "it is still correct".
 # 4. Re-run the tests that prove each patch does its job, not just the suite.

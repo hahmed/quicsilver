@@ -4,17 +4,9 @@
 #define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 #include "msquic.h"
 
-// Reads Stream->RecvMaxLength, the settled final size of a received stream.
-// Added by patches/stream-final-size.patch, which owns the identifier; this
-// fallback only keeps the extension compiling against an unpatched header.
-// The value sits above MsQuic's sequential stream parameters so an upstream
-// addition cannot claim the same number.
-#ifndef QUIC_PARAM_STREAM_FINAL_SIZE
-#define QUIC_PARAM_STREAM_FINAL_SIZE 0x08000046
-#endif
-
-// Reported when the final size is not settled, so Ruby is never handed a
-// length it would have to sanity check.
+// A reset stream's final size arrives on the PEER_SEND_ABORTED event, added
+// by patches/stream-final-size.patch. This is the value MsQuic uses while it
+// is unsettled, and what we pass to Ruby as "not known".
 #define QUICSILVER_FINAL_SIZE_UNKNOWN UINT64_MAX
 #include <errno.h>
 #include <limits.h>
@@ -569,12 +561,10 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             // disagree about how much credit a reset stream consumed
             // (draft-ietf-webtrans-http3-16 5.4, RFC 9000 4.5).
             uint64_t error_code = Event->PEER_SEND_ABORTED.ErrorCode;
-            uint64_t final_size = QUICSILVER_FINAL_SIZE_UNKNOWN;
-            uint32_t final_size_length = sizeof(final_size);
-            if (QUIC_FAILED(MsQuic->GetParam(ctx->stream, QUIC_PARAM_STREAM_FINAL_SIZE,
-                    &final_size_length, &final_size))) {
-                final_size = QUICSILVER_FINAL_SIZE_UNKNOWN;
-            }
+            // Read straight off the event: calling back into the MsQuic API
+            // from inside a callback risks re-entering locks the callback
+            // already holds.
+            uint64_t final_size = Event->PEER_SEND_ABORTED.FinalSize;
             char combined[sizeof(token) + sizeof(uint64_t) + sizeof(uint64_t)];
             memcpy(combined, &token, sizeof(token));
             memcpy(combined + sizeof(token), &error_code, sizeof(uint64_t));
