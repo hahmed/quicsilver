@@ -681,6 +681,18 @@ module Quicsilver
       end
     end
 
+    # Replayable early data may only carry safe methods when the policy is
+    # :reject. There is no stream handle here to answer 425 with, so the
+    # request is dropped.
+    def reject_early_data?(method, early_data, stream_id)
+      return false unless @server_configuration.early_data_policy == :reject
+      return false unless early_data
+      return false if RequestHandler::SAFE_METHODS.include?(method)
+
+      Quicsilver.logger.debug("Rejected 0-RTT #{method} on stream #{stream_id} (no stream handle to send 425)")
+      true
+    end
+
     def dispatch_request(connection, stream, early_data: false)
       if @scheduler.full?
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
@@ -754,6 +766,12 @@ module Quicsilver
       )
 
       if method == "CONNECT" && Protocol::WebTransport.protocol?(headers[":protocol"])
+        # The 0-RTT policy has to be applied here too. A WebTransport CONNECT
+        # is not a safe method, and this branch runs before the check in
+        # enqueue_streaming_request, so replayable session setup was reaching
+        # the application while an ordinary CONNECT was refused.
+        return if reject_early_data?(method, early_data, stream_id)
+
         dispatch_webtransport_connect(connection, stream_id, headers, data,
           stream_handle: stream_handle, early_data: early_data, fin: !completed_stream.nil?)
       elsif completed_stream
@@ -811,11 +829,7 @@ module Quicsilver
       headers = parser.headers
       method = headers[":method"]
 
-      if @server_configuration.early_data_policy == :reject &&
-         early_data && !RequestHandler::SAFE_METHODS.include?(method)
-        Quicsilver.logger.debug("Rejected 0-RTT #{method} on stream #{stream_id} (no stream handle to send 425)")
-        return
-      end
+      return if reject_early_data?(method, early_data, stream_id)
 
       # Reject before tracking the request so overload cannot leave orphaned state.
       if @scheduler.full?

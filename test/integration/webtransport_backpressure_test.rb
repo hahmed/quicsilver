@@ -124,6 +124,34 @@ class WebTransportBackpressureTest < Minitest::Test
   # first, then saturate receiving until its data can no longer be delivered.
   # The stall is asserted; the amount needed to cause it is not, since MsQuic
   # grows stream windows dynamically.
+  # The claim behind backpressure by default: a single reader that never
+  # drains pins its own stream window, not the connection, so unrelated
+  # traffic on the same connection still progresses. The window here is 32 KB
+  # of a 128 KB connection budget, the same shape as the 64 KB of 16 MB a
+  # default deployment has.
+  #
+  # Another connection making progress would prove nothing, since that only
+  # shows the poll loop is not globally blocked.
+  def test_a_stalled_child_does_not_block_ordinary_requests_on_its_connection
+    session = open_session
+    stalled_peer, stalled = open_child(session)
+
+    # Fill the stream window and leave it unread, so delivery is paused.
+    stalled_peer.send("x".b * STREAM_WINDOW)
+    await_paused_input(stalled)
+
+    # Same client, so the same QUIC connection carries this request.
+    response = @client.get("/")
+
+    assert_equal 200, response.status
+    assert_equal "OK", response.body
+
+    # And the child is still usable once the application reads.
+    refute_nil stalled.read, "the stalled child should deliver once read"
+  ensure
+    stalled_peer&.abort(0)
+  end
+
   def test_shared_credit_exhaustion_recovers_after_draining
     session = open_session
     sibling_peer, sibling = open_child(session)

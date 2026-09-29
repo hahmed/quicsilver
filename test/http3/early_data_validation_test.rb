@@ -113,7 +113,42 @@ class EarlyDataValidationTest < Minitest::Test
     assert_equal "false", received_env["HTTP_QUICSILVER_EARLY_DATA"]
   end
 
+  # A WebTransport CONNECT is not a safe method, so with policy :reject it must
+  # not reach the application in replayable early data. The WebTransport branch
+  # of dispatch_streaming runs before the check that covers ordinary requests,
+  # so this used to establish a session from replayable data.
+  def test_webtransport_connect_in_early_data_is_rejected
+    server, connection, = setup_request("CONNECT", policy: :reject)
+
+    server.send(:dispatch_streaming, connection, connection.handle, 4,
+      connect_request_data, stream_handle: 0xBEEF, early_data: true)
+
+    manager = server.instance_variable_get(:@webtransport).for(connection.handle)
+    assert_nil manager.take_pending_connect,
+      "replayable CONNECT must be dropped, not queued for session setup"
+  end
+
+  def test_webtransport_connect_in_normal_data_is_not_rejected_by_the_policy
+    server, connection, = setup_request("CONNECT", policy: :reject)
+
+    # Reaches the WebTransport path rather than being dropped. It stops at the
+    # SETTINGS gate here, which is what a connection without peer SETTINGS
+    # should do, and not at the early data check.
+    server.send(:dispatch_streaming, connection, connection.handle, 4,
+      connect_request_data, stream_handle: 0xBEEF, early_data: false)
+
+    manager = server.instance_variable_get(:@webtransport).for(connection.handle)
+    refute_nil manager.take_pending_connect, "CONNECT should be waiting for peer SETTINGS"
+  end
+
   private
+
+  def connect_request_data
+    build_request(
+      ":method" => "CONNECT", ":protocol" => "webtransport-h3",
+      ":scheme" => "https", ":authority" => "localhost", ":path" => "/wt"
+    )
+  end
 
   def setup_request(method, policy:, app: nil)
     app ||= ->(env) { [200, {}, ["OK"]] }

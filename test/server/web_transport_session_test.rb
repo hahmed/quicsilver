@@ -613,6 +613,37 @@ class WebTransportSessionTest < Minitest::Test
     assert_equal Quicsilver::Protocol::WebTransport::FLOW_CONTROL_ERROR, stream.error_code
   end
 
+  # draft-16 4.7 defines WT_DRAIN_SESSION with Length = 0, so a payload is a
+  # malformed message, not an extension to ignore.
+  def test_a_drain_capsule_with_a_payload_is_a_message_error
+    stream = RecordingConnectStream.new
+    session = build_session(stream: stream)
+    drained = 0
+    session.on_drain { drained += 1 }
+    session.accept!
+
+    session.receive_connect_data(
+      Quicsilver::Protocol::Capsule.encode(
+        Quicsilver::Protocol::WebTransport::DRAIN_SESSION_CAPSULE, "unexpected"
+      )
+    )
+
+    assert_equal Quicsilver::Protocol::H3_MESSAGE_ERROR, stream.error_code
+    assert_equal 0, drained, "a malformed drain must not reach the application"
+  end
+
+  def test_an_empty_drain_capsule_is_delivered
+    session = build_session
+    drained = 0
+    session.on_drain { drained += 1 }
+    session.accept!
+
+    session.receive_connect_data(drain_capsule)
+
+    assert_equal 1, drained
+    assert session.open?, "drain is advisory"
+  end
+
   # An unknown capsule is still ignored; only the two named types are barred.
   def test_an_unknown_capsule_is_still_ignored
     stream = RecordingConnectStream.new

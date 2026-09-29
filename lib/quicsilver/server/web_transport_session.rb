@@ -752,6 +752,12 @@ module Quicsilver
           flow_control.apply(Protocol::WebTransport.parse_flow_control_capsule(type, payload))
           notify_writable if flow_control.data_remaining > before
         when WT_DRAIN_SESSION
+          # §4.7 fixes the capsule at Length = 0, so anything in the payload
+          # is a malformed message rather than an extension we can ignore.
+          unless payload.empty?
+            raise Protocol::Capsule::ParseError, "WT_DRAIN_SESSION takes no payload"
+          end
+
           # Advisory only. The session stays open and usable; it is up to the
           # application to wind down (draft-16 §4.7).
           Quicsilver.logger.debug("WebTransport session #{@stream_id} received drain capsule")
