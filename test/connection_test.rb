@@ -158,6 +158,30 @@ class ConnectionTest < Minitest::Test
     assert_equal 0, @connection.peer_goaway_id
   end
 
+  # RFC 9114 6.2.1: "receipt of a second stream claiming to be a control
+  # stream MUST be treated as a connection error of type
+  # H3_STREAM_CREATION_ERROR." These used to report H3_FRAME_UNEXPECTED, the
+  # FrameError default.
+  def test_duplicate_control_stream_is_a_stream_creation_error
+    @connection.set_control_stream(1, build_settings_frame)
+
+    error = assert_raises(Quicsilver::Protocol::FrameError) { @connection.set_control_stream(5) }
+
+    assert_equal Quicsilver::Protocol::H3_STREAM_CREATION_ERROR, error.error_code
+  end
+
+  # RFC 9114 7.2.4.1: duplicate setting identifiers may be treated as a
+  # connection error of type H3_SETTINGS_ERROR.
+  def test_duplicate_setting_identifier_is_a_settings_error
+    payload = encode_varint(0x07) + encode_varint(0) + encode_varint(0x07) + encode_varint(1)
+    frame = encode_varint(Quicsilver::Protocol::FRAME_SETTINGS) +
+            encode_varint(payload.bytesize) + payload
+
+    error = assert_raises(Quicsilver::Protocol::FrameError) { @connection.set_control_stream(1, frame) }
+
+    assert_equal Quicsilver::Protocol::H3_SETTINGS_ERROR, error.error_code
+  end
+
   def test_rejects_duplicate_settings_frame
     @connection.set_control_stream(1, build_settings_frame)
 

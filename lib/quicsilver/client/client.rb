@@ -661,7 +661,10 @@ module Quicsilver
 
       case stream_type
       when 0x00 # Control stream
-        raise Protocol::FrameError, "Duplicate control stream" if @control_stream_id
+        if @control_stream_id
+        raise Protocol::FrameError.new("Duplicate control stream",
+          error_code: Protocol::H3_STREAM_CREATION_ERROR)
+      end
         @control_stream_id = stream_id
         @uni_stream_types[stream_id] = :control
       when 0x02 # QPACK encoder stream

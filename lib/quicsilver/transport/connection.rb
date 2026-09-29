@@ -291,13 +291,15 @@ module Quicsilver
           raise Protocol::FrameError.new("Client must not send push streams",
             error_code: Protocol::H3_STREAM_CREATION_ERROR)
         when Protocol::UnidirectionalStream::QPACK_ENCODER
-          raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
+          raise Protocol::FrameError.new("Duplicate QPACK encoder stream",
+            error_code: Protocol::H3_STREAM_CREATION_ERROR) if @qpack_encoder_stream_id
           @qpack_encoder_stream_id = stream_id
           if fin
             raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
           end
         when Protocol::UnidirectionalStream::QPACK_DECODER
-          raise Protocol::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
+          raise Protocol::FrameError.new("Duplicate QPACK decoder stream",
+            error_code: Protocol::H3_STREAM_CREATION_ERROR) if @qpack_decoder_stream_id
           @qpack_decoder_stream_id = stream_id
           if fin
             raise Protocol::FrameError.new("Closure of critical stream", error_code: Protocol::H3_CLOSED_CRITICAL_STREAM)
@@ -319,7 +321,8 @@ module Quicsilver
       def register_unidirectional_stream(stream_id, stream_type, payload)
         case stream_type
         when Protocol::UnidirectionalStream::CONTROL
-          raise Protocol::FrameError, "Duplicate control stream" if @control_stream_id
+          raise Protocol::FrameError.new("Duplicate control stream",
+            error_code: Protocol::H3_STREAM_CREATION_ERROR) if @control_stream_id
           @control_stream_id = stream_id
           @uni_stream_types[stream_id] = :control
           @mutex.synchronize { @response_buffers[stream_id] = payload }
@@ -327,12 +330,14 @@ module Quicsilver
           raise Protocol::FrameError.new("Client must not send push streams",
             error_code: Protocol::H3_STREAM_CREATION_ERROR)
         when Protocol::UnidirectionalStream::QPACK_ENCODER
-          raise Protocol::FrameError, "Duplicate QPACK encoder stream" if @qpack_encoder_stream_id
+          raise Protocol::FrameError.new("Duplicate QPACK encoder stream",
+            error_code: Protocol::H3_STREAM_CREATION_ERROR) if @qpack_encoder_stream_id
           @qpack_encoder_stream_id = stream_id
           @uni_stream_types[stream_id] = :qpack_encoder
           @mutex.synchronize { @response_buffers[stream_id] = payload }
         when Protocol::UnidirectionalStream::QPACK_DECODER
-          raise Protocol::FrameError, "Duplicate QPACK decoder stream" if @qpack_decoder_stream_id
+          raise Protocol::FrameError.new("Duplicate QPACK decoder stream",
+            error_code: Protocol::H3_STREAM_CREATION_ERROR) if @qpack_decoder_stream_id
           @qpack_decoder_stream_id = stream_id
           @uni_stream_types[stream_id] = :qpack_decoder
           @mutex.synchronize { @response_buffers[stream_id] = payload }
@@ -359,6 +364,10 @@ module Quicsilver
           # it later.
           consume_unidirectional(stream_id, payload, parse_control_frames(payload))
         when :qpack_encoder
+          # Unlike :control this validates the leading instruction byte rather
+          # than reassembling frames, so clearing the buffer loses nothing.
+          # An instruction split across receives could still be misread; not
+          # observed, and it would need incremental QPACK decoding to fix.
           validate_qpack_encoder_data(payload)
           @mutex.synchronize { @response_buffers[stream_id] = "".b }
         when :qpack_decoder
@@ -381,7 +390,8 @@ module Quicsilver
       end
 
       def set_control_stream(stream_id, payload = nil)
-        raise Protocol::FrameError, "Duplicate control stream" if @control_stream_id
+        raise Protocol::FrameError.new("Duplicate control stream",
+            error_code: Protocol::H3_STREAM_CREATION_ERROR) if @control_stream_id
         @control_stream_id = stream_id
         parse_control_frames(payload) if payload && !payload.empty?
       end

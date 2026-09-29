@@ -87,6 +87,11 @@ module Quicsilver
     # MessageError → stream error (RESET_STREAM) on request streams
     class FrameError < Quicsilver::Error
       attr_reader :error_code
+      # The default suits a frame that is valid but arrived somewhere it is not
+      # allowed (RFC 9114 4.1, 7.2.4), which is the common case. Anything else
+      # must pass its own code: callers that leave this implicit are asserting
+      # H3_FRAME_UNEXPECTED is correct, and the handler turns that into a
+      # connection error.
       def initialize(msg = nil, error_code: H3_FRAME_UNEXPECTED)
         @error_code = error_code
         super(msg)

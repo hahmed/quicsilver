@@ -62,7 +62,10 @@ module Quicsilver
               error_code: Protocol::H3_SETTINGS_ERROR)
           end
 
-          raise Protocol::FrameError, "Duplicate setting identifier 0x#{id.to_s(16)}" if seen.include?(id)
+          if seen.include?(id)
+            raise Protocol::FrameError.new("Duplicate setting identifier 0x#{id.to_s(16)}",
+              error_code: Protocol::H3_SETTINGS_ERROR)
+          end
           seen.add(id)
 
           settings[id] = value

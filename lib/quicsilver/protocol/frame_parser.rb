@@ -67,7 +67,10 @@ module Quicsilver
 
         @bytes_consumed = FrameReader.each(buffer) do |type, payload|
           if @max_frame_payload_size && payload.bytesize > @max_frame_payload_size
-            raise Protocol::FrameError, "Frame payload #{payload.bytesize} exceeds limit #{@max_frame_payload_size}"
+            raise Protocol::FrameError.new(
+              "Frame payload #{payload.bytesize} exceeds limit #{@max_frame_payload_size}",
+              error_code: Protocol::H3_EXCESSIVE_LOAD
+            )
           end
 
           (@frames ||= []) << { type: type, length: payload.bytesize, payload: payload }
