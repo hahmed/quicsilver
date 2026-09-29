@@ -132,6 +132,32 @@ class ConnectionTest < Minitest::Test
     assert_equal Quicsilver::Protocol::H3_FRAME_ERROR, error.error_code
   end
 
+  # Control streams never send FIN, so a frame split across receives must stay
+  # buffered until the rest arrives. Discarding the front made the tail parse
+  # as a new frame, failing the connection.
+  def test_settings_frame_split_across_receives_is_reassembled
+    settings_payload = encode_varint(0x01) + encode_varint(0) +
+                       encode_varint(0x07) + encode_varint(4096)
+    frame = encode_varint(Quicsilver::Protocol::FRAME_SETTINGS) +
+            encode_varint(settings_payload.bytesize) + settings_payload
+
+    ([0x00].pack("C") + frame).each_byte.each_slice(3) do |chunk|
+      @connection.receive_unidirectional_data(3, chunk.map(&:chr).join.b)
+    end
+
+    assert_equal 4096, @connection.settings[0x07]
+    assert @connection.settings_received?
+  end
+
+  def test_two_control_frames_in_one_receive_both_parse
+    goaway = Quicsilver::Protocol.build_frame(Quicsilver::Protocol::FRAME_GOAWAY, encode_varint(0))
+
+    @connection.receive_unidirectional_data(3, [0x00].pack("C") + build_settings_frame + goaway)
+
+    assert @connection.settings_received?
+    assert_equal 0, @connection.peer_goaway_id
+  end
+
   def test_rejects_duplicate_settings_frame
     @connection.set_control_stream(1, build_settings_frame)
 

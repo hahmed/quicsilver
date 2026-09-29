@@ -352,14 +352,31 @@ module Quicsilver
           @mutex.synchronize { @response_buffers[stream_id] = "".b }
           [:webtransport_uni, payload]
         when :control
-          parse_control_frames(payload)
-          @mutex.synchronize { @response_buffers[stream_id] = "".b }
+          # Keep whatever did not form a whole frame. Clearing the buffer
+          # discarded the front of a frame that arrived split across two
+          # receives; its tail then parsed as a new frame, which fails the
+          # connection. Control streams never send FIN, so nothing recovers
+          # it later.
+          consume_unidirectional(stream_id, payload, parse_control_frames(payload))
         when :qpack_encoder
           validate_qpack_encoder_data(payload)
           @mutex.synchronize { @response_buffers[stream_id] = "".b }
         when :qpack_decoder
           validate_qpack_decoder_data(payload)
           @mutex.synchronize { @response_buffers[stream_id] = "".b }
+        end
+      end
+
+      # Drop the bytes a parser consumed, keeping any partial frame. The buffer
+      # may have grown while we parsed, so only what we read is removed.
+      def consume_unidirectional(stream_id, payload, consumed)
+        @mutex.synchronize do
+          buffer = @response_buffers[stream_id]
+          next if buffer.nil?
+
+          remainder = (consumed >= payload.bytesize) ? "".b : payload.byteslice(consumed..)
+          @response_buffers[stream_id] =
+            (buffer.bytesize > payload.bytesize) ? remainder + buffer.byteslice(payload.bytesize..) : remainder
         end
       end
 

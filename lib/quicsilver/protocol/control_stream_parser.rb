@@ -21,6 +21,9 @@ module Quicsilver
       # Note: 0x08 (SETTINGS_ENABLE_CONNECT_PROTOCOL) is valid in HTTP/3 per RFC 9220
       HTTP2_SETTINGS = [0x00, 0x02, 0x03, 0x04, 0x05].freeze
 
+      # Returns the number of bytes consumed. A frame split across receives
+      # leaves its bytes unconsumed, and the caller must keep them buffered:
+      # control streams never send FIN, so a partial frame is normal.
       def parse_control_frames(data)
         first_frame = !@settings_received
 
