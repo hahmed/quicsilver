@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- WebTransport session flow control (draft-ietf-webtrans-http3-16 §5): the `WT_MAX_DATA`, `WT_MAX_STREAMS`, `WT_DATA_BLOCKED` and `WT_STREAMS_BLOCKED` capsules, negotiation via `SETTINGS_WT_INITIAL_MAX_*`, enforcement of limits we advertise, spending of limits a peer grants, and proactive grants as the application consumes. `WebTransportStream#writable?` and `WebTransportSession#on_writable` report send credit. Prohibited per-stream capsules fail the session. §5.1 requires both endpoints to advertise a non-zero initial limit; browsers tested do not, so sessions with them run without it and remain limited to one per connection.
+
 - `Transport::StreamEvent#final_size` reports how many bytes the peer sent on a stream the peer reset, from the RESET_STREAM frame (RFC 9000 §4.5); `nil` when the final size is not settled. WebTransport session flow control needs it to charge the bytes a reset discarded (draft-ietf-webtrans-http3-16 §5.4). MsQuic keeps the value but does not expose it, so it is read through a new vendored patch, `ext/quicsilver/patches/stream-final-size.patch`.
 
 ### Fixed

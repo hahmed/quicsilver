@@ -88,6 +88,7 @@ HTML = <<~HTML
   <button onclick="sendBidi()">Open bidi stream + send hello</button>
   <button onclick="sendUni()">Open uni stream + send hello</button>
   <button onclick="sendDatagram()">Send datagram</button>
+  <button onclick="sendBulk()">Send 20 MiB (exercise flow control)</button>
   <button onclick="requestServerBidi()">Request server bidi stream</button>
   <button onclick="requestServerUni()">Request server uni stream</button>
   <button onclick="closeWT()">Close</button>
@@ -181,6 +182,34 @@ HTML = <<~HTML
         }
       } catch (error) {
         log(`send failed: ${error.stack || error}`)
+      }
+    }
+
+    // Push more than the 16 MiB session window the server advertises, so that
+    // if session flow control negotiated, the server must issue WT_MAX_DATA as
+    // it reads. Without flow control this is just a large upload.
+    window.sendBulk = async function() {
+      try {
+        const wt = await connectWT()
+        if (!wt) return
+
+        const total = 20 * 1024 * 1024
+        const chunk = new Uint8Array(64 * 1024).fill(120)
+        log(`bulk: sending ${total} bytes`)
+        const started = performance.now()
+        const stream = await wt.createUnidirectionalStream()
+        const writer = stream.getWriter()
+        let sent = 0
+        while (sent < total) {
+          await writer.ready
+          await writer.write(chunk)
+          sent += chunk.byteLength
+          if (sent % (4 * 1024 * 1024) === 0) log(`bulk: ${sent} bytes sent`)
+        }
+        await writer.close()
+        log(`bulk: done, ${total} bytes in ${Math.round(performance.now() - started)}ms`)
+      } catch (error) {
+        log(`bulk failed: ${error}`)
       }
     }
 
@@ -336,16 +365,40 @@ app = lambda do |env|
     session.accept!
     puts "WT session accepted"
 
+    # Did session flow control negotiate (draft-ietf-webtrans-http3-16 5.1)?
+    # It needs a non-zero WT_INITIAL_MAX_* from both endpoints. We send ours;
+    # this reports whether the browser sends any, which decides whether the
+    # whole of section 5 is reachable against a browser at all.
+    peer = session.connection.settings
+    offered = {
+      "WT_INITIAL_MAX_DATA" => peer[Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_DATA],
+      "WT_INITIAL_MAX_STREAMS_BIDI" => peer[Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI],
+      "WT_INITIAL_MAX_STREAMS_UNI" => peer[Quicsilver::Protocol::SETTINGS_WT_INITIAL_MAX_STREAMS_UNI]
+    }
+    puts "WT peer flow control settings: #{offered.inspect}"
+    puts "WT session flow control enabled: #{session.connection.wt_flow_control_enabled?}"
+    puts "WT peer SETTINGS seen: #{peer.keys.map { |k| "0x#{k.to_s(16)}" }.join(", ")}"
+
     session.on_stream do |stream|
       puts "WT accepted bidi stream id=#{stream.stream_id}"
 
       Thread.new do
+        total = 0
+        # A bulk sender pushes more than the advertised window, so reading it
+        # is what makes us grant more credit. Report totals rather than every
+        # chunk, or the logging dominates.
         while (chunk = stream.read)
+          total += chunk.bytesize
+          if chunk.bytesize > 4096 || total > 65_536
+            puts "WT stream #{stream.stream_id} read #{total} bytes so far"
+            next
+          end
           puts "WT stream #{stream.stream_id} read #{chunk.bytesize} bytes"
           response = "echo: #{chunk}"
           stream.write(response)
           puts "WT stream #{stream.stream_id} wrote #{response.bytesize} bytes"
         end
+        puts "WT stream #{stream.stream_id} finished after #{total} bytes"
       rescue => error
         warn "WT stream #{stream.stream_id} error: #{error.class}: #{error.message}"
         warn error.backtrace&.first(5)&.join("\n")
@@ -358,9 +411,17 @@ app = lambda do |env|
       puts "WT accepted uni stream id=#{stream.stream_id}"
 
       Thread.new do
+        total = 0
+        # A bulk upload arrives here. Reading it is what releases session
+        # window, so the server grants more credit as this loop drains it.
+        # Totals only, or the logging drowns out everything else.
         while (chunk = stream.read)
+          total += chunk.bytesize
+          next if total > 65_536
+
           puts "WT uni stream #{stream.stream_id} read #{chunk.bytesize} bytes"
         end
+        puts "WT uni stream #{stream.stream_id} finished after #{total} bytes"
       rescue => error
         warn "WT uni stream #{stream.stream_id} error: #{error.class}: #{error.message}"
         warn error.backtrace&.first(5)&.join("\n")
