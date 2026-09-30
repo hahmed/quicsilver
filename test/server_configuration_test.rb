@@ -280,6 +280,48 @@ class ServerConfigurationTest < Minitest::Test
     assert_equal "transport_server_id must be exactly 4 bytes encoded as an 8-character hex string", error.message
   end
 
+  # RFC 9114 A.1: "In contrast to HTTP/2, stream concurrency in HTTP/3 is
+  # managed by QUIC." So the stream limit we advertise has to be one we can
+  # serve. Advertising more means a peer opens streams we then answer with 503,
+  # which punishes it for doing exactly what we permitted.
+  def test_advertised_stream_limit_drops_to_what_the_server_can_serve
+    config = fetch_server_configuration_with_certs
+    assert_equal 100, config.max_concurrent_requests, "the standalone default"
+
+    server = Quicsilver::Server.new(find_available_port, server_configuration: config, threads: 5)
+
+    assert_equal server.max_queue_size + 5, config.max_concurrent_requests
+    assert_equal 25, config.max_concurrent_requests
+  end
+
+  # Capacity above the default is not a reason to invite more work than the
+  # default allows, so the limit is only ever lowered.
+  def test_a_large_thread_pool_does_not_raise_the_advertised_limit
+    config = fetch_server_configuration_with_certs
+
+    Quicsilver::Server.new(find_available_port, server_configuration: config, threads: 50)
+
+    assert_equal 100, config.max_concurrent_requests
+  end
+
+  # An explicit value is the application's decision, including the decision to
+  # advertise more than one server can serve.
+  def test_an_explicit_stream_limit_is_never_overridden
+    config = fetch_server_configuration_with_certs(max_concurrent_requests: 500)
+
+    Quicsilver::Server.new(find_available_port, server_configuration: config, threads: 5)
+
+    assert_equal 500, config.max_concurrent_requests
+  end
+
+  def test_an_explicit_queue_size_sets_the_advertised_limit
+    config = fetch_server_configuration_with_certs
+
+    Quicsilver::Server.new(find_available_port, server_configuration: config, threads: 2, max_queue_size: 8)
+
+    assert_equal 10, config.max_concurrent_requests
+  end
+
   private
 
   def fetch_server_configuration_with_certs(options={})

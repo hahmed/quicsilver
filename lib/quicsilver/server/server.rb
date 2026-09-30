@@ -87,6 +87,10 @@ module Quicsilver
       @request_registry = RequestRegistry.new
       @thread_pool_size = threads
       @max_queue_size = max_queue_size || threads * DEFAULT_QUEUE_MULTIPLIER
+      # Tell peers how many streams we can serve, not how many we would like
+      # to. In flight plus queued is the honest ceiling; past that a request
+      # would be shed, and QUIC can decline the stream instead.
+      @server_configuration.limit_concurrent_requests!(@thread_pool_size + @max_queue_size)
       @scheduler = build_scheduler(scheduler)
       @max_connections = max_connections
       @cancelled_streams = Set.new

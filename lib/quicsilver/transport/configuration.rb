@@ -3,6 +3,22 @@
 module Quicsilver
   module Transport
     class Configuration
+      # True when max_concurrent_requests is our default rather than the
+      # application's choice. :nodoc:
+      def max_concurrent_requests_default? = @max_concurrent_requests_default
+
+      # Advertise a stream limit the server can actually serve. RFC 9114 A.1:
+      # "In contrast to HTTP/2, stream concurrency in HTTP/3 is managed by
+      # QUIC." Advertising more than we can hold means a peer opens streams we
+      # then reject with 503, which is a refusal for doing exactly what we
+      # permitted. :nodoc:
+      def limit_concurrent_requests!(capacity)
+        return unless @max_concurrent_requests_default
+        return if capacity >= @max_concurrent_requests
+
+        @max_concurrent_requests = capacity
+      end
+
       attr_reader :cert_file, :key_file, :idle_timeout_ms, :server_resumption_level, :max_concurrent_requests,
         :max_unidirectional_streams, :stream_receive_window, :stream_receive_buffer, :connection_flow_control_window,
         :pacing_enabled, :send_buffering_enabled, :initial_rtt_ms, :initial_window_packets, :max_ack_delay_ms,
@@ -61,6 +77,10 @@ module Quicsilver
         # Maximum concurrent bidirectional streams the peer can open.
         # Matches quic-go and Chromium defaults. MsQuic ceiling: 65,535.
         @max_concurrent_requests = options.fetch(:max_concurrent_requests, 100)
+        # Whether the application chose this, or it is our default. A server
+        # that knows its own capacity lowers the default so the limit it
+        # advertises is one it can honour; an explicit value is never touched.
+        @max_concurrent_requests_default = !options.key?(:max_concurrent_requests)
 
         # Maximum concurrent unidirectional streams the peer can open.
         # HTTP/3 requires 3 (control, QPACK encoder, QPACK decoder).
