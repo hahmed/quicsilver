@@ -3,12 +3,44 @@
 
 # Quicsilver baseline benchmark with a single-file Rails app.
 #
-# Examples:
-#   ruby benchmarks/baseline.rb
-#   REQUESTS=5000 ruby benchmarks/baseline.rb
-#   WORKLOAD=big REQUESTS=50 ruby benchmarks/baseline.rb
-#   CONNECTIONS=1 STREAMS=4 ruby benchmarks/baseline.rb
-#   WORKLOAD=sleep SLEEP_SECONDS=0.1 REQUESTS=100 ruby benchmarks/baseline.rb
+# HTTP/3 is always TLS, so the client connects by the name on the certificate
+# and the server binds an address that name resolves to. Dialling 127.0.0.1
+# against a certificate issued for localhost fails verification, and on macOS
+# localhost resolves to ::1 first, so binding 127.0.0.1 is unreachable. Run
+# `bake localhost:install` once so the localhost CA is trusted.
+#
+# Read Failed before Req/s. A server that sheds reports better latency than one
+# that serves, because rejecting is quicker than answering.
+#
+# STREAMS is the only knob that loads the server. With one connection and one
+# stream nothing is ever concurrent, so Req/s is just 1000 / p50.
+#
+#   REQUESTS=2000                             latency, one request at a time
+#   STREAMS=10 REQUESTS=2000                  concurrent, inside capacity
+#   STREAMS=50 REQUESTS=5000                  concurrent, above the advertised
+#                                             stream limit: QUIC makes the
+#                                             extra streams wait
+#   WORKERS=50 STREAMS=50 REQUESTS=5000       capacity matched to the load
+#   WORKLOAD=big REQUESTS=50                  large bodies
+#   WORKLOAD=sleep SLEEP_SECONDS=0.1 REQUESTS=100   slow handler
+#
+# Capacity is WORKERS threads plus a queue of WORKERS * 4, and that total is
+# what the server advertises as its stream limit. Ten requests is a warm-up,
+# not a result: two runs of ten differed by 48% here.
+#
+# HOST      name to connect to, must match the certificate (default localhost)
+# ADDRESS   address to bind (default ::1, what localhost resolves to first)
+
+require 'bundler/inline'
+
+gemfile do
+  source 'https://rubygems.org'
+  gem "rails"
+  gem "localhost"
+  gem "falcon"
+  gem "puma"
+  gem "protocol-http"
+end
 
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
@@ -23,6 +55,7 @@ STREAMS = Integer(ENV.fetch("STREAMS", "1"))
 WORKERS = Integer(ENV.fetch("WORKERS", "5"))
 WORKLOAD = ENV.fetch("WORKLOAD", "tiny")
 SLEEP_SECONDS = Float(ENV.fetch("SLEEP_SECONDS", "0.1"))
+HOST = ENV.fetch("HOST", "localhost")
 PORT = Integer(ENV.fetch("PORT", Benchmarks.random_port.to_s))
 PATH = Benchmarks.path_for(WORKLOAD)
 APP = Benchmarks.rails_app(sleep_seconds: SLEEP_SECONDS, secret_key_base: "quicsilver-benchmark")
@@ -32,7 +65,7 @@ def start_server
   config = Quicsilver::Transport::Configuration.new(authority.certificate_path, authority.key_path)
   server = Quicsilver::Server.new(
     PORT,
-    address: "127.0.0.1",
+    address: ENV.fetch("ADDRESS", "::1"),
     app: APP,
     server_configuration: config,
     threads: WORKERS,
@@ -51,7 +84,7 @@ def wait_for_server(thread)
     abort "server exited while booting" unless thread.alive?
 
     begin
-      client = Quicsilver::Client.new("127.0.0.1", PORT, connection_timeout: 500, request_timeout: 1)
+      client = Quicsilver::Client.new(HOST, PORT, connection_timeout: 500, request_timeout: 1)
       client.open_connection
       response = client.get("/")
       return if response&.status == 200
@@ -86,7 +119,7 @@ end
 
 def open_connections
   Array.new(CONNECTIONS) do
-    Quicsilver::Client.new("127.0.0.1", PORT, connection_timeout: 5000, request_timeout: 10).tap(&:open_connection)
+    Quicsilver::Client.new(HOST, PORT, connection_timeout: 5000, request_timeout: 10).tap(&:open_connection)
   end
 end
 
