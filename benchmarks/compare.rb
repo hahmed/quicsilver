@@ -40,6 +40,10 @@ gemfile do
   gem "puma"
   gem "protocol-http"
   gem "async-http"
+  # The impairment relay used by latency.rb and loss.rb. Benchmark-only: it is
+  # not a dependency of the library or of the app, so it lives here rather than
+  # in the Gemfile.
+  gem "impair", github: "hahmed/impair"
 end
 
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
@@ -220,10 +224,8 @@ end
 
 # === Run ===
 
-puts "Quicsilver vs Puma vs Falcon — local development, default configuration"
-puts "#{REQUESTS} requests, #{CONCURRENCY} in flight, path #{PATH.inspect}, all over TLS"
-puts
-
+# Loadable as a harness: loss.rb reuses the server lifecycle and the
+# measurement functions above.
 # Each measurement runs in its own child process. Sharing one process makes
 # the results depend on which server ran first: measured 8000 req/s for
 # Quicsilver alone and 2000 for the same code after an earlier run in the same
@@ -246,8 +248,9 @@ def run_child(name)
   output = IO.popen(
     {"BENCH_ONE" => name, "REQUESTS" => REQUESTS.to_s, "CONCURRENCY" => CONCURRENCY.to_s,
      "WORKLOAD" => WORKLOAD, "RUNS" => "1"},
-    [RbConfig.ruby, __FILE__], err: File::NULL, &:read
+    [RbConfig.ruby, __FILE__], err: (ENV["DEBUG"] ? :out : File::NULL), &:read
   )
+  warn output if ENV["DEBUG"] && !output.include?("RESULT\t")
   line = output.lines.find { |l| l.start_with?("RESULT\t") }
   return nil unless line
 
@@ -267,27 +270,35 @@ if (only = ENV["BENCH_ONE"])
   exit 0
 end
 
-results = []
+if __FILE__ == $PROGRAM_NAME
 
-SERVERS.each do |name|
-  runs = RUNS.times.filter_map { run_child(name) }
-  if runs.empty?
-    warn "#{name}: no runs completed"
-    next
+  puts "Quicsilver vs Puma vs Falcon — local development, default configuration"
+  puts "#{REQUESTS} requests, #{CONCURRENCY} in flight, path #{PATH.inspect}, all over TLS"
+  puts
+
+
+  results = []
+
+  SERVERS.each do |name|
+    runs = RUNS.times.filter_map { run_child(name) }
+    if runs.empty?
+      warn "#{name}: no runs completed"
+      next
+    end
+
+    median = runs.sort_by { |r| r[:rps] }[runs.length / 2]
+    results << [median, runs.map { |r| r[:rps] }]
   end
 
-  median = runs.sort_by { |r| r[:rps] }[runs.length / 2]
-  results << [median, runs.map { |r| r[:rps] }]
-end
-
-puts format("%-12s %-9s %9s %9s %9s %9s %8s %16s",
-  "server", "protocol", "Req/s", "p50", "p95", "p99", "Failed", "Req/s range")
-puts "-" * 94
-results.each do |(result, rates)|
-  puts format(
-    "%-12s %-9s %9.0f %7.2fms %7.2fms %7.2fms %8d %16s",
-    result[:server], result[:protocol], result[:rps], result[:p50], result[:p95], result[:p99],
-    result[:failed],
-    (rates.length > 1 ? format("%.0f-%.0f", rates.min, rates.max) : "single run")
-  )
+  puts format("%-12s %-9s %9s %9s %9s %9s %8s %16s",
+    "server", "protocol", "Req/s", "p50", "p95", "p99", "Failed", "Req/s range")
+  puts "-" * 94
+  results.each do |(result, rates)|
+    puts format(
+      "%-12s %-9s %9.0f %7.2fms %7.2fms %7.2fms %8d %16s",
+      result[:server], result[:protocol], result[:rps], result[:p50], result[:p95], result[:p99],
+      result[:failed],
+      (rates.length > 1 ? format("%.0f-%.0f", rates.min, rates.max) : "single run")
+    )
+  end
 end
