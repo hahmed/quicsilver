@@ -43,7 +43,13 @@ gemfile do
   # The impairment relay used by latency.rb and loss.rb. Benchmark-only: it is
   # not a dependency of the library or of the app, so it lives here rather than
   # in the Gemfile.
-  gem "impair", github: "hahmed/impair"
+  # IMPAIR_PATH points at a checkout, for running the benchmark against a
+  # relay change before it is pushed.
+  if (impair_path = ENV["IMPAIR_PATH"])
+    gem "impair", path: impair_path
+  else
+    gem "impair", github: "hahmed/impair"
+  end
 end
 
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
@@ -51,6 +57,8 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "async"
 require "async/http"
 require "async/http/endpoint"
+require "falcon"
+require "falcon/endpoint"
 require "localhost/authority"
 require "puma"
 require "puma/configuration"
@@ -60,6 +68,17 @@ require_relative "helpers"
 
 REQUESTS = Integer(ENV.fetch("REQUESTS", "2000"))
 CONCURRENCY = Integer(ENV.fetch("CONCURRENCY", "10"))
+# How many transport connections each arm spreads its CONCURRENCY requests
+# over. Browsers open six TCP connections to an origin and one QUIC
+# connection, so the defaults are the browser shape: HTTP/1.1 on 6, HTTP/2
+# and HTTP/3 on 1. Setting CONNECTIONS applies the same count to every arm,
+# which is the other fair comparison.
+RETRIES = Integer(ENV.fetch("RETRIES", "0"))
+CONNECTIONS = {
+  "HTTP/1.1" => Integer(ENV.fetch("CONNECTIONS", ENV.fetch("H1_CONNECTIONS", "6"))),
+  "HTTP/2" => Integer(ENV.fetch("CONNECTIONS", ENV.fetch("H2_CONNECTIONS", "1"))),
+  "HTTP/3" => Integer(ENV.fetch("CONNECTIONS", ENV.fetch("H3_CONNECTIONS", "1"))),
+}.freeze
 WORKLOAD = ENV.fetch("WORKLOAD", "tiny")
 PATH = Benchmarks.path_for(WORKLOAD)
 SERVERS = ENV.fetch("SERVERS", "quicsilver,falcon,puma").split(",").map(&:strip)
@@ -95,11 +114,18 @@ end
 
 # === Quicsilver, HTTP/3 ===
 
+# "localhost" resolves to ["::1", "127.0.0.1"] on macOS and the other order
+# elsewhere, so a server bound to one family and a client dialling the name is
+# a coin toss. Bind and dial the same literal. ::1 by default because the
+# client prefers it; loss.rb overrides both so Puma, which binds v4 only, is
+# on the same path as the other two.
+QUIC_ADDRESS = ENV.fetch("QUIC_ADDRESS", "::1")
+
 def with_quicsilver(port)
   config = Quicsilver::Transport::Configuration.new(
     AUTHORITY.certificate_path, AUTHORITY.key_path
   )
-  server = Quicsilver::Server.new(port, address: "::1", app: APP, server_configuration: config)
+  server = Quicsilver::Server.new(port, address: QUIC_ADDRESS, app: APP, server_configuration: config)
   Quicsilver::Server.instance = server
   thread = Thread.new { server.start }
   sleep 0.05 until server.running?
@@ -113,12 +139,18 @@ def measure_quicsilver(port)
   times = []
   failed = 0
   mutex = Mutex.new
-  # One connection carrying CONCURRENCY streams, which is the HTTP/3 shape.
-  client = Quicsilver::Client.new("localhost", port, request_timeout: 30)
-  client.get(PATH)
+  # CONNECTIONS["HTTP/3"] QUIC connections, each carrying a share of the
+  # CONCURRENCY streams. Dialling a literal means the certificate's
+  # "localhost" no longer matches the name, so the name check goes off. The
+  # TCP arms already run VERIFY_NONE in client_context, so this matches them
+  # rather than conceding anything.
+  clients = Array.new(CONNECTIONS["HTTP/3"]) do
+    Quicsilver::Client.new(QUIC_ADDRESS, port, request_timeout: 30, unsecure: true).tap { |c| c.get(PATH) }
+  end
 
   started = Benchmarks.now
-  Benchmarks.distribute(REQUESTS, CONCURRENCY).map do |count|
+  Benchmarks.distribute(REQUESTS, CONCURRENCY).each_with_index.map do |count, index|
+    client = clients[index % clients.length]
     Thread.new do
       count.times do
         at = Benchmarks.now
@@ -134,7 +166,7 @@ def measure_quicsilver(port)
   end.each(&:join)
   elapsed = Benchmarks.now - started
 
-  client.disconnect
+  clients.each(&:disconnect)
   Result.new(server: "quicsilver", protocol: "HTTP/3", times: times, failed: failed, elapsed: elapsed)
 end
 
@@ -145,10 +177,11 @@ end
 # Puma via ALPN, so the protocol difference comes from the server.
 
 def with_falcon(port)
-  endpoint = Async::HTTP::Endpoint.parse(
-    "https://localhost:#{port}",
-    ssl_context: AUTHORITY.server_context
-  )
+  # Falcon::Endpoint, not Async::HTTP::Endpoint with the bare localhost
+  # context: the bare context has no alpn_select_cb, so the server never
+  # agreed to h2 even when offered it, and every "HTTP/2" row before this
+  # was HTTP/1.1. Falcon's own endpoint installs the callback.
+  endpoint = Falcon::Endpoint.parse("https://localhost:#{port}")
   container = nil
   thread = Thread.new do
     Async do
@@ -188,11 +221,22 @@ def measure_async(name, protocol, port, host: "localhost")
   elapsed = nil
 
   Async do
-    endpoint = Async::HTTP::Endpoint.parse("https://#{host}:#{port}#{PATH}", ssl_context: client_context)
-    # HTTP/1.1 has no streams, so concurrency is connections. HTTP/2 multiplexes
-    # CONCURRENCY streams over one.
-    clients = (protocol == "HTTP/1.1") ? Array.new(CONCURRENCY) { Async::HTTP::Client.new(endpoint) } : [Async::HTTP::Client.new(endpoint)]
+    wire = wire_protocol_for(protocol)
+    endpoint = Async::HTTP::Endpoint.parse("https://#{host}:#{port}#{PATH}",
+      protocol: wire, ssl_context: client_context(wire))
+    # Each Async::HTTP::Client is a connection pool, and the pool grows to
+    # meet demand: an HTTP/1.1 client with two requests in flight opens two
+    # connections, and "six connections" would quietly become ten. limit: 1
+    # makes a client one connection, so CONNECTIONS is what it says. HTTP/2
+    # multiplexes its share of the streams over that one.
+    # retries: 0, because async-http retries idempotent requests three times
+    # by default, and a benchmark that silently re-sends a request after the
+    # connection died reports the death as latency rather than as a failure.
+    # A browser does retry, so RETRIES=3 is the realistic setting; 0 is the
+    # one that shows what the transport did.
+    clients = Array.new(CONNECTIONS[protocol]) { Async::HTTP::Client.new(endpoint, limit: 1, retries: RETRIES) }
     clients.first.get(PATH).finish
+    assert_negotiated!(clients.first, protocol)
 
     started = Benchmarks.now
     Benchmarks.distribute(REQUESTS, CONCURRENCY).each_with_index.map do |count, index|
@@ -216,10 +260,43 @@ def measure_async(name, protocol, port, host: "localhost")
   Result.new(server: name, protocol: protocol, times: times, failed: failed, elapsed: elapsed)
 end
 
-def client_context
+# A client context has to do two things, and the previous one did only the
+# first. VERIFY_NONE, because the localhost certificate is self-signed and
+# async-http's own default only skips verification when the host is spelled
+# "localhost", not 127.0.0.1. And ALPN: passing any ssl_context replaces
+# async-http's default, which is where alpn_protocols lived, so a context
+# without it never offers h2 and the server falls back to HTTP/1.1. The falcon
+# arm ran that way for every table before this was noticed, labelled HTTP/2
+# the whole time.
+def client_context(wire)
   context = OpenSSL::SSL::SSLContext.new
   context.verify_mode = OpenSSL::SSL::VERIFY_NONE
+  context.alpn_protocols = wire.names
   context
+end
+
+# Pin the wire protocol to the arm's label rather than letting ALPN pick, so
+# a server that only offers one cannot be measured under the other's name.
+def wire_protocol_for(protocol)
+  case protocol
+  when "HTTP/2" then Async::HTTP::Protocol::HTTP2
+  when "HTTP/1.1" then Async::HTTP::Protocol::HTTP11
+  else raise ArgumentError, "unknown protocol #{protocol.inspect}"
+  end
+end
+
+# The protocol column is a measurement, not a label. Looks at the connection
+# the warm-up request actually used and refuses to continue under the wrong
+# name. Reaches into the pool because async-http has no public accessor for
+# it; if that breaks on an upgrade, this is the one place to fix.
+def assert_negotiated!(client, protocol)
+  pool = client.instance_variable_get(:@pool)
+  connection = pool.instance_variable_get(:@resources).keys.first
+  expected = (protocol == "HTTP/2") ? "HTTP2" : "HTTP1"
+  actual = connection.class.name[/HTTP\d/]
+  return if actual == expected
+
+  raise "#{protocol} arm negotiated #{connection.class}: ALPN did not select the protocol being measured"
 end
 
 # === Run ===
@@ -244,10 +321,27 @@ def measure(name)
   end
 end
 
+# IO.popen merges into the current environment rather than replacing it, and
+# Bundler.original_env only reports what the shell already had. Variables
+# Bundler *added* — BUNDLE_GEMFILE above all — would survive the merge, so map
+# those to nil, which removes them.
+CHILD_ENV = begin
+  original = defined?(Bundler) ? Bundler.original_env.to_h : {}
+  added = ENV.keys - original.keys
+  original.merge(added.to_h { |key| [key, nil] }).freeze
+end
+
 def run_child(name)
   output = IO.popen(
-    {"BENCH_ONE" => name, "REQUESTS" => REQUESTS.to_s, "CONCURRENCY" => CONCURRENCY.to_s,
-     "WORKLOAD" => WORKLOAD, "RUNS" => "1"},
+    # The child re-runs this file and re-evaluates the inline gemfile, which
+    # cannot activate falcon or puma while it inherits the parent's bundler
+    # environment: GEM_HOME, GEM_PATH and RUBYOPT all point at the repo's own
+    # gemspec-only Gemfile. Bundler.original_env is what the shell had before
+    # setup, so the child resolves the inline gemfile the way a bare ruby would.
+    CHILD_ENV.merge(
+      "BENCH_ONE" => name, "REQUESTS" => REQUESTS.to_s, "CONCURRENCY" => CONCURRENCY.to_s,
+      "WORKLOAD" => WORKLOAD, "RUNS" => "1"
+    ),
     [RbConfig.ruby, __FILE__], err: (ENV["DEBUG"] ? :out : File::NULL), &:read
   )
   warn output if ENV["DEBUG"] && !output.include?("RESULT\t")
