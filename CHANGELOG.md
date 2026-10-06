@@ -12,25 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - WebTransport session flow control (draft-ietf-webtrans-http3-16 §5): the `WT_MAX_DATA`, `WT_MAX_STREAMS`, `WT_DATA_BLOCKED` and `WT_STREAMS_BLOCKED` capsules, negotiation via `SETTINGS_WT_INITIAL_MAX_*`, enforcement of limits we advertise, spending of limits a peer grants, and proactive grants as the application consumes. `WebTransportStream#writable?` and `WebTransportSession#on_writable` report send credit. Prohibited per-stream capsules fail the session. §5.1 requires both endpoints to advertise a non-zero initial limit; browsers tested do not, so sessions with them run without it and remain limited to one per connection.
 
 - `Transport::StreamEvent#final_size` reports how many bytes the peer sent on a stream the peer reset, from the RESET_STREAM frame (RFC 9000 §4.5); `nil` when the final size is not settled. WebTransport session flow control needs it to charge the bytes a reset discarded (draft-ietf-webtrans-http3-16 §5.4). MsQuic keeps the value but does not expose it, so it is read through a new vendored patch, `ext/quicsilver/patches/stream-final-size.patch`.
-
-### Fixed
-
-- WebTransport rejects the `WT_MAX_STREAM_DATA` and `WT_STREAM_DATA_BLOCKED` capsules. Per-stream data limits belong to the HTTP/2 binding; over HTTP/3 each WebTransport stream is a QUIC stream with its own limits, so receipt is a session error carrying `WT_FLOW_CONTROL_ERROR` (draft-ietf-webtrans-http3-16 §5.4). They were previously ignored as unknown capsule types. Unknown types are still ignored.
-- WebTransport CLOSE and DRAIN capsules use HTTP/3 DATA frames. Session close sends FIN, validates peer close payloads, and terminates both directions on protocol errors.
-- WT_STREAM (`0x41`) is rejected with the connection error `H3_FRAME_ERROR` when it appears anywhere other than the first bytes of a request stream, including on the control stream (draft-ietf-webtrans-http3-16 §4.3). It is only a signal value at the front of a WebTransport stream, never a frame elsewhere.
-- WebTransport capsules sent optimistically on the CONNECT stream are no longer processed before the server responds. They are held unparsed, then processed once `accept!` sends the 2xx or discarded if the session is rejected (§3.2). The hold is bounded at 64 KiB; exceeding it fails the session with `H3_MESSAGE_ERROR`. Previously a CLOSE capsule arriving before the application responded would terminate the session and make it unacceptable.
-
-### Changed
-
-- WebTransport child streams have bounded receive queues, and a child that fills its buffer now pauses instead of losing its stream. `accept!` takes `receive_buffer_bytes` (default 1 MiB), `receive_buffer_chunks` (default 1024), `receive_overflow_code` and `receive_backpressure` (default `true`); delivery stops until the application reads. A reader that never drains leaves its stream paused indefinitely, and a paused stream holds connection credit, so it can stall its siblings. `receive_backpressure: false` restores the previous policy: an overflowing child is sent `STOP_SENDING` with `receive_overflow_code`, its queued input is discarded and its pending reads fail, while its write side stays open. Limits apply to each child's queued Ruby input, not to native buffers or the whole connection. `WebTransportStream#initialize` now requires these four options rather than defaulting them, so the defaults have a single home in `WebTransportSession::DEFAULT_RECEIVE_OPTIONS`.
-- WebTransport stream resets are directional. `RESET_STREAM` closes only the read side and invokes the new `on_peer_reset`; `STOP_SENDING` closes only the write side and invokes the new `on_peer_stop_sending`. `on_close` fires once both directions are closed. Previously either signal tore down the whole stream and both reported through `on_reset`, which is removed — the `peer_` prefix distinguishes these inbound events from the outbound `reset` and `abort` methods.
-- WebTransport CONNECT waits for peer SETTINGS before reaching Rack, including when headers arrive with FIN. The `webtransport-h3` token requires `WT_ENABLED=1` and `H3_DATAGRAM=1`; the legacy `webtransport` token requires `H3_DATAGRAM=1`. Waiting is limited to one CONNECT and 64 KiB of body data per connection, with cleanup on cancellation or connection closure.
-- WebTransport permits one active session per QUIC connection until session flow control is implemented. Additional CONNECT requests are rejected with `H3_REQUEST_REJECTED`; closing a session allows another. SETTINGS no longer advertise session flow-control credit, and the legacy session limit is one.
-- WebTransport `close(code:, reason:)` rejects invalid UTF-8 and codes outside the unsigned 32-bit range before changing session state. Valid UTF-8 binary strings remain supported; long valid reasons are truncated at a UTF-8 character boundary.
-
-## [0.5.0] - 2026-05-08
-
-### Added
 - Shared connection multiplexing — single QUIC connection serves all threads concurrently (5x faster: 16,000 req/s vs 3,175 req/s exclusive). Default pool mode.
 - `TransportError` base class with MsQuic status code parsing — typed errors instead of string-matching RuntimeError from C extension
 - `StreamFailedToOpenError` wraps `StreamOpen`/`StreamStart` failures with parsed hex status
@@ -45,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-threaded benchmarks
 
 ### Fixed
+
+- WebTransport rejects the `WT_MAX_STREAM_DATA` and `WT_STREAM_DATA_BLOCKED` capsules. Per-stream data limits belong to the HTTP/2 binding; over HTTP/3 each WebTransport stream is a QUIC stream with its own limits, so receipt is a session error carrying `WT_FLOW_CONTROL_ERROR` (draft-ietf-webtrans-http3-16 §5.4). They were previously ignored as unknown capsule types. Unknown types are still ignored.
+- WebTransport CLOSE and DRAIN capsules use HTTP/3 DATA frames. Session close sends FIN, validates peer close payloads, and terminates both directions on protocol errors.
+- WT_STREAM (`0x41`) is rejected with the connection error `H3_FRAME_ERROR` when it appears anywhere other than the first bytes of a request stream, including on the control stream (draft-ietf-webtrans-http3-16 §4.3). It is only a signal value at the front of a WebTransport stream, never a frame elsewhere.
+- WebTransport capsules sent optimistically on the CONNECT stream are no longer processed before the server responds. They are held unparsed, then processed once `accept!` sends the 2xx or discarded if the session is rejected (§3.2). The hold is bounded at 64 KiB; exceeding it fails the session with `H3_MESSAGE_ERROR`. Previously a CLOSE capsule arriving before the application responded would terminate the session and make it unacceptable.
 - Release GVL during `wait_for_connection` — no longer blocks all Ruby threads during handshake
 - Stream cleanup after response sent — `Connection#@streams` entries removed on completion, not just on connection close
 - Error hierarchy — `FrameError`, `MessageError`, `StreamFailedToOpenError` all inherit from `Quicsilver::Error`
@@ -52,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rack adapter owns early hints and trailer wiring (removed from server)
 
 ### Changed
+
+- WebTransport child streams have bounded receive queues, and a child that fills its buffer now pauses instead of losing its stream. `accept!` takes `receive_buffer_bytes` (default 1 MiB), `receive_buffer_chunks` (default 1024), `receive_overflow_code` and `receive_backpressure` (default `true`); delivery stops until the application reads. A reader that never drains leaves its stream paused indefinitely, and a paused stream holds connection credit, so it can stall its siblings. `receive_backpressure: false` restores the previous policy: an overflowing child is sent `STOP_SENDING` with `receive_overflow_code`, its queued input is discarded and its pending reads fail, while its write side stays open. Limits apply to each child's queued Ruby input, not to native buffers or the whole connection. `WebTransportStream#initialize` now requires these four options rather than defaulting them, so the defaults have a single home in `WebTransportSession::DEFAULT_RECEIVE_OPTIONS`.
+- WebTransport stream resets are directional. `RESET_STREAM` closes only the read side and invokes the new `on_peer_reset`; `STOP_SENDING` closes only the write side and invokes the new `on_peer_stop_sending`. `on_close` fires once both directions are closed. Previously either signal tore down the whole stream and both reported through `on_reset`, which is removed — the `peer_` prefix distinguishes these inbound events from the outbound `reset` and `abort` methods.
+- WebTransport CONNECT waits for peer SETTINGS before reaching Rack, including when headers arrive with FIN. The `webtransport-h3` token requires `WT_ENABLED=1` and `H3_DATAGRAM=1`; the legacy `webtransport` token requires `H3_DATAGRAM=1`. Waiting is limited to one CONNECT and 64 KiB of body data per connection, with cleanup on cancellation or connection closure.
+- WebTransport permits one active session per QUIC connection until session flow control is implemented. Additional CONNECT requests are rejected with `H3_REQUEST_REJECTED`; closing a session allows another. SETTINGS no longer advertise session flow-control credit, and the legacy session limit is one.
+- WebTransport `close(code:, reason:)` rejects invalid UTF-8 and codes outside the unsigned 32-bit range before changing session state. Valid UTF-8 binary strings remain supported; long valid reasons are truncated at a UTF-8 character boundary.
 - Connection pool default mode is `:shared` (multiplexed) — `:exclusive` available as opt-in
 - `open_stream` wraps C extension errors into typed `StreamFailedToOpenError` / `TransportError`
 - MsQuic submodule updated from v2.5.0 to v2.5.7
