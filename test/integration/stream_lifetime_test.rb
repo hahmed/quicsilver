@@ -982,24 +982,22 @@ class StreamLifetimeTest < Minitest::Test
     assert_delivers(outgoing, @server, id, "callback replenishment")
   end
 
-  def test_first_receive_credit_grant_resumes_a_deferred_suffix
+  # Delivery is asynchronous: by the time Ruby sees a receive the native
+  # callback has returned, so there is nothing to hand back to MsQuic, and the
+  # deferral API is gone. The receive that arrives before the first grant is
+  # delivered whole; the grant then bounds what follows, which the credit
+  # tests above cover.
+  def test_receive_before_first_grant_is_delivered_whole
     outgoing, incoming, id = open_stream
     received = "".b
     @server.receive_callback = ->(_, event, data) do
-      payload = Quicsilver::Transport::StreamEvent.new(data, event).data
-      if received.empty?
-        assert Quicsilver.defer_stream_receive(incoming.handle, payload.bytesize)
-        assert Quicsilver.grant_stream_receive_credit(incoming.handle, 64, 64)
-        received << "deferred:"
-      else
-        received << payload
-      end
+      received << Quicsilver::Transport::StreamEvent.new(data, event).data
     end
-    outgoing.send("resume after classification")
-    until received == "deferred:resume after classification"
-      await_event(@server, "RECEIVE", id)
-    end
-    assert_equal "deferred:resume after classification", received
+    outgoing.send("whole before any grant")
+    await_event(@server, "RECEIVE", id) until received == "whole before any grant"
+    assert_equal "whole before any grant", received
+    refute_respond_to Quicsilver, :defer_stream_receive
+    assert Quicsilver.grant_stream_receive_credit(incoming.handle, 64, 64)
   end
 
   def test_receive_chunk_credit_resumes_without_additional_byte_credit
@@ -1188,7 +1186,11 @@ class StreamLifetimeTest < Minitest::Test
     assert reader.join(3), "WebTransport reader did not resume to FIN"
     chunks = reader.value
     assert_equal payload, chunks.join
-    assert chunks.all? { |chunk| chunk.bytesize <= 4 }, "Read exceeded the configured receive byte limit"
+    # The oversized initial payload arrives whole: it was sent inside the
+    # initial stream window from the handshake (RFC 9000 §4.1). Credit then
+    # bounds every later receive to the 4-byte limit.
+    assert_operator chunks.first.bytesize, :>, 4, "initial payload was expected to exceed the queue limit"
+    assert chunks.drop(1).all? { |chunk| chunk.bytesize <= 4 }, "a receive after the first grant exceeded the limit"
   ensure
     reader&.kill
     reader&.join(3)

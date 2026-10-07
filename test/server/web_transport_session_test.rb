@@ -62,7 +62,10 @@ class WebTransportSessionTest < Minitest::Test
 
         assert_empty stops, "a full buffer must pause the child, not reset it"
         assert child.open?, "the child keeps its stream instead of losing it"
-        assert_equal "1234", child.read
+        # The receive arrived inside the limit we advertised, so all of it is
+        # delivered (RFC 9000 §4.1); the pause is that no credit is granted
+        # until the reader drains, not that bytes are withheld from it.
+        assert_equal "12345", child.read
       end
     end
   end
@@ -1287,9 +1290,7 @@ class WebTransportSessionTest < Minitest::Test
   # stream. These unit tests use synthetic handles, so the grant is stubbed.
   def with_native_receive_credit
     Quicsilver.stub(:grant_stream_receive_credit, ->(*) { true }) do
-      Quicsilver.stub(:defer_stream_receive, ->(*) { true }) do
-        yield
-      end
+      yield
     end
   end
 

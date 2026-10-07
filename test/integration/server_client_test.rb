@@ -639,6 +639,46 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # Datagrams have no flow control (RFC 9221 §5.3), so a peer can send them
+  # faster than the dispatcher delivers them. Each connection may have 128
+  # queued; past that the oldest is dropped, and the drop is counted. The
+  # on_datagram callback runs on the dispatcher, so stalling it in the
+  # callback is how a flood gets ahead of delivery here.
+  def test_datagram_flood_drops_oldest_and_counts
+    delivered = Queue.new
+    stalled = false
+    app = ->(env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
+    start_server(app)
+    @server.on_datagram do |_conn, data|
+      unless stalled
+        stalled = true
+        sleep 0.5
+      end
+      delivered << data
+    end
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    assert_equal 200, client.get("/").status
+
+    total = 400
+    total.times { |i| client.datagram_send(format("d%04d", i)) }
+    sleep 1.5
+
+    received = []
+    received << delivered.pop until delivered.empty?
+    dropped = @server.stats.dig("datagrams", "dropped")
+
+    assert_operator dropped, :>, 0, "a 400-datagram flood against a stalled dispatcher should drop some"
+    assert_operator received.size, :<, total
+    assert_equal total, received.size + dropped, "every datagram is either delivered or counted as dropped"
+    # Oldest dropped, newest kept: the last one sent must have been delivered,
+    # and everything delivered after the stall is in send order.
+    assert_includes received, format("d%04d", total - 1)
+    assert_equal received.drop(1), received.drop(1).sort
+  ensure
+    client&.disconnect
+  end
+
   def test_client_sends_datagram_to_server
     received = nil
     app = ->(env) { [200, {"content-type" => "text/plain"}, ["OK"]] }
@@ -873,6 +913,72 @@ class ServerClientIntegrationTest < Minitest::Test
 
     # The connection must still serve requests once the queue drains.
     assert_equal 200, client.get("/after").status
+  ensure
+    client&.disconnect
+  end
+
+  # --- Concurrency stress -------------------------------------------------
+  #
+  # Both of these failed on code the rest of the suite passed. Each pins a
+  # property the single-request tests above cannot see.
+
+  # send_stream hands MsQuic a pointer into a Ruby String's bytes rather than
+  # a copy, and MsQuic holds that pointer until SEND_COMPLETE. If the String
+  # were collected in between, the bytes on the wire would be whatever the
+  # allocator reused that memory for; the peer sees a mangled frame, not a
+  # crash, so it only shows under GC pressure. The first zero-copy version
+  # passed the suite and failed this in under 50 requests.
+  def test_sent_bytes_survive_gc_until_send_complete
+    app = ->(env) {
+      size = Integer(env["QUERY_STRING"].to_s[/\d+/] || 2)
+      [200, { "content-type" => "text/plain" }, ["x" * size]]
+    }
+    start_server(app)
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true, request_timeout: 5)
+    client.open_connection
+
+    gc_thread = Thread.new { loop { GC.start; sleep 0.0005 } }
+    bad = []
+    600.times do |i|
+      size = (i % 97) + 1
+      response = client.get("/?#{size}")
+      next if response&.status == 200 && response.body == "x" * size
+
+      bad << [i, response&.status, response&.body&.bytesize]
+    end
+
+    assert_empty bad, "#{bad.size}/600 responses were wrong under GC pressure; first: #{bad.first.inspect}"
+  ensure
+    gc_thread&.kill
+    client&.disconnect
+  end
+
+  # Many Ruby threads on one client, server in the same process: the pattern
+  # benchmarks/compare.rb uses. Peer streams are registered on the poll thread
+  # and client streams on Ruby threads; once the poll thread stopped holding
+  # the GVL, a stream token minted outside StateLock was handed to two streams
+  # and send_stream resolved to the wrong one. A client received its own GET
+  # frame as a response. Fails within a few hundred requests with that race.
+  def test_many_threads_on_one_client_get_their_own_responses
+    start_server(->(_env) { [200, { "content-type" => "text/plain" }, ["OK"]] })
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true, request_timeout: 5)
+    client.open_connection
+
+    failures = Queue.new
+    Array.new(10) do |t|
+      Thread.new do
+        150.times do |i|
+          response = client.get("/?t=#{t}&i=#{i}")
+          failures << [t, i, response&.status, response&.body] unless response&.status == 200 && response.body == "OK"
+        rescue StandardError => e
+          failures << [t, i, e.class, e.message]
+        end
+      end
+    end.each(&:join)
+
+    bad = []
+    bad << failures.pop until failures.empty?
+    assert_empty bad, "#{bad.size}/1500 requests failed; first: #{bad.first.inspect}"
   ensure
     client&.disconnect
   end

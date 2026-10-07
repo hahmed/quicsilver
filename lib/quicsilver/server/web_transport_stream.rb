@@ -187,30 +187,24 @@ module Quicsilver
         return true unless @read_open
 
         data ||= "".b
-        accepted = @receive_backpressure ? [data.bytesize, @receive_queue.available_bytes].min : data.bytesize
-        deferred = data.bytesize - accepted
-        if deferred.positive? && !@stream.defer_receive(deferred)
-          abort(@receive_overflow_error)
-          return false
-        end
+        # Every byte here was sent inside a limit we advertised, so it is
+        # accepted (RFC 9000 §4.1). With backpressure on, the pause is that we
+        # stop granting native receive credit until the reader drains (§4.2);
+        # credit bounds every receive after the first grant, and the first is
+        # bounded by the initial stream window from the handshake. With
+        # backpressure off there is no pause, only the overflow policy below.
+        accepted = data.bytesize
         if accepted.positive?
-          @input.write(data.byteslice(0, accepted))
+          @input.write(data)
           # Stream body only; the prefix that links this stream to its session
           # is stripped before we see it and costs no credit (draft-16 §5.4).
           @body_received += accepted
           @session&.count_received_data(accepted)
         end
+        return overflow! if !@receive_backpressure && @receive_queue.over_limit?
+
         enable_receive_backpressure
-        deferred.zero?
-      rescue ReceiveQueue::Full
-        # The reader is too far behind. Close our read side and ask the peer to
-        # stop; the write side stays open so the app can still say why.
-        begin
-          @stream.stop_sending(@receive_overflow_error)
-        ensure
-          close_read(ResetError.new(@receive_overflow_error))
-        end
-        false
+        true
       rescue ::Protocol::HTTP::Body::Writable::Closed, ClosedQueueError, ResetError
         # Closing can race the write after the read-open check above.
         raise if @read_open
@@ -218,6 +212,16 @@ module Quicsilver
         # The read side is already closed, so this data was not consumed and
         # there is no read side left to close. Never report full consumption.
         false
+      end
+
+      # receive_backpressure: false. The reader is too far behind and the app
+      # chose not to slow the peer, so ask it to stop (RFC 9000 §3.5) and close
+      # our read side; the write side stays open so the app can still say why.
+      def overflow!
+        @stream.stop_sending(@receive_overflow_error)
+        false
+      ensure
+        close_read(ResetError.new(@receive_overflow_error))
       end
 
       # A FIN only ends the read side once its data is fully consumed; under

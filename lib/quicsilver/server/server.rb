@@ -87,6 +87,7 @@ module Quicsilver
       @request_registry = RequestRegistry.new
       @thread_pool_size = threads
       @max_queue_size = max_queue_size || threads * DEFAULT_QUEUE_MULTIPLIER
+      @yield_threshold = [@max_queue_size / 2, 1].max
       # Tell peers how many streams we can serve, not how many we would like
       # to. In flight plus queued is the honest ceiling; past that a request
       # would be shed, and QUIC can decline the stream instead.
@@ -280,7 +281,13 @@ module Quicsilver
           "max_queue_size" => @max_queue_size,
           "full" => @scheduler.full?
         },
-        "transport" => transport_counters
+        "transport" => transport_counters,
+        "datagrams" => {
+          # Dropped before Ruby saw them because the event queue's datagram
+          # bound was reached. Datagrams are best-effort (RFC 9221); this is
+          # how you find out the dispatcher fell behind.
+          "dropped" => Quicsilver.dropped_datagrams
+        }
       }
     end
 
@@ -702,8 +709,20 @@ module Quicsilver
         Quicsilver.logger.warn("Work queue full (#{@max_queue_size}), rejecting request")
         connection.send_error(stream, 503, "Service Unavailable") if stream.writable?
       else
-        @scheduler.enqueue([connection, stream, early_data])
+        enqueue_work([connection, stream, early_data])
       end
+    end
+
+    # The dispatcher thread holds the GVL while it delivers a batch of events,
+    # and the workers cannot drain the scheduler queue until it lets go. A
+    # burst larger than the queue's headroom would then be shed by admission
+    # control even though the workers are idle. So the dispatcher yields once
+    # the queue is half full. The trigger is pressure on the admission budget,
+    # which is the only reason to interrupt a batch; a fixed batch size would
+    # have to be smaller than every possible max_queue_size to be safe.
+    def enqueue_work(work)
+      @scheduler.enqueue(work)
+      Thread.pass if @scheduler.pending >= @yield_threshold
     end
 
     # Send an error response on a stream we only hold a raw handle for.

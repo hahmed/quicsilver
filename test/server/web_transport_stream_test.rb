@@ -8,13 +8,12 @@ class WebTransportStreamTest < Minitest::Test
   # Records what reaches the transport, so tests assert on what the peer would
   # see rather than on internal flags.
   class RecordingTransport
-    attr_reader :resets, :stops, :writes, :deferred
+    attr_reader :resets, :stops, :writes
 
     def initialize
       @resets = []
       @stops = []
       @writes = []
-      @deferred = []
     end
 
     def abort(code) = @resets << code
@@ -22,10 +21,6 @@ class WebTransportStreamTest < Minitest::Test
     def send(data, fin: false) = @writes << [data, fin]
     def handle = 99_999
     def grant_receive_credit(bytes, chunks) = true
-    def defer_receive(bytes)
-      @deferred << bytes
-      true
-    end
   end
 
   # === Application error codes (draft-16 §4.4) ===
@@ -156,18 +151,20 @@ class WebTransportStreamTest < Minitest::Test
     assert_nil stream.read
   end
 
-  def test_backpressure_preserves_the_final_suffix_until_it_can_be_read
+  # Every byte that arrives was sent inside a limit we advertised, so it is
+  # delivered whole (RFC 9000 §4.1). With backpressure on, the receive that
+  # exceeds the queue limit is the one before the first credit grant, bounded
+  # by the handshake's initial stream window; the pause is that no credit is
+  # granted until the reader drains. Pinned the old synchronous deferral
+  # before; replaced with the new contract.
+  def test_backpressure_delivers_an_oversized_first_receive_whole
     transport = RecordingTransport.new
     stream = stream_on(transport, receive_buffer_bytes: 4, receive_backpressure: true)
 
     stream.receive_fin("123456")
-    assert_equal "1234", stream.read
-    assert_equal [2], transport.deferred
-    assert_empty transport.resets
-
-    stream.receive_fin("56")
-    assert_equal "56", stream.read
+    assert_equal "123456", stream.read
     assert_nil stream.read
+    assert_empty transport.resets
   end
 
   def test_reset_discards_input_while_backpressure_has_deferred_a_suffix

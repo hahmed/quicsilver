@@ -33,7 +33,8 @@ module Quicsilver
         end
         frames << build_frame(FRAME_HEADERS, @encoder.encode(trailer_headers)) if @trailers&.any?
         @body.close if @body.respond_to?(:close)
-        frames
+        # Frozen so send_stream can hand MsQuic the bytes without a copy.
+        frames.freeze
       end
 
       # Streaming encode - yields frames as they're ready

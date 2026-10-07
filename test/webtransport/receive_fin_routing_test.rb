@@ -21,7 +21,6 @@ class WebTransportReceiveFinRoutingTest < Minitest::Test
     def abort(*) = true
     def stop_sending(*) = true
     def grant_receive_credit(*) = true
-    def defer_receive(*) = true
   end
 
   class RoutingConnection < Quicsilver::Transport::Connection
