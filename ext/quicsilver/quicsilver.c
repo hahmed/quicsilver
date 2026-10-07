@@ -118,6 +118,79 @@ typedef struct {
 // Tokens are never reused. Registry access and MsQuic execution hold the GVL;
 // no Ruby calls or GVL release may occur between lookup and native use.
 static st_table* LiveStreams;
+
+// --- Zero-copy sends ---------------------------------------------------------
+//
+// A send used to malloc a QUIC_BUFFER plus a copy of the body and memcpy the
+// body into it, with the GVL held, then free it on SEND_COMPLETE. For a 12MB
+// response that is a 12MB allocate-and-copy during which no other Ruby thread
+// runs. Instead the Ruby String is frozen and retained, and QUIC_BUFFER points
+// straight at its bytes. MsQuic owns the pointer until SEND_COMPLETE, so the
+// String must not move or be collected until then: LiveSends is a GC root
+// that marks every retained String, and SEND_COMPLETE removes the entry.
+//
+// Freezing is what makes the pointer stable. A frozen String cannot be
+// resized or have its buffer replaced, and the encoder hands these Strings
+// over without reusing them. Compaction could still move an unfrozen embedded
+// String; rb_gc_mark (not rb_gc_mark_movable) pins what it marks, so the
+// retained Strings stay put.
+//
+// Every mutation of LiveSends happens with the GVL held: quicsilver_send_stream
+// is a Ruby method, and SEND_COMPLETE fires on the poll thread inside
+// quicsilver_poll's completion phase, which also holds it. GC runs with the
+// GVL. So the table needs no lock.
+typedef struct {
+    QUIC_BUFFER buffer;
+    VALUE data;
+} SendContext;
+
+static st_table* LiveSends;
+static VALUE LiveSendsRoot = Qnil;
+// gc_mark_children skips a T_DATA's dmark when its data pointer is NULL, so
+// the root wraps this instead of NULL. Its value is never read.
+static int LiveSendsRootData;
+
+static int
+mark_live_send(st_data_t key, st_data_t value, st_data_t arg)
+{
+    (void)key; (void)arg;
+    rb_gc_mark(((SendContext*)value)->data);
+    return ST_CONTINUE;
+}
+
+static void
+live_sends_mark(void* ptr)
+{
+    (void)ptr;
+    if (LiveSends) st_foreach(LiveSends, mark_live_send, 0);
+}
+
+static const rb_data_type_t live_sends_type = {
+    "Quicsilver::LiveSends",
+    { live_sends_mark, NULL, NULL, },
+    0, 0, RUBY_TYPED_FREE_IMMEDIATELY
+};
+
+static SendContext*
+send_context_new(VALUE data)
+{
+    SendContext* ctx = malloc(sizeof(SendContext));
+    if (!ctx) return NULL;
+    ctx->data = data;
+    ctx->buffer.Buffer = (uint8_t*)RSTRING_PTR(data);
+    ctx->buffer.Length = (uint32_t)RSTRING_LEN(data);
+    st_insert(LiveSends, (st_data_t)ctx, (st_data_t)ctx);
+    return ctx;
+}
+
+static void
+send_context_release(void* raw)
+{
+    if (!raw) return;
+    st_data_t key = (st_data_t)raw;
+    st_delete(LiveSends, &key, NULL);
+    free(raw);
+}
 static uint64_t NextStreamToken = 1;
 
 static uint64_t
@@ -517,10 +590,8 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
             break;
         }
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
-            // Free the send buffer that was allocated in quicsilver_send_stream
-            if (Event->SEND_COMPLETE.ClientContext != NULL) {
-                free(Event->SEND_COMPLETE.ClientContext);
-            }
+            // Drop the retained String; MsQuic is done with its bytes.
+            send_context_release(Event->SEND_COMPLETE.ClientContext);
             dispatch_to_ruby(ctx->connection, ctx->connection_ctx, ctx->client_obj,
                 "SEND_COMPLETE", ctx->stream_id, (const char*)&token, sizeof(token), 0);
             break;
@@ -785,10 +856,20 @@ quicsilver_open(VALUE self)
         return Qfalse;
     }
 
+    // PollingIdleTimeoutUs: how long MsQuic keeps spinning on an idle
+    // execution context before it lets us sleep in kevent/epoll_wait. At zero
+    // every idle gap is a full sleep-and-wake, which is the fixed latency floor
+    // at low concurrency. A short spin trades CPU for that latency.
+    // QUICSILVER_POLL_IDLE_US overrides for measurement; the default stays 0
+    // until the trade is measured.
+    uint32_t polling_idle_us = 0;
+    const char* idle_env = getenv("QUICSILVER_POLL_IDLE_US");
+    if (idle_env && *idle_env) polling_idle_us = (uint32_t)strtoul(idle_env, NULL, 10);
+
     QUIC_EXECUTION_CONFIG exec_config = { 0, &EventQ };
     Status = MsQuic->ExecutionCreate(
         QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE,
-        0,      // PollingIdleTimeoutUs
+        polling_idle_us,
         1,      // 1 execution context
         &exec_config,
         &ExecContext
@@ -1924,29 +2005,26 @@ quicsilver_send_stream(VALUE self, VALUE stream_handle, VALUE data, VALUE send_f
     StreamContext* ctx = find_stream(token);
     if (!ctx) rb_raise(rb_eIOError, "QUIC stream is closed");
     HQUIC Stream = ctx->stream;
-    const char* data_str = RSTRING_PTR(data);
-    uint32_t data_len = (uint32_t)RSTRING_LEN(data);
-    
-    void* SendBufferRaw = malloc(sizeof(QUIC_BUFFER) + data_len);
-    if (SendBufferRaw == NULL) {
-        rb_raise(rb_eRuntimeError, "SendBuffer allocation failed!");
+
+    // Freeze before taking the pointer. A String that cannot change is one
+    // whose buffer MsQuic can hold without a copy. Callers that need to go on
+    // mutating their buffer should dup before sending; nothing in lib/ does.
+    rb_obj_freeze(data);
+
+    SendContext* send = send_context_new(data);
+    if (send == NULL) {
+        rb_raise(rb_eRuntimeError, "SendContext allocation failed!");
         return Qnil;
     }
-
-    QUIC_BUFFER* SendBuffer = (QUIC_BUFFER*)SendBufferRaw;
-    SendBuffer->Buffer = (uint8_t*)SendBufferRaw + sizeof(QUIC_BUFFER);
-    SendBuffer->Length = data_len;
-
-    memcpy(SendBuffer->Buffer, data_str, data_len);
 
     // Use flag based on parameter (default to FIN for backwards compat)
     QUIC_SEND_FLAGS flags = (NIL_P(send_fin) || RTEST(send_fin))
         ? QUIC_SEND_FLAG_FIN
         : QUIC_SEND_FLAG_NONE;
-    
-    QUIC_STATUS Status = MsQuic->StreamSend(Stream, SendBuffer, 1, flags, SendBufferRaw);
+
+    QUIC_STATUS Status = MsQuic->StreamSend(Stream, &send->buffer, 1, flags, send);
     if (QUIC_FAILED(Status)) {
-        free(SendBufferRaw);
+        send_context_release(send);
         rb_raise(rb_eRuntimeError, "StreamSend failed, 0x%x!", Status);
         return Qfalse;
     }
@@ -2129,6 +2207,9 @@ Init_quicsilver(void)
 {
     mQuicsilver = rb_define_module("Quicsilver");
     LiveStreams = st_init_numtable();
+    LiveSends = st_init_numtable();
+    LiveSendsRoot = TypedData_Wrap_Struct(rb_cObject, &live_sends_type, &LiveSendsRootData);
+    rb_gc_register_mark_object(LiveSendsRoot);
 
     // Core initialization
     rb_define_singleton_method(mQuicsilver, "open_connection", quicsilver_open, 0);
