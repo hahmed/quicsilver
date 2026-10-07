@@ -46,10 +46,16 @@ ensure
   proxy&.stop
 end
 
+# The TCP stall per lost segment is one round trip, and Impair derives that as
+# 2 * delay (Impair::Config#rtt) rather than taking it separately: two knobs
+# for one quantity is how the two arms drift apart. This passed rtt: as well,
+# which Config now rejects outright, so this benchmark raised ArgumentError on
+# every run. Dropping it preserves the behaviour, since the value passed was
+# exactly 2 * delay.
 def with_tcp_relay(target_port, delay_ms, host: "127.0.0.1")
   proxy = Impair::Tcp.new(
     host: host, target_host: host, target_port: target_port,
-    delay: delay_ms / 1000.0, loss: LOSS, rtt: delay_ms * 2 / 1000.0, seed: SEED
+    delay: delay_ms / 1000.0, loss: LOSS, seed: SEED
   ).start
   yield proxy.port
 ensure
