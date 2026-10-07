@@ -33,7 +33,6 @@ module Quicsilver
         end
         frames << build_frame(FRAME_HEADERS, @encoder.encode(trailer_headers)) if @trailers&.any?
         @body.close if @body.respond_to?(:close)
-        # Frozen so send_stream can hand MsQuic the bytes without a copy.
         frames.freeze
       end
 
@@ -97,8 +96,9 @@ module Quicsilver
         @trailers.map { |name, value| [name.to_s.downcase, value.to_s] }
       end
 
+      # Frozen so send_stream hands MsQuic the bytes without a copy.
       def build_frame(type, payload)
-        Protocol.build_frame(type, payload)
+        Protocol.build_frame(type, payload).freeze
       end
 
 

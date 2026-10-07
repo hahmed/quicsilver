@@ -60,12 +60,15 @@ static HQUIC Registration = NULL;
 // Registration configuration
 static const QUIC_REGISTRATION_CONFIG RegConfig = { "quicsilver", QUIC_EXECUTION_PROFILE_LOW_LATENCY };
 
-// Connection state tracking
+// Connection state tracking. The status words are written by the poll
+// thread, which holds no GVL, and read by Ruby threads (wait_for_connection,
+// connection_status), so they are atomic; the ticket and address are only
+// read after the connection is established, which orders them.
 typedef struct {
-    int connected;
-    int failed;
-    QUIC_STATUS error_status;
-    uint64_t error_code;
+    _Atomic int connected;
+    _Atomic int failed;
+    _Atomic QUIC_STATUS error_status;
+    _Atomic uint64_t error_code;
     VALUE client_obj;  // Ruby client object (Qnil for server connections)
     char remote_address[INET6_ADDRSTRLEN];
     uint16_t remote_port;
@@ -724,7 +727,11 @@ quicsilver_poll(VALUE self)
     struct poll_args args;
     args.eq = EventQ;
     args.max_events = 64;
-    rb_thread_call_without_gvl(poll_nogvl, &args, RUBY_UBF_IO, NULL);
+    // RB_NOGVL_INTR_FAIL: do not enter the native wait with a Ruby interrupt
+    // (Thread#kill, Thread#raise, a signal) already pending; return and let
+    // the Ruby loop deliver it instead of sleeping on it for up to a second.
+    args.count = 0;
+    rb_nogvl(poll_nogvl, &args, RUBY_UBF_IO, NULL, RB_NOGVL_INTR_FAIL);
     return INT2NUM(args.count);
 }
 
@@ -824,7 +831,13 @@ quicsilver_dispatch_events(VALUE self, VALUE max_events, VALUE timeout_ms)
     if (max < 1) max = 1;
     if (max > DISPATCH_BATCH_MAX) max = DISPATCH_BATCH_MAX;
     struct queue_wait_args wait = { NUM2INT(timeout_ms) };
-    rb_thread_call_without_gvl(queue_wait_nogvl, &wait, queue_wake_ubf, NULL);
+    // Check with the GVL first and only release it if there is nothing to
+    // do. Under load the queue is rarely empty, and releasing and reacquiring
+    // the GVL per batch was a wasted handoff each time.
+    pthread_mutex_lock(&EventQueue.lock);
+    int must_wait = EventQueue.len == 0 && !EventQueue.closed;
+    pthread_mutex_unlock(&EventQueue.lock);
+    if (must_wait) rb_nogvl(queue_wait_nogvl, &wait, queue_wake_ubf, NULL, RB_NOGVL_INTR_FAIL);
 
     RubyEvent batch[DISPATCH_BATCH_MAX];
     long n = 0;
