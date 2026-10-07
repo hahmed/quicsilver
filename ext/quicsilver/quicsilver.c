@@ -10,6 +10,7 @@
 // is unsettled, and what we pass to Ruby as "not known".
 #define QUICSILVER_FINAL_SIZE_UNKNOWN UINT64_MAX
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -199,6 +200,54 @@ static struct {
     int closed;
 } EventQueue = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, 0, 0, 0, 0 };
 
+// A second way to learn the queue has work, for consumers that cannot wait on
+// a condvar: a fiber under a scheduler waits on an IO. The read end is exposed
+// as Quicsilver.events_io; the poll thread writes to it when the queue goes
+// from empty to non-empty, so one burst of events costs one syscall, not one
+// per event. eventfd on Linux, a pipe elsewhere, as io-event does.
+#if __linux__
+static int EventsSignalFd = -1;
+#define EVENTS_SIGNAL_READ_FD EventsSignalFd
+#else
+static int EventsSignalPipe[2] = { -1, -1 };
+#define EVENTS_SIGNAL_READ_FD EventsSignalPipe[0]
+#endif
+
+// Set once a consumer asks for the fd. Until then nothing reads it, so
+// nothing is written to it either.
+static int EventsSignalWanted = 0;
+
+static void
+events_signal_open(void)
+{
+#if __linux__
+    if (EventsSignalFd == -1) EventsSignalFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+#else
+    if (EventsSignalPipe[0] != -1) return;
+    if (pipe(EventsSignalPipe) != 0) return;
+    for (int i = 0; i < 2; i++) {
+        fcntl(EventsSignalPipe[i], F_SETFL, fcntl(EventsSignalPipe[i], F_GETFL) | O_NONBLOCK);
+        fcntl(EventsSignalPipe[i], F_SETFD, FD_CLOEXEC);
+    }
+#endif
+}
+
+// Called under EventQueue.lock. EAGAIN means the other end is already full,
+// which means the reader has a wakeup pending; nothing more to do.
+static void
+events_signal_write(void)
+{
+    if (!EventsSignalWanted) return;
+#if __linux__
+    if (EventsSignalFd == -1) return;
+    uint64_t one = 1;
+    (void)!write(EventsSignalFd, &one, sizeof(one));
+#else
+    if (EventsSignalPipe[1] == -1) return;
+    (void)!write(EventsSignalPipe[1], ".", 1);
+#endif
+}
+
 // The queue is unbounded for stream events, which stream limits and receive
 // credit already bound. Datagrams have no flow control (RFC 9221 §5.3) and
 // MAY be dropped when the receiver cannot process them, so each connection
@@ -292,10 +341,12 @@ queue_event_full(HQUIC connection, void* connection_ctx, VALUE client_obj,
         free(ev.data);
         return 0;
     }
+    int was_empty = EventQueue.len == 0;
     EventQueue.buf[(EventQueue.head + EventQueue.len) % EventQueue.cap] = ev;
     EventQueue.len++;
     if (is_datagram && conn) conn->queued_datagrams++;
     pthread_cond_signal(&EventQueue.ready);
+    if (was_empty) events_signal_write();
     pthread_mutex_unlock(&EventQueue.lock);
     return 1;
 }
@@ -837,7 +888,7 @@ quicsilver_dispatch_events(VALUE self, VALUE max_events, VALUE timeout_ms)
     pthread_mutex_lock(&EventQueue.lock);
     int must_wait = EventQueue.len == 0 && !EventQueue.closed;
     pthread_mutex_unlock(&EventQueue.lock);
-    if (must_wait) rb_nogvl(queue_wait_nogvl, &wait, queue_wake_ubf, NULL, RB_NOGVL_INTR_FAIL);
+    if (must_wait && wait.timeout_ms > 0) rb_nogvl(queue_wait_nogvl, &wait, queue_wake_ubf, NULL, RB_NOGVL_INTR_FAIL);
 
     RubyEvent batch[DISPATCH_BATCH_MAX];
     long n = 0;
@@ -888,9 +939,32 @@ quicsilver_dropped_datagrams(VALUE self)
 static VALUE
 quicsilver_open_event_queue(VALUE self)
 {
+    events_signal_open();
     pthread_mutex_lock(&EventQueue.lock);
     EventQueue.closed = 0;
     pthread_mutex_unlock(&EventQueue.lock);
+    return Qnil;
+}
+
+// File descriptor that becomes readable when the event queue goes from empty
+// to non-empty, or is closed. For a consumer under a fiber scheduler:
+// IO.for_fd(fd, autoclose: false).wait_readable goes through the scheduler.
+static VALUE
+quicsilver_events_signal_fd(VALUE self)
+{
+    events_signal_open();
+    EventsSignalWanted = 1;
+    return EVENTS_SIGNAL_READ_FD == -1 ? Qnil : INT2NUM(EVENTS_SIGNAL_READ_FD);
+}
+
+// Consume pending signal bytes. Call before dispatching, so a wakeup that
+// arrives during dispatch is not lost; a stale one only costs a spurious loop.
+static VALUE
+quicsilver_drain_events_signal(VALUE self)
+{
+    if (EVENTS_SIGNAL_READ_FD == -1) return Qnil;
+    char buf[64];
+    while (read(EVENTS_SIGNAL_READ_FD, buf, sizeof(buf)) > 0) {}
     return Qnil;
 }
 
@@ -902,6 +976,7 @@ quicsilver_close_event_queue(VALUE self)
     pthread_mutex_lock(&EventQueue.lock);
     EventQueue.closed = 1;
     pthread_cond_broadcast(&EventQueue.ready);
+    events_signal_write();  // an IO-waiting consumer must wake to see closed
     pthread_mutex_unlock(&EventQueue.lock);
     return Qnil;
 }
@@ -2680,4 +2755,6 @@ Init_quicsilver(void)
     rb_define_singleton_method(mQuicsilver, "open_event_queue", quicsilver_open_event_queue, 0);
     rb_define_singleton_method(mQuicsilver, "close_event_queue", quicsilver_close_event_queue, 0);
     rb_define_singleton_method(mQuicsilver, "dropped_datagrams", quicsilver_dropped_datagrams, 0);
+    rb_define_singleton_method(mQuicsilver, "events_signal_fd", quicsilver_events_signal_fd, 0);
+    rb_define_singleton_method(mQuicsilver, "drain_events_signal", quicsilver_drain_events_signal, 0);
 }

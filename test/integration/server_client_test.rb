@@ -983,6 +983,27 @@ class ServerClientIntegrationTest < Minitest::Test
     client&.disconnect
   end
 
+  # The event queue signals an fd on its empty-to-non-empty edge so a consumer
+  # under a fiber scheduler can wait on IO instead of a condvar. Exercised
+  # here without a scheduler: the fd must become readable when events are
+  # queued, drain cleanly, and non-blocking dispatch must then find nothing
+  # the thread dispatcher has not already delivered.
+  def test_events_io_signals_queued_events
+    start_server(->(_env) { [200, {"content-type" => "text/plain"}, ["OK"]] })
+    io = Quicsilver.events_io
+    Quicsilver.drain_events_signal
+
+    client = Quicsilver::Client.new("127.0.0.1", @port, unsecure: true)
+    assert_equal 200, client.get("/").status
+
+    assert io.wait_readable(1), "events_io did not become readable after a request"
+    Quicsilver.drain_events_signal
+    refute IO.select([io], nil, nil, 0), "drain left the signal readable"
+    assert_equal 0, Quicsilver.dispatch_events(16, 0), "thread dispatcher should already have delivered everything"
+  ensure
+    client&.disconnect
+  end
+
   def start_server(app, **options)
     3.times do |attempt|
       @port = find_available_port
