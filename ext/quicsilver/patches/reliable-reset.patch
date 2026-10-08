@@ -1,7 +1,19 @@
-diff --git a/src/core/connection.c b/src/core/connection.c
+diff --git c/src/core/api.c i/src/core/api.c
+index 2281da55a..c88b0b641 100644
+--- c/src/core/api.c
++++ i/src/core/api.c
+@@ -1259,6 +1259,7 @@ MsQuicStreamSend(
+             QueueOper = FALSE; // Not necessary if the previous send hasn't been flushed yet.
+         }
+         *ApiSendRequestsTail = SendRequest;
++        Stream->ApiSubmittedOffset += SendRequest->TotalLength;
+         Status = QUIC_STATUS_SUCCESS;
+ 
+         if (!SendInline && QueueOper) {
+diff --git c/src/core/connection.c i/src/core/connection.c
 index d2194a749..4bf4fb3d6 100644
---- a/src/core/connection.c
-+++ b/src/core/connection.c
+--- c/src/core/connection.c
++++ i/src/core/connection.c
 @@ -2203,7 +2203,9 @@ QuicConnRecvResumptionTicket(
          //
          // Validate resumed TP are <= current settings
@@ -83,10 +95,10 @@ index d2194a749..4bf4fb3d6 100644
              Connection->State.ReliableResetStreamNegotiated =
                  !!(Connection->PeerTransportParams.Flags & QUIC_TP_FLAG_RELIABLE_RESET_ENABLED);
  
-diff --git a/src/core/crypto.c b/src/core/crypto.c
+diff --git c/src/core/crypto.c i/src/core/crypto.c
 index 91235bbc9..2dab61879 100644
---- a/src/core/crypto.c
-+++ b/src/core/crypto.c
+--- c/src/core/crypto.c
++++ i/src/core/crypto.c
 @@ -2578,6 +2578,7 @@ QuicCryptoEncodeServerTicket(
      //
      QUIC_TRANSPORT_PARAMETERS HSTPCopy = *HandshakeTP;
@@ -95,10 +107,10 @@ index 91235bbc9..2dab61879 100644
          QUIC_TP_FLAG_ACTIVE_CONNECTION_ID_LIMIT |
          QUIC_TP_FLAG_INITIAL_MAX_DATA |
          QUIC_TP_FLAG_INITIAL_MAX_STRM_DATA_BIDI_LOCAL |
-diff --git a/src/core/crypto_tls.c b/src/core/crypto_tls.c
+diff --git c/src/core/crypto_tls.c i/src/core/crypto_tls.c
 index 4fa6b8cc7..a905e624f 100644
---- a/src/core/crypto_tls.c
-+++ b/src/core/crypto_tls.c
+--- c/src/core/crypto_tls.c
++++ i/src/core/crypto_tls.c
 @@ -66,7 +66,7 @@ typedef enum eSniNameType {
  #define QUIC_TP_ID_MIN_ACK_DELAY                            0xFF04DE1BULL   // varint
  #define QUIC_TP_ID_CIBIR_ENCODING                           0x1000          // {varint, varint}
@@ -108,10 +120,10 @@ index 4fa6b8cc7..a905e624f 100644
  #define QUIC_TP_ID_ENABLE_TIMESTAMP                         0x7158          // varint
  
  BOOLEAN
-diff --git a/src/core/frame.c b/src/core/frame.c
+diff --git c/src/core/frame.c i/src/core/frame.c
 index c5afcc628..fd2465fb0 100644
---- a/src/core/frame.c
-+++ b/src/core/frame.c
+--- c/src/core/frame.c
++++ i/src/core/frame.c
 @@ -457,7 +457,8 @@ QuicReliableResetFrameDecode(
      if (!QuicVarIntDecode(BufferLength, Buffer, Offset, &Frame->StreamID) ||
          !QuicVarIntDecode(BufferLength, Buffer, Offset, &Frame->ErrorCode) ||
@@ -122,10 +134,10 @@ index c5afcc628..fd2465fb0 100644
          return FALSE;
      }
      return TRUE;
-diff --git a/src/core/frame.h b/src/core/frame.h
+diff --git c/src/core/frame.h i/src/core/frame.h
 index 563332740..7719f1301 100644
---- a/src/core/frame.h
-+++ b/src/core/frame.h
+--- c/src/core/frame.h
++++ i/src/core/frame.h
 @@ -149,9 +149,9 @@ typedef enum QUIC_FRAME_TYPE {
      QUIC_FRAME_CONNECTION_CLOSE     = 0x1cULL, // to 0x1d
      QUIC_FRAME_CONNECTION_CLOSE_1   = 0x1dULL,
@@ -139,20 +151,20 @@ index 563332740..7719f1301 100644
      QUIC_FRAME_DATAGRAM             = 0x30ULL, // to 0x31
      QUIC_FRAME_DATAGRAM_1           = 0x31ULL,
      /* 0x32 to 0xad are unused currently */
-diff --git a/src/core/stream.c b/src/core/stream.c
-index ec426b406..aee5f0905 100644
---- a/src/core/stream.c
-+++ b/src/core/stream.c
+diff --git c/src/core/stream.c i/src/core/stream.c
+index ec426b406..f34388cb6 100644
+--- c/src/core/stream.c
++++ i/src/core/stream.c
 @@ -704,8 +704,15 @@ QuicStreamParamSet(
              break;
          }
  
 +        // StreamSend may still be queued when the application sets the boundary.
-+        uint64_t SubmittedOffset = Stream->QueuedSendOffset;
++        // ApiSubmittedOffset counts everything passed to StreamSend and is
++        // maintained under the same lock, so there is no window in which a
++        // flush in progress makes a submitted send invisible.
 +        CxPlatDispatchLockAcquire(&Stream->ApiSendRequestLock);
-+        for (QUIC_SEND_REQUEST* Req = Stream->ApiSendRequests; Req != NULL; Req = Req->Next) {
-+            SubmittedOffset += Req->TotalLength;
-+        }
++        uint64_t SubmittedOffset = Stream->ApiSubmittedOffset;
 +        CxPlatDispatchLockRelease(&Stream->ApiSendRequestLock);
          if (!Stream->Connection->State.ReliableResetStreamNegotiated ||
 -            *(uint64_t*)Buffer > Stream->QueuedSendOffset) {
@@ -169,10 +181,10 @@ index ec426b406..aee5f0905 100644
          Status = QUIC_STATUS_SUCCESS;
          break;
  
-diff --git a/src/core/stream.h b/src/core/stream.h
-index 5a985692e..6a3dba4c8 100644
---- a/src/core/stream.h
-+++ b/src/core/stream.h
+diff --git c/src/core/stream.h i/src/core/stream.h
+index 5a985692e..c4509ae6b 100644
+--- c/src/core/stream.h
++++ i/src/core/stream.h
 @@ -125,7 +125,7 @@ typedef union QUIC_STREAM_FLAGS {
          BOOLEAN LocalCloseReset         : 1;    // Locally closed (locally aborted).
          BOOLEAN LocalCloseResetReliable : 1;    // Indicates that we should shutdown the send path once we sent/ACK'd ReliableOffsetSend bytes.
@@ -182,7 +194,24 @@ index 5a985692e..6a3dba4c8 100644
          BOOLEAN ReceivedStopSending     : 1;    // Peer sent STOP_SENDING frame.
          BOOLEAN LocalCloseAcked         : 1;    // Any close acknowledged.
          BOOLEAN FinAcked                : 1;    // Our FIN was acknowledged.
-@@ -435,6 +435,10 @@ typedef struct QUIC_STREAM {
+@@ -310,6 +310,16 @@ typedef struct QUIC_STREAM {
+     CXPLAT_DISPATCH_LOCK ApiSendRequestLock;
+     QUIC_SEND_REQUEST* ApiSendRequests;
+ 
++    //
++    // Total bytes the application has passed to StreamSend, whether or not
++    // the worker has flushed them yet. Updated under ApiSendRequestLock.
++    // QUIC_PARAM_STREAM_RELIABLE_OFFSET is bounded by this rather than by
++    // QueuedSendOffset plus the ApiSendRequests list: the flush clears that
++    // list before it advances QueuedSendOffset, so a concurrent reader of
++    // the pair can see neither and reject a valid offset.
++    //
++    uint64_t ApiSubmittedOffset;
++
+     //
+     // Queued send requests.
+     //
+@@ -435,6 +445,10 @@ typedef struct QUIC_STREAM {
      //
      uint64_t RecvMaxLength;
  
@@ -193,10 +222,10 @@ index 5a985692e..6a3dba4c8 100644
      //
      // The number of bytes that are currently outstanding up to the app.
      //
-diff --git a/src/core/stream_recv.c b/src/core/stream_recv.c
+diff --git c/src/core/stream_recv.c i/src/core/stream_recv.c
 index 8d9640a9f..cd477447f 100644
---- a/src/core/stream_recv.c
-+++ b/src/core/stream_recv.c
+--- c/src/core/stream_recv.c
++++ i/src/core/stream_recv.c
 @@ -82,7 +82,8 @@ QuicStreamRecvShutdown(
          // the receives to that point. Just treat the shutdown as if it was
          // already acknowledged by a reset frame.
@@ -412,10 +441,10 @@ index 8d9640a9f..cd477447f 100644
      }
  
      return FALSE;
-diff --git a/src/core/stream_send.c b/src/core/stream_send.c
+diff --git c/src/core/stream_send.c i/src/core/stream_send.c
 index 0ac7dd101..ca70133df 100644
---- a/src/core/stream_send.c
-+++ b/src/core/stream_send.c
+--- c/src/core/stream_send.c
++++ i/src/core/stream_send.c
 @@ -119,7 +119,8 @@ QuicStreamSendShutdown(
      _In_ QUIC_VAR_INT ErrorCode   // Only for !Graceful
      )
@@ -482,10 +511,10 @@ index 0ac7dd101..ca70133df 100644
          QUIC_RELIABLE_RESET_STREAM_EX Frame = { Stream->ID, Stream->SendShutdownErrorCode, Stream->MaxSentLength, Stream->ReliableOffsetSend };
  
          if (QuicReliableResetFrameEncode(
-diff --git a/src/core/unittest/CMakeLists.txt b/src/core/unittest/CMakeLists.txt
+diff --git c/src/core/unittest/CMakeLists.txt i/src/core/unittest/CMakeLists.txt
 index ae5411ae9..04f79f63c 100644
---- a/src/core/unittest/CMakeLists.txt
-+++ b/src/core/unittest/CMakeLists.txt
+--- c/src/core/unittest/CMakeLists.txt
++++ i/src/core/unittest/CMakeLists.txt
 @@ -9,6 +9,7 @@ set(SOURCES
      PacketNumberTest.cpp
      PartitionTest.cpp
@@ -494,10 +523,10 @@ index ae5411ae9..04f79f63c 100644
      RecvBufferTest.cpp
      SettingsTest.cpp
      SlidingWindowExtremumTest.cpp
-diff --git a/src/core/unittest/FrameTest.cpp b/src/core/unittest/FrameTest.cpp
+diff --git c/src/core/unittest/FrameTest.cpp i/src/core/unittest/FrameTest.cpp
 index f3cde7e73..dcd7edb02 100644
---- a/src/core/unittest/FrameTest.cpp
-+++ b/src/core/unittest/FrameTest.cpp
+--- c/src/core/unittest/FrameTest.cpp
++++ i/src/core/unittest/FrameTest.cpp
 @@ -243,6 +243,26 @@ TEST(FrameTest, ReliableResetStreamFrameEncodeDecode)
      ASSERT_EQ(Frame.ReliableSize, DecodedFrame.ReliableSize);
  }
@@ -525,10 +554,49 @@ index f3cde7e73..dcd7edb02 100644
  // 
  // Tests if the reordering threshold has been hit. This function initializes a
  // QUIC_ACK_TRACKER and populates it with the provided packet numbers. It then 
-diff --git a/src/core/unittest/TicketTest.cpp b/src/core/unittest/TicketTest.cpp
+diff --git c/src/core/unittest/ReliableResetTest.cpp i/src/core/unittest/ReliableResetTest.cpp
+new file mode 100644
+index 000000000..8c4e15294
+--- /dev/null
++++ i/src/core/unittest/ReliableResetTest.cpp
+@@ -0,0 +1,33 @@
++// Copyright (c) Microsoft Corporation.
++// Licensed under the MIT License.
++#include "main.h"
++
++extern "C" void QuicStreamProcessReliableResetFrame(
++    QUIC_STREAM*, uint64_t, QUIC_VAR_INT, QUIC_VAR_INT);
++
++TEST(ReliableResetTest, FinalSizeIsChargedOnceWhileWaitingForPrefix)
++{
++    QUIC_CONNECTION Connection = {};
++    Connection.State.ReliableResetStreamNegotiated = TRUE;
++    Connection.Send.MaxData = 100;
++    QUIC_STREAM Stream = {};
++    Stream.Connection = &Connection;
++    Stream.RecvMaxLength = UINT64_MAX;
++    Stream.MaxAllowedRecvOffset = 100;
++
++    QuicStreamProcessReliableResetFrame(&Stream, 50, 42, 10);
++    EXPECT_EQ(50u, Connection.Send.OrderedStreamBytesReceived);
++    EXPECT_EQ(50u, Stream.RecvMaxLength);
++    EXPECT_EQ(10u, Stream.ReliableOffsetRecv);
++    EXPECT_EQ(100u, Connection.Send.MaxData); // No credit returned before consumption.
++
++    QuicStreamProcessReliableResetFrame(&Stream, 50, 42, 5);
++    EXPECT_EQ(50u, Connection.Send.OrderedStreamBytesReceived);
++    EXPECT_EQ(50u, Stream.RecvMaxLength);
++    EXPECT_EQ(5u, Stream.ReliableOffsetRecv);
++
++    // A reordered copy must not increase the reliable boundary or charge again.
++    QuicStreamProcessReliableResetFrame(&Stream, 50, 42, 10);
++    EXPECT_EQ(50u, Connection.Send.OrderedStreamBytesReceived);
++    EXPECT_EQ(5u, Stream.ReliableOffsetRecv);
++}
+diff --git c/src/core/unittest/TicketTest.cpp i/src/core/unittest/TicketTest.cpp
 index 6a55d9e11..493f6c5c8 100644
---- a/src/core/unittest/TicketTest.cpp
-+++ b/src/core/unittest/TicketTest.cpp
+--- c/src/core/unittest/TicketTest.cpp
++++ i/src/core/unittest/TicketTest.cpp
 @@ -57,7 +57,8 @@ TEST(ResumptionTicketTest, ClientEncDec)
          QUIC_TP_FLAG_INITIAL_MAX_STRM_DATA_BIDI_REMOTE |
          QUIC_TP_FLAG_INITIAL_MAX_STRM_DATA_UNI |
@@ -549,10 +617,10 @@ index 6a55d9e11..493f6c5c8 100644
      ServerTP.ActiveConnectionIdLimit = QUIC_TP_ACTIVE_CONNECTION_ID_LIMIT_MIN;
  
      TEST_QUIC_SUCCEEDED(
-diff --git a/src/core/unittest/TransportParamTest.cpp b/src/core/unittest/TransportParamTest.cpp
+diff --git c/src/core/unittest/TransportParamTest.cpp i/src/core/unittest/TransportParamTest.cpp
 index d5ad1e7f7..555e9a302 100644
---- a/src/core/unittest/TransportParamTest.cpp
-+++ b/src/core/unittest/TransportParamTest.cpp
+--- c/src/core/unittest/TransportParamTest.cpp
++++ i/src/core/unittest/TransportParamTest.cpp
 @@ -262,6 +262,25 @@ TEST(TransportParamTest, GreaseQuicBit)
      EncodeDecodeAndCompare(&OriginalTP, true);
  }
@@ -579,10 +647,24 @@ index d5ad1e7f7..555e9a302 100644
  TEST(TransportParamTest, ReliableResetEnabled)
  {
      QUIC_TRANSPORT_PARAMETERS OriginalTP;
-diff --git a/src/test/lib/HandshakeTest.cpp b/src/test/lib/HandshakeTest.cpp
+diff --git c/src/test/lib/DataTest.cpp i/src/test/lib/DataTest.cpp
+index e1c2ca2ac..84a87d9db 100644
+--- c/src/test/lib/DataTest.cpp
++++ i/src/test/lib/DataTest.cpp
+@@ -4415,6 +4415,9 @@ QuicTestStreamReliableReset(
+         MsQuicStream Stream(Connection, QUIC_STREAM_OPEN_FLAG_NONE, CleanUpManual, StreamReliableReset::ClientStreamCallback, &Context);
+         TEST_QUIC_SUCCEEDED(Stream.GetInitStatus());
+         TEST_QUIC_SUCCEEDED(Stream.Start());
++        // Each loss pattern must deliver its own reliable prefix and error.
++        Context.ReceivedBufferSize = 0;
++        Context.ShutdownErrorCode = 0;
+         SendContext send1 = {FALSE, 0};
+         TEST_QUIC_SUCCEEDED(Stream.Send(&SendBuffer, 1, QUIC_SEND_FLAG_DELAY_SEND, &send1));
+         TEST_QUIC_STATUS(
+diff --git c/src/test/lib/HandshakeTest.cpp i/src/test/lib/HandshakeTest.cpp
 index a787edf70..a16a1fb2b 100644
---- a/src/test/lib/HandshakeTest.cpp
-+++ b/src/test/lib/HandshakeTest.cpp
+--- c/src/test/lib/HandshakeTest.cpp
++++ i/src/test/lib/HandshakeTest.cpp
 @@ -2815,6 +2815,7 @@ QuicTestReliableResetNegotiation(
      MsQuicSettings ServerSettings;
      MsQuicSettings ClientSettings;
@@ -639,56 +721,3 @@ index a787edf70..a16a1fb2b 100644
  }
  
  void
-diff --git a/src/core/unittest/ReliableResetTest.cpp b/src/core/unittest/ReliableResetTest.cpp
-new file mode 100644
-index 000000000..8c4e15294
---- /dev/null
-+++ b/src/core/unittest/ReliableResetTest.cpp
-@@ -0,0 +1,33 @@
-+// Copyright (c) Microsoft Corporation.
-+// Licensed under the MIT License.
-+#include "main.h"
-+
-+extern "C" void QuicStreamProcessReliableResetFrame(
-+    QUIC_STREAM*, uint64_t, QUIC_VAR_INT, QUIC_VAR_INT);
-+
-+TEST(ReliableResetTest, FinalSizeIsChargedOnceWhileWaitingForPrefix)
-+{
-+    QUIC_CONNECTION Connection = {};
-+    Connection.State.ReliableResetStreamNegotiated = TRUE;
-+    Connection.Send.MaxData = 100;
-+    QUIC_STREAM Stream = {};
-+    Stream.Connection = &Connection;
-+    Stream.RecvMaxLength = UINT64_MAX;
-+    Stream.MaxAllowedRecvOffset = 100;
-+
-+    QuicStreamProcessReliableResetFrame(&Stream, 50, 42, 10);
-+    EXPECT_EQ(50u, Connection.Send.OrderedStreamBytesReceived);
-+    EXPECT_EQ(50u, Stream.RecvMaxLength);
-+    EXPECT_EQ(10u, Stream.ReliableOffsetRecv);
-+    EXPECT_EQ(100u, Connection.Send.MaxData); // No credit returned before consumption.
-+
-+    QuicStreamProcessReliableResetFrame(&Stream, 50, 42, 5);
-+    EXPECT_EQ(50u, Connection.Send.OrderedStreamBytesReceived);
-+    EXPECT_EQ(50u, Stream.RecvMaxLength);
-+    EXPECT_EQ(5u, Stream.ReliableOffsetRecv);
-+
-+    // A reordered copy must not increase the reliable boundary or charge again.
-+    QuicStreamProcessReliableResetFrame(&Stream, 50, 42, 10);
-+    EXPECT_EQ(50u, Connection.Send.OrderedStreamBytesReceived);
-+    EXPECT_EQ(5u, Stream.ReliableOffsetRecv);
-+}
-diff --git i/src/test/lib/DataTest.cpp w/src/test/lib/DataTest.cpp
-index e1c2ca2ac..84a87d9db 100644
---- i/src/test/lib/DataTest.cpp
-+++ w/src/test/lib/DataTest.cpp
-@@ -4415,6 +4415,9 @@ QuicTestStreamReliableReset(
-         MsQuicStream Stream(Connection, QUIC_STREAM_OPEN_FLAG_NONE, CleanUpManual, StreamReliableReset::ClientStreamCallback, &Context);
-         TEST_QUIC_SUCCEEDED(Stream.GetInitStatus());
-         TEST_QUIC_SUCCEEDED(Stream.Start());
-+        // Each loss pattern must deliver its own reliable prefix and error.
-+        Context.ReceivedBufferSize = 0;
-+        Context.ShutdownErrorCode = 0;
-         SendContext send1 = {FALSE, 0};
-         TEST_QUIC_SUCCEEDED(Stream.Send(&SendBuffer, 1, QUIC_SEND_FLAG_DELAY_SEND, &send1));
-         TEST_QUIC_STATUS(
