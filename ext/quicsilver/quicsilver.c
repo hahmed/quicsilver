@@ -103,6 +103,8 @@ typedef struct {
     int receive_paused;
     int receive_credit_enabled;
     int receive_delivery_failed;
+    // Set when a RECEIVE_FIN has been queued for Ruby. Poll thread only.
+    int fin_delivered;
     HQUIC connection;
     void* connection_ctx;  // ConnectionContext pointer (for building connection_data)
     VALUE client_obj;      // Ruby client object (copied from connection context)
@@ -186,7 +188,18 @@ typedef struct {
     int dropped;                 // superseded datagram: free, do not deliver
     ReleaseKind release;
     void* release_ptr;
+
+    // A pending receive: MsQuic owns the bytes until StreamReceiveComplete.
+    // Descriptors are copied (callback-scoped); data is NULL.
+    HQUIC stream;
+    uint64_t token;
+    uint64_t accepted;
+    QUIC_BUFFER* buffers;        // inline_buffers, or malloc'd when more
+    uint32_t buffer_count;
+    QUIC_BUFFER inline_buffers[4];
 } RubyEvent;
+
+#define EVENT_INLINE_BUFFERS 4
 
 static struct {
     pthread_mutex_t lock;
@@ -236,7 +249,10 @@ event_queue_grow(void)
     RubyEvent* buf = malloc(cap * sizeof(RubyEvent));
     if (!buf) return 0;
     for (size_t i = 0; i < EventQueue.len; i++) {
-        buf[i] = EventQueue.buf[(EventQueue.head + i) % EventQueue.cap];
+        RubyEvent* from = &EventQueue.buf[(EventQueue.head + i) % EventQueue.cap];
+        buf[i] = *from;
+        // Inline descriptors must point at their own copy.
+        if (from->buffers == from->inline_buffers) buf[i].buffers = buf[i].inline_buffers;
     }
     free(EventQueue.buf);
     EventQueue.buf = buf;
@@ -244,6 +260,8 @@ event_queue_grow(void)
     EventQueue.head = 0;
     return 1;
 }
+
+static int event_queue_push(RubyEvent* evp);
 
 // `owned` is a malloc'd buffer the queue takes over; otherwise data is copied.
 static int
@@ -274,6 +292,19 @@ queue_event_full(HQUIC connection, void* connection_ctx, VALUE client_obj,
     }
 
     ev.dropped = 0;
+    ev.stream = NULL;
+    ev.buffers = NULL;
+    ev.buffer_count = 0;
+    return event_queue_push(&ev);
+}
+
+// Copies the record into the ring; frees ev->data on failure.
+static int
+event_queue_push(RubyEvent* evp)
+{
+    RubyEvent ev = *evp;
+    const char* event_type = ev.event_type;
+    void* connection_ctx = ev.connection_ctx;
     int is_datagram = strcmp(event_type, "DATAGRAM_RECEIVED") == 0;
     ConnectionContext* conn = (ConnectionContext*)connection_ctx;
     pthread_mutex_lock(&EventQueue.lock);
@@ -289,7 +320,9 @@ queue_event_full(HQUIC connection, void* connection_ctx, VALUE client_obj,
         free(ev.data);
         return 0;
     }
-    EventQueue.buf[(EventQueue.head + EventQueue.len) % EventQueue.cap] = ev;
+    RubyEvent* slot = &EventQueue.buf[(EventQueue.head + EventQueue.len) % EventQueue.cap];
+    *slot = ev;
+    if (ev.buffers == evp->inline_buffers) slot->buffers = slot->inline_buffers;
     EventQueue.len++;
     if (is_datagram && conn) conn->queued_datagrams++;
     pthread_cond_signal(&EventQueue.ready);
@@ -390,6 +423,7 @@ register_stream(StreamContext* ctx, HQUIC stream, QUIC_STREAM_SHUTDOWN_FLAGS fla
     ctx->receive_paused = 0;
     ctx->receive_credit_enabled = 0;
     ctx->receive_delivery_failed = 0;
+    ctx->fin_delivered = 0;
     ctx->pending_priority = 0;
     // The token is minted under the same lock that inserts it. Peer streams
     // are registered on the poll thread and client streams on Ruby threads;
@@ -446,6 +480,12 @@ struct dispatch_ruby_args {
     HQUIC connection;
     void* connection_ctx;
     VALUE client_obj;
+    // For a pending receive: gather these into the String after the token.
+    const QUIC_BUFFER* buffers;
+    uint32_t buffer_count;
+    uint64_t token;
+    uint64_t accepted;
+    VALUE payload;               // Qundef, or a String built before dispatch
     char remote_address[INET6_ADDRSTRLEN];
     uint16_t remote_port;
     int session_resumed;
@@ -456,10 +496,36 @@ struct dispatch_ruby_args {
     int early_data;
 };
 
+// [token][bytes], gathered straight from MsQuic's buffers.
+static VALUE
+gather_receive_string(struct dispatch_ruby_args* a)
+{
+    VALUE str = rb_str_new(NULL, (long)(sizeof(a->token) + a->accepted));
+    char* out = RSTRING_PTR(str);
+    memcpy(out, &a->token, sizeof(a->token));
+    out += sizeof(a->token);
+    uint64_t remaining = a->accepted;
+    for (uint32_t b = 0; b < a->buffer_count && remaining; b++) {
+        size_t len = a->buffers[b].Length;
+        if (len > remaining) len = (size_t)remaining;
+        memcpy(out, a->buffers[b].Buffer, len);
+        out += len;
+        remaining -= len;
+    }
+    return str;
+}
+
+static VALUE
+gather_receive_protected(VALUE arg)
+{
+    return gather_receive_string((struct dispatch_ruby_args*)arg);
+}
+
 static VALUE
 dispatch_ruby_body(VALUE arg)
 {
     struct dispatch_ruby_args* a = (struct dispatch_ruby_args*)arg;
+    VALUE payload = a->payload != Qundef ? a->payload : rb_str_new(a->data, a->data_len);
 
     if (NIL_P(a->client_obj)) {
         VALUE server_class = rb_const_get_at(mQuicsilver, rb_intern("Server"));
@@ -473,7 +539,7 @@ dispatch_ruby_body(VALUE arg)
                 connection_data,
                 ULL2NUM(a->stream_id),
                 rb_str_new_cstr(a->event_type),
-                rb_str_new(a->data, a->data_len),
+                payload,
                 a->early_data ? Qtrue : Qfalse
             };
             rb_funcallv(server_class, rb_intern("handle_stream"), 5, argv);
@@ -483,7 +549,7 @@ dispatch_ruby_body(VALUE arg)
             VALUE argv[4] = {
                 ULL2NUM(a->stream_id),
                 rb_str_new_cstr(a->event_type),
-                rb_str_new(a->data, a->data_len),
+                payload,
                 a->early_data ? Qtrue : Qfalse
             };
             rb_funcallv(a->client_obj, rb_intern("handle_stream_event"), 4, argv);
@@ -518,9 +584,15 @@ format_dispatch_error(VALUE err)
 static int
 dispatch_to_ruby(HQUIC connection, void* connection_ctx, VALUE client_obj,
                  const char* event_type, uint64_t stream_id,
-                 const char* data, size_t data_len, int early_data)
+                 const char* data, size_t data_len, int early_data,
+                 VALUE prebuilt)
 {
     struct dispatch_ruby_args args;
+    args.buffers = NULL;
+    args.buffer_count = 0;
+    args.token = 0;
+    args.accepted = 0;
+    args.payload = prebuilt;
     args.connection = connection;
     args.connection_ctx = connection_ctx;
     args.client_obj = client_obj;
@@ -569,20 +641,20 @@ resume_receive(StreamContext* ctx)
     return 1;
 }
 
-// Receive for every stream. Data is copied out of MsQuic's buffers into a
-// queued event, so no MsQuic pointer outlives this callback and we never need
-// QUIC_STATUS_PENDING. Nothing here touches Ruby; the poll thread holds no GVL.
+// Returns QUIC_STATUS_PENDING: MsQuic keeps the bytes until the dispatcher
+// has copied them into the Ruby String and called StreamReceiveComplete. The
+// bytes outlive this callback (freed at StreamClose, which the dispatcher does
+// later); the QUIC_BUFFER descriptors do not and are copied. One receive per
+// stream is pending at a time, so the queue holds at most one per stream.
 //
 // When credit enforcement is active (receive_credit_enabled, set by the first
-// grant) we accept only what fits and report that via TotalBufferLength;
-// MsQuic then disables further receives until StreamReceiveSetEnabled, which
-// the next sufficient grant issues (see receive_paused). A partially accepted
-// receive never carries FIN: it arrives with the suffix.
-static void
+// grant) we accept only what fits and complete with that length; MsQuic then
+// disables further receives until StreamReceiveSetEnabled, which the next
+// sufficient grant issues (see receive_paused). A partially accepted receive
+// never carries FIN: it arrives with the suffix.
+static QUIC_STATUS
 receive_with_credit(StreamContext* ctx, QUIC_STREAM_EVENT* event)
 {
-    uint64_t token = ctx->token;
-    uint64_t stream_id = ctx->stream_id;
     uint64_t indicated = event->RECEIVE.TotalBufferLength;
     uint64_t accepted = indicated;
 
@@ -600,38 +672,53 @@ receive_with_credit(StreamContext* ctx, QUIC_STREAM_EVENT* event)
     STATE_UNLOCK();
 
     int has_fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) && accepted == indicated;
-    event->RECEIVE.TotalBufferLength = 0;
-    if (failed_before || (!accepted && !has_fin)) return;
-
-    char* combined = NULL;
-    if (accepted > SIZE_MAX - sizeof(token) || accepted > LONG_MAX - sizeof(token)) goto failed;
-    combined = malloc(sizeof(token) + (size_t)accepted);
-    if (!combined) goto failed;
-    memcpy(combined, &token, sizeof(token));
-    size_t copied = 0;
-    for (uint32_t b = 0; b < event->RECEIVE.BufferCount && copied < accepted; b++) {
-        size_t length = event->RECEIVE.Buffers[b].Length;
-        if (length > accepted - copied) length = (size_t)(accepted - copied);
-        memcpy(combined + sizeof(token) + copied, event->RECEIVE.Buffers[b].Buffer, length);
-        copied += length;
+    if (failed_before || (!accepted && !has_fin)) {
+        event->RECEIVE.TotalBufferLength = 0;
+        return QUIC_STATUS_SUCCESS;
     }
-    if (copied != accepted) goto failed;
+    if (accepted > LONG_MAX - sizeof(uint64_t)) goto failed;
 
-    if (!queue_event_full(ctx->connection, ctx->connection_ctx, ctx->client_obj,
-            has_fin ? "RECEIVE_FIN" : "RECEIVE", ctx->stream_id,
-            NULL, sizeof(token) + (size_t)accepted, has_fin ? ctx->early_data : 0,
-            combined, RELEASE_NONE, NULL)) {
+    RubyEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.connection = ctx->connection;
+    ev.connection_ctx = ctx->connection_ctx;
+    ev.client_obj = ctx->client_obj;
+    ev.event_type = has_fin ? "RECEIVE_FIN" : "RECEIVE";
+    ev.stream_id = ctx->stream_id;
+    ev.early_data = has_fin ? ctx->early_data : 0;
+    ev.stream = ctx->stream;
+    ev.token = ctx->token;
+    ev.accepted = accepted;
+    ev.data = NULL;
+    ev.data_len = sizeof(uint64_t) + (size_t)accepted;
+
+    uint32_t count = 0;
+    uint64_t covered = 0;
+    while (count < event->RECEIVE.BufferCount && covered < accepted) {
+        covered += event->RECEIVE.Buffers[count].Length;
+        count++;
+    }
+    ev.buffer_count = count;
+    if (count <= EVENT_INLINE_BUFFERS) {
+        ev.buffers = ev.inline_buffers;
+    } else {
+        ev.buffers = malloc(count * sizeof(QUIC_BUFFER));
+        if (!ev.buffers) goto failed;
+    }
+    memcpy(ev.buffers, event->RECEIVE.Buffers, count * sizeof(QUIC_BUFFER));
+
+    if (!event_queue_push(&ev)) {
+        if (ev.buffers != ev.inline_buffers) free(ev.buffers);
         goto failed;
     }
-    event->RECEIVE.TotalBufferLength = accepted;
-    return;
+    if (has_fin) ctx->fin_delivered = 1;
+    return QUIC_STATUS_PENDING;
 
 failed:
-    free(combined);
     // Last resort: a receive we could not hand to Ruby is data the stream can
     // never deliver in order, so the stream ends here.
     fprintf(stderr, "Quicsilver: receive delivery failed on stream %llu; aborting\n",
-        (unsigned long long)stream_id);
+        (unsigned long long)ctx->stream_id);
     STATE_LOCK();
     ctx->receive_delivery_failed = 1;
     ctx->receive_credit = 0;
@@ -639,6 +726,8 @@ failed:
     // Already in a native callback; inline abort avoids allocating a queued
     // operation on this failure path. It may retire ctx before returning.
     MsQuic->StreamShutdown(ctx->stream, ctx->abort_flags | QUIC_STREAM_SHUTDOWN_FLAG_INLINE, 0);
+    event->RECEIVE.TotalBufferLength = 0;
+    return QUIC_STATUS_SUCCESS;
 }
 
 // Platform I/O wait — called without GVL so other Ruby threads can run
@@ -801,9 +890,8 @@ perform_release(RubyEvent* ev)
 static void
 abort_after_failed_receive(RubyEvent* ev)
 {
-    if (strncmp(ev->event_type, "RECEIVE", 7) != 0 || ev->data_len < sizeof(uint64_t)) return;
-    uint64_t token;
-    memcpy(&token, ev->data ? ev->data : ev->inline_data, sizeof(token));
+    if (strncmp(ev->event_type, "RECEIVE", 7) != 0) return;
+    uint64_t token = ev->token;
     StreamContext* ctx = find_stream(token);
     if (!ctx) return;
     STATE_LOCK();
@@ -836,7 +924,9 @@ quicsilver_dispatch_events(VALUE self, VALUE max_events, VALUE timeout_ms)
         if (!ev->dropped && ev->connection_ctx && strcmp(ev->event_type, "DATAGRAM_RECEIVED") == 0) {
             ((ConnectionContext*)ev->connection_ctx)->queued_datagrams--;
         }
-        batch[n++] = *ev;
+        batch[n] = *ev;
+        if (ev->buffers == ev->inline_buffers) batch[n].buffers = batch[n].inline_buffers;
+        n++;
         EventQueue.head = (EventQueue.head + 1) % EventQueue.cap;
         EventQueue.len--;
     }
@@ -846,8 +936,22 @@ quicsilver_dispatch_events(VALUE self, VALUE max_events, VALUE timeout_ms)
         RubyEvent* ev = &batch[i];
         if (ev->dropped) { free(ev->data); continue; }
         const char* data = ev->data ? ev->data : ev->inline_data;
+        VALUE payload = Qundef;
+        if (ev->buffers) {
+            // Complete before the handler runs. A partial completion pauses
+            // the stream; a grant from the handler queues the resume; the
+            // pause must be queued first.
+            struct dispatch_ruby_args gather = { .buffers = ev->buffers,
+                .buffer_count = ev->buffer_count, .token = ev->token, .accepted = ev->accepted };
+            int gather_state = 0;
+            payload = rb_protect(gather_receive_protected, (VALUE)&gather, &gather_state);
+            if (gather_state) { rb_set_errinfo(Qnil); payload = Qundef; }
+            if (MsQuic) MsQuic->StreamReceiveComplete(ev->stream, ev->accepted);
+            if (ev->buffers != ev->inline_buffers) free(ev->buffers);
+            if (payload == Qundef) { abort_after_failed_receive(ev); perform_release(ev); continue; }
+        }
         int state = dispatch_to_ruby(ev->connection, ev->connection_ctx, ev->client_obj,
-            ev->event_type, ev->stream_id, data, ev->data_len, ev->early_data);
+            ev->event_type, ev->stream_id, data, ev->data_len, ev->early_data, payload);
         if (state) abort_after_failed_receive(ev);
         perform_release(ev);
         free(ev->data);
@@ -872,6 +976,7 @@ quicsilver_dropped_datagrams(VALUE self)
     return ULL2NUM(dropped);
 }
 
+
 static VALUE
 quicsilver_open_event_queue(VALUE self)
 {
@@ -893,40 +998,6 @@ quicsilver_close_event_queue(VALUE self)
     return Qnil;
 }
 
-// Inline poll for use during synchronous waits (e.g. wait_for_connection).
-// Short non-blocking poll — keeps MsQuic alive while we spin.
-static void
-poll_inline(int timeout_ms)
-{
-    if (ExecContext == NULL) return;
-
-    MsQuic->ExecutionPoll(ExecContext);
-
-    QUIC_CQE events[8];
-#if __linux__
-    int count = epoll_wait(EventQ, events, 8, timeout_ms);
-#elif __APPLE__ || __FreeBSD__
-    struct timespec ts;
-    ts.tv_sec = timeout_ms / 1000;
-    ts.tv_nsec = (timeout_ms % 1000) * 1000000;
-    int count = kevent(EventQ, NULL, 0, events, 8, &ts);
-#endif
-    for (int i = 0; i < count; i++) {
-#if __linux__
-        if (events[i].data.ptr == NULL) {
-            uint64_t val;
-            read(WakeFd, &val, sizeof(val));  // drain eventfd
-            continue;
-        }
-#elif __APPLE__ || __FreeBSD__
-        if (events[i].filter == EVFILT_USER && events[i].ident == WAKE_IDENT) continue;
-#endif
-        QUIC_SQE* sqe = cqe_get_sqe(&events[i]);
-        if (sqe && sqe->Completion) {
-            sqe->Completion(&events[i]);
-        }
-    }
-}
 
 QUIC_STATUS
 StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
@@ -965,8 +1036,7 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                 ctx->early_data = 1;
             }
 
-            receive_with_credit(ctx, Event);
-            break;
+            return receive_with_credit(ctx, Event);
         }
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
             // The retained String is dropped on the dispatcher, after Ruby has
@@ -1021,6 +1091,13 @@ StreamCallback(HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
                 "STREAM_PEER_ACCEPTED", ctx->stream_id, (const char*)&token, sizeof(token), 0);
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
+            // If the FIN arrived while a receive was pending, MsQuic reports it
+            // only here, never as a zero-length RECEIVE. Ruby expects RECEIVE_FIN.
+            if (!ctx->fin_delivered && !ctx->receive_delivery_failed) {
+                ctx->fin_delivered = 1;
+                queue_event(ctx->connection, ctx->connection_ctx, ctx->client_obj,
+                    "RECEIVE_FIN", ctx->stream_id, (const char*)&token, sizeof(token), ctx->early_data);
+            }
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED: {
             // Peer sent RESET_STREAM — pack
@@ -1617,22 +1694,16 @@ static void* sleep_nogvl(void* arg) {
 }
 
 // Wait for connection to complete (connected or failed).
-// Uses non-blocking poll + GVL-releasing sleep so other threads aren't blocked.
+// Waits only; the poll thread is the sole driver of MsQuic.
 static VALUE
 quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_ms)
 {
     ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
     int timeout = NUM2INT(timeout_ms);
     int elapsed = 0;
-    const int sleep_interval = 5; // 5ms
-    
+    const int sleep_interval = 1; // 1ms
+
     while (elapsed < timeout && !ctx->connected && !ctx->failed) {
-        // Non-blocking: process any ready MsQuic events (has GVL)
-        poll_inline(0);
-        
-        if (ctx->connected || ctx->failed) break;
-        
-        // Release GVL while sleeping — other threads can run
         struct sleep_args sa = { .ms = sleep_interval };
         rb_thread_call_without_gvl(sleep_nogvl, &sa, RUBY_UBF_IO, NULL);
         elapsed += sleep_interval;

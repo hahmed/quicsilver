@@ -925,16 +925,27 @@ class StreamLifetimeTest < Minitest::Test
     assert_equal 200, @client.get("/").status
   end
 
+  # Opening a stream on a connection that is shutting down fails either
+  # synchronously, if MsQuic has already processed the shutdown, or
+  # asynchronously at START_COMPLETE. Which one is a race with the poll
+  # thread. The property is the same: nothing is leaked and the handle is
+  # retired. A synchronous failure retires it before it was ever registered.
   def test_failed_async_start_retires_the_stream
     opened = Queue.new
     @server.on_datagram do |_connection, _data|
       @server_connection.shutdown
       opened << @server_connection.open_stream
+    rescue RuntimeError => e
+      opened << e
     end
 
     @client.datagram_send("open while shutting down")
     stream = opened.pop(timeout: 3)
     refute_nil stream, "Stream was not opened"
+    if stream.is_a?(RuntimeError)
+      assert_match(/StreamOpen failed/, stream.message)
+      return
+    end
     failed_id = (1 << 64) - 1
     started = await_event(@server, "STREAM_START_COMPLETE", failed_id, connection: @server_connection.handle)
     assert_equal stream.handle, decode_event(started).handle

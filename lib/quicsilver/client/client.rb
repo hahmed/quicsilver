@@ -212,6 +212,10 @@ module Quicsilver
       return self if @connected
 
       Quicsilver.open_connection
+      # The poll thread is the only thing that drives MsQuic, including this
+      # handshake; wait_for_connection only watches for the result. In a
+      # process with no server the loop is not running yet, so start it first.
+      Quicsilver.event_loop.start
       config = create_configuration
       raise ConnectionError, "Failed to create configuration" if config.nil?
 
@@ -219,7 +223,6 @@ module Quicsilver
       @connected = true
       @connection_start_time = Time.now
       send_control_stream
-      Quicsilver.event_loop.start
 
       self
     rescue => e

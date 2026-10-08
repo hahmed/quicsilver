@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "open3"
 
 class ServerClientIntegrationTest < Minitest::Test
   def setup
@@ -981,6 +982,26 @@ class ServerClientIntegrationTest < Minitest::Test
     assert_empty bad, "#{bad.size}/1500 requests failed; first: #{bad.first.inspect}"
   ensure
     client&.disconnect
+  end
+
+  # Every other test here runs client and server in one process, where the
+  # event loop is already running by the time a client connects. A process
+  # that is only a client must start the loop itself before the handshake,
+  # since the poll thread is the only thing that drives MsQuic. This broke
+  # once without any test noticing.
+  def test_client_in_its_own_process_connects
+    start_server(->(_env) { [200, {"content-type" => "text/plain"}, ["OK"]] })
+    script = <<~RUBY
+      $LOAD_PATH.unshift(#{File.expand_path("../../lib", __dir__).inspect})
+      require "quicsilver"
+      client = Quicsilver::Client.new("127.0.0.1", #{@port}, unsecure: true, request_timeout: 5)
+      response = client.get("/")
+      client.disconnect
+      print response.status
+    RUBY
+    output, status = Open3.capture2e(RbConfig.ruby, "-e", script)
+    assert status.success?, "client process failed: #{output}"
+    assert_equal "200", output.lines.last.to_s.strip
   end
 
   def start_server(app, **options)

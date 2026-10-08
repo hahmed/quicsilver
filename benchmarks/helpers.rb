@@ -10,7 +10,13 @@ module Benchmarks
     "small" => "/small",
     "big" => "/big",
     "sleep" => "/sleep",
+    "upload" => "/upload",
   }.freeze
+
+  # Body a client POSTs to /upload. The server reads it to the end and answers
+  # OK, so this measures the receive path: native delivery, the copy into
+  # Ruby, and rack.input.
+  UPLOAD_BODY = ("u" * 1024 * 1024).b.freeze
 
   TINY_RESPONSE = "OK"
   HELLO_RESPONSE = "Hello World\n"
