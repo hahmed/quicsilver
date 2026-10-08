@@ -29,8 +29,12 @@ ALLOCATED_PORTS = Set.new
 def find_available_port
   PORT_MUTEX.synchronize do
     50.times do
-      socket = UDPSocket.new
-      socket.bind("0.0.0.0", 0)
+      # Probe dual-stack. The server's listener binds both families, so a
+      # port held only on IPv6 (a local Postgres on [::1]:65000, say) must
+      # read as taken; an IPv4-only probe reports it free.
+      socket = UDPSocket.new(Socket::AF_INET6)
+      socket.setsockopt(:IPV6, :V6ONLY, 0)
+      socket.bind("::", 0)
       port = socket.addr[1]
       socket.close
       unless ALLOCATED_PORTS.include?(port)
