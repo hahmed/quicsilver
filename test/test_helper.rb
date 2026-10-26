@@ -9,6 +9,8 @@ require "minitest/focus"
 # Silence server logs during tests. Override per test with:
 #   Quicsilver.logger = Logger.new($stderr)
 Quicsilver.logger = Logger.new(File::NULL)
+# protocol-rack logs app exceptions via the console gem, which Quicsilver.logger does not cover.
+ENV["CONSOLE_LEVEL"] ||= "fatal"
 
 def cert_file_path
   Localhost::Authority.fetch.certificate_path

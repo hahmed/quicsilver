@@ -60,12 +60,14 @@ task :build => [:build_msquic, :compile]
 Rake::TestTask.new(:test) do |t|
   t.libs << "test"
   t.libs << "lib"
+  t.ruby_opts << "-W0"
   t.test_files = FileList["test/**/*_test.rb"]
 end
 
 Rake::TestTask.new(:test_unit) do |t|
   t.libs << "test"
   t.libs << "lib"
+  t.ruby_opts << "-W0"
   t.test_files = FileList["test/**/*_test.rb"].reject { |f|
     f.include?("integration") || f.include?("stream_control") ||
     f =~ /quicsilver_test|event_loop_test/
@@ -75,6 +77,7 @@ end
 Rake::TestTask.new(:test_integration) do |t|
   t.libs << "test"
   t.libs << "lib"
+  t.ruby_opts << "-W0"
   t.test_files = FileList[
     "test/stream_control_integration_test.rb",
     "test/integration/**/*_test.rb",
