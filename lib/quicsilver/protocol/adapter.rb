@@ -101,7 +101,7 @@ module Quicsilver
         status = response.status
         headers = response.headers
         trailers = extract_trailers(headers)
-        headers_hash = response_headers_hash(headers)
+        headers_hash = response_header_fields(headers)
         body = response.body
 
         if body.nil? || head_request
@@ -168,12 +168,16 @@ module Quicsilver
         result
       end
 
-      # Convert Protocol::HTTP::Headers to a plain Hash for ResponseEncoder.
-      # Only includes headers, not trailers.
-      def response_headers_hash(headers)
-        return {} unless headers
+      # Response header name/value pairs for ResponseEncoder. Only headers, not trailers.
+      #
+      # Pairs rather than a Hash because a field can legitimately repeat, and set-cookie MUST NOT be
+      # combined (RFC 9110 §5.3). Hashing drops every repeat but the last, which silently discarded
+      # the session cookie of any Rails response that set more than one — the app still worked, it
+      # just never stayed signed in.
+      def response_header_fields(headers)
+        return [] unless headers
 
-        headers.header.to_h
+        headers.header.each.to_a
       end
 
       # Build an HTTP/3 HEADERS frame from key-value pairs

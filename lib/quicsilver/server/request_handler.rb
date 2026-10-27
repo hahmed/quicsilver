@@ -117,17 +117,21 @@ module Quicsilver
           trailer_hash
         end
 
-        response_headers = {}
+        # Pairs, not a Hash: a field can legitimately repeat, and set-cookie MUST NOT be combined
+        # (RFC 9110 §5.3). Keying by name dropped every repeat but the last, which silently discarded
+        # the session cookie of any Rails response that set more than one — sign-in appeared to work
+        # and then forgot the request it had just authenticated.
+        response_headers = []
         if headers.respond_to?(:header)
-          headers.header.each { |name, value| response_headers[name] = value }
+          headers.header.each { |name, value| response_headers << [ name, value ] }
         else
-          headers&.each { |name, value| response_headers[name] = value }
+          headers&.each { |name, value| response_headers << [ name, value ] }
         end
 
         # Protocol-rack moves content-length from headers to body.length —
         # re-add it so the HTTP/3 response includes the header.
-        if !response_headers.key?("content-length") && response.body&.length
-          response_headers["content-length"] = response.body.length.to_s
+        unless response_headers.any? { |name, _| name == "content-length" }
+          response_headers << [ "content-length", response.body.length.to_s ] if response.body&.length
         end
 
         body = response.body || []

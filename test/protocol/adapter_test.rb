@@ -93,6 +93,27 @@ class Quicsilver::Protocol::AdapterTest < Minitest::Test
 
   # === Trailer support ===
 
+  def test_send_response_keeps_every_set_cookie
+    # Flattening response headers into a Hash kept only the last value for a repeated field, so a
+    # Rails response that set a session cookie alongside any other dropped the session: sign-in
+    # succeeded and the very next request arrived unauthenticated. set-cookie MUST NOT be combined
+    # (RFC 9110 §5.3), so both have to survive as separate fields.
+    headers = Protocol::HTTP::Headers.new
+    headers.add("set-cookie", "_session=abc; path=/; httponly")
+    headers.add("set-cookie", "pending=xyz; path=/")
+
+    response = Protocol::HTTP::Response.new("h3", 200, headers, Protocol::HTTP::Body::Buffered.wrap("Hello"))
+
+    sent = "".b
+    @adapter.send_response(response, ->(data, _fin) { sent << data })
+
+    parser = Quicsilver::Protocol::ResponseParser.new(sent)
+    parser.parse
+
+    # The parser joins repeated set-cookie fields with a newline, per the Rack convention.
+    assert_equal "_session=abc; path=/; httponly\npending=xyz; path=/", parser.headers["set-cookie"]
+  end
+
   def test_send_response_with_trailers
     headers = Protocol::HTTP::Headers.new
     headers.add("content-type", "text/plain")

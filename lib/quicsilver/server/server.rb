@@ -923,15 +923,16 @@ module Quicsilver
         trailer_hash
       end
 
-      response_headers = {}
+      # Pairs rather than a Hash, for the set-cookie reason in RequestHandler#send_response.
+      response_headers = []
       if headers.respond_to?(:header)
-        headers.header.each { |name, value| response_headers[name] = value }
+        headers.header.each { |name, value| response_headers << [ name, value ] }
       else
-        headers&.each { |name, value| response_headers[name] = value }
+        headers&.each { |name, value| response_headers << [ name, value ] }
       end
 
-      if !response_headers.key?("content-length") && response.body&.length
-        response_headers["content-length"] = response.body.length.to_s
+      unless response_headers.any? { |name, _| name == "content-length" }
+        response_headers << [ "content-length", response.body.length.to_s ] if response.body&.length
       end
 
       stream = Transport::InboundStream.new(pending.stream_id)
