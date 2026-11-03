@@ -50,12 +50,25 @@ require_relative "quicsilver/client/request"
 require_relative "quicsilver/client/connection_pool"
 require_relative "quicsilver/client/client"
 
-# C extension
+# C extension, preferring a build made by this exact Ruby ABI.
+#
+# The flat fallback is what a released gem installs, and what older source checkouts have. It is
+# also how a binary built by a different Ruby gets loaded: dyld then rejects it from deep inside
+# Bundler, with a message that says nothing about how to fix it. Re-raise with one that does.
 begin
-  ruby_version = /(\d+\.\d+)/.match(RUBY_VERSION)
-  require "quicsilver/#{ruby_version}/quicsilver"
+  require "quicsilver/#{RUBY_VERSION[/\d+\.\d+/]}/quicsilver"
 rescue LoadError
-  require "quicsilver/quicsilver"
+  begin
+    require "quicsilver/quicsilver"
+  rescue LoadError => error
+    raise LoadError, <<~MESSAGE.strip
+      quicsilver has no usable C extension for Ruby #{RUBY_VERSION}.
+
+      Build one with: rake compile
+
+      (#{error.message})
+    MESSAGE
+  end
 end
 
 # Rackup handler

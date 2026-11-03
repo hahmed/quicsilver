@@ -4,23 +4,56 @@ require "rake/testtask"
 require "rake/extensiontask"
 require_relative "ext/quicsilver/msquic_patch"
 
-Rake::ExtensionTask.new('quicsilver') do |ext|
-  ext.lib_dir = 'lib/quicsilver'
+# Installed under the ABI version that built it, which is the path lib/quicsilver.rb already looks
+# for first. A single shared lib/quicsilver/quicsilver.bundle is owned by whichever Ruby ran compile
+# last, so switching Rubies between checkouts silently leaves a binary the next one cannot load —
+# and `rake compile` considers itself up to date, so it does not rebuild. Version-scoped builds
+# coexist instead, and each Ruby loads its own.
+Rake::ExtensionTask.new("quicsilver") do |ext|
+  ext.lib_dir = "lib/quicsilver/#{RUBY_VERSION[/\d+\.\d+/]}"
 end
 
 # Keep `rake compile` useful in source checkouts, but let cibuildgem own
 # extension compilation after the workflow has built and bundled MsQuic.
-task :compile => [:build_msquic, :bundle_msquic] unless ENV["CIBUILDGEM"]
+#
+# bundle_msquic rewrites the rpath of the compiled extension, so it has to run
+# *after* compile, not as a prerequisite of it. As a prerequisite on a clean
+# checkout it patched whatever stale bundle was lying around and rake-compiler
+# then overwrote it with an unsigned, rpath-less one.
+unless ENV["CIBUILDGEM"]
+  task :compile => :build_msquic
+  Rake::Task[:compile].enhance { Rake::Task[:bundle_msquic].invoke }
+end
+
+# Where rake-compiler installed the extension for this Ruby's ABI. The flat
+# path is only what a released gem ships; a build left there by a different
+# Ruby gets picked up by the fallback require and fails inside dyld.
+def extension_path
+  abi = RUBY_VERSION[/\d+\.\d+/]
+  versioned = "lib/quicsilver/#{abi}/quicsilver.bundle"
+  File.exist?(versioned) ? versioned : 'lib/quicsilver/quicsilver.bundle'
+end
 
 # Copy MsQuic dylib next to the compiled extension for gem packaging
 task :bundle_msquic do
   lib_dir = 'lib/quicsilver'
   if RUBY_PLATFORM =~ /darwin/
     dylib = 'vendor/msquic/build/bin/Release/libmsquic.2.dylib'
+    bundle = extension_path
     if File.exist?(dylib)
       cp dylib, "#{lib_dir}/libmsquic.2.dylib"
-      # Update rpath so the bundle finds the dylib in the same directory
-      sh "install_name_tool -add_rpath @loader_path #{lib_dir}/quicsilver.bundle 2>/dev/null || true"
+      if File.exist?(bundle)
+        # Update rpath so the bundle finds the dylib. @loader_path covers a flat
+        # install; @loader_path/.. covers the versioned subdirectory. Both are
+        # errors when already present, hence the `|| true`.
+        sh "install_name_tool -add_rpath @loader_path #{bundle} 2>/dev/null || true"
+        sh "install_name_tool -add_rpath @loader_path/.. #{bundle} 2>/dev/null || true"
+        # install_name_tool invalidates the signature, and macOS then SIGKILLs
+        # the process with no message at all. Re-sign ad-hoc.
+        sh "codesign -f -s - #{bundle} #{lib_dir}/libmsquic.2.dylib"
+      else
+        warn "bundle_msquic: no compiled extension at #{bundle}; run `rake compile`"
+      end
     end
   elsif RUBY_PLATFORM =~ /linux/
     so = 'vendor/msquic/build/bin/Release/libmsquic.so.2'
