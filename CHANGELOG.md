@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Crash when a connection handle outlives its native context. `Client#disconnect` reads the resumption ticket after an idle timeout or a peer-initiated close, by which point the dispatcher has freed the `ConnectionContext` — a segfault in `dispatch_events` and a bus error in `Quicsilver.get_resumption_ticket`. Contexts are now registered in a token-keyed table under the same lock as streams, and `connection_status`, `wait_for_connection`, `get_resumption_ticket` and `open_stream` resolve the handle instead of dereferencing it. Opening a stream on a closed connection raises `IOError` rather than reusing freed memory.
+
 ## [0.5.0] - 2026-11-02
 
 ### Added

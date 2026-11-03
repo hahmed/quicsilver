@@ -62,6 +62,10 @@ static const QUIC_REGISTRATION_CONFIG RegConfig = { "quicsilver", QUIC_EXECUTION
 
 // Connection state tracking
 typedef struct {
+    // Opaque handle Ruby holds. Never the pointer: a freed context's address
+    // gets handed straight back by malloc, and a stale handle would then
+    // resolve to a live but unrelated connection. Tokens are never reused.
+    uint64_t token;
     int connected;
     int failed;
     QUIC_STATUS error_status;
@@ -162,6 +166,12 @@ static pthread_mutex_t StateLock = PTHREAD_MUTEX_INITIALIZER;
 // block. Inserting one of those between find_stream and the MsQuic call it
 // guards is a use-after-free.
 static st_table* LiveStreams;
+// Every ConnectionContext handed to Ruby as an integer handle. A connection
+// is freed on the dispatcher when Ruby has seen CONNECTION_CLOSED, but Ruby
+// can still be holding the handle (Client#disconnect reads the resumption
+// ticket after an idle timeout or a peer-initiated close). Dereferencing the
+// raw pointer then is a use-after-free; look it up here instead.
+static st_table* LiveConnections;
 
 typedef enum {
     RELEASE_NONE = 0,
@@ -472,6 +482,48 @@ forget_connection_streams(HQUIC connection)
     STATE_UNLOCK();
 }
 
+static uint64_t NextConnectionToken = 1;
+
+// Mints the handle under the same lock that inserts it, as register_stream
+// does: connections are opened from Ruby threads and accepted on the poll
+// thread, and neither holds the GVL against the other.
+static uint64_t
+register_connection(ConnectionContext* ctx)
+{
+    if (ctx == NULL) return 0;
+    STATE_LOCK();
+    ctx->token = NextConnectionToken++;
+    st_insert(LiveConnections, (st_data_t)ctx->token, (st_data_t)ctx);
+    STATE_UNLOCK();
+    return ctx->token;
+}
+
+static void
+unregister_connection(ConnectionContext* ctx)
+{
+    if (ctx == NULL || ctx->token == 0) return;
+    st_data_t key = (st_data_t)ctx->token;
+    STATE_LOCK();
+    st_delete(LiveConnections, &key, NULL);
+    STATE_UNLOCK();
+}
+
+// Resolve a Ruby-held context handle to a context that is still alive.
+// Returns NULL once the dispatcher has released it.
+static ConnectionContext*
+find_connection(VALUE context_handle)
+{
+    if (NIL_P(context_handle)) return NULL;
+    uint64_t token = NUM2ULL(context_handle);
+    if (token == 0) return NULL;
+
+    st_data_t entry;
+    STATE_LOCK();
+    int found = st_lookup(LiveConnections, (st_data_t)token, &entry);
+    STATE_UNLOCK();
+    return found ? (ConnectionContext*)entry : NULL;
+}
+
 
 // rb_protect wrapper — catches Ruby exceptions so they don't longjmp
 // through MsQuic callback frames (which would corrupt MsQuic state).
@@ -533,7 +585,7 @@ dispatch_ruby_body(VALUE arg)
             ConnectionContext* conn_ctx = (ConnectionContext*)a->connection_ctx;
             VALUE connection_data = rb_ary_new2(3);
             rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection));
-            rb_ary_push(connection_data, ULL2NUM((uintptr_t)a->connection_ctx));
+            rb_ary_push(connection_data, ULL2NUM(conn_ctx ? conn_ctx->token : 0));
             rb_ary_push(connection_data, conn_ctx && conn_ctx->session_resumed ? Qtrue : Qfalse);
             VALUE argv[5] = {
                 connection_data,
@@ -877,6 +929,7 @@ perform_release(RubyEvent* ev)
     case RELEASE_CONNECTION: {
         ConnectionContext* ctx = (ConnectionContext*)ev->release_ptr;
         forget_connection_streams(ev->connection);
+        unregister_connection(ctx);
         if (!NIL_P(ctx->client_obj)) rb_gc_unregister_address(&ctx->client_obj);
         free(ctx->resumption_ticket);
         free(ctx);
@@ -1278,12 +1331,15 @@ ListenerCallback(HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event)
                 conn_ctx->dropped_datagrams = 0;
                 conn_ctx->resumption_ticket_length = 0;
 
+                register_connection(conn_ctx);
+
                 // Set the connection callback
                 MsQuic->SetCallbackHandler(Event->NEW_CONNECTION.Connection, (void*)ConnectionCallback, conn_ctx);
 
                 // Accept the new connection with the server configuration
                 QUIC_STATUS Status = MsQuic->ConnectionSetConfiguration(Event->NEW_CONNECTION.Connection, ctx->Configuration);
                 if (QUIC_FAILED(Status)) {
+                    unregister_connection(conn_ctx);
                     free(conn_ctx);
                     return Status;
                 }
@@ -1643,11 +1699,14 @@ quicsilver_create_connection(VALUE self, VALUE client_obj)
         rb_gc_register_address(&ctx->client_obj);
     }
 
+    register_connection(ctx);
+
     // Create connection with enhanced callback and context
     if (QUIC_FAILED(Status = MsQuic->ConnectionOpen(Registration, ConnectionCallback, ctx, &Connection))) {
         if (!NIL_P(client_obj)) {
             rb_gc_unregister_address(&ctx->client_obj);
         }
+        unregister_connection(ctx);
         free(ctx);
         rb_raise(rb_eRuntimeError, "ConnectionOpen failed, 0x%x!", Status);
         return Qnil;
@@ -1656,7 +1715,7 @@ quicsilver_create_connection(VALUE self, VALUE client_obj)
     // Return both the connection handle and context as an array
     VALUE result = rb_ary_new2(2);
     rb_ary_push(result, ULL2NUM((uintptr_t)Connection));
-    rb_ary_push(result, ULL2NUM((uintptr_t)ctx));
+    rb_ary_push(result, ULL2NUM(ctx->token));
     return result;
 }
 
@@ -1698,7 +1757,14 @@ static void* sleep_nogvl(void* arg) {
 static VALUE
 quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_ms)
 {
-    ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
+    ConnectionContext* ctx = find_connection(context_handle);
+    if (ctx == NULL) {
+        VALUE gone = rb_hash_new();
+        rb_hash_aset(gone, rb_str_new_cstr("error"), Qtrue);
+        rb_hash_aset(gone, rb_str_new_cstr("status"), ULL2NUM(0));
+        rb_hash_aset(gone, rb_str_new_cstr("code"), ULL2NUM(0));
+        return gone;
+    }
     int timeout = NUM2INT(timeout_ms);
     int elapsed = 0;
     const int sleep_interval = 1; // 1ms
@@ -1729,9 +1795,15 @@ quicsilver_wait_for_connection(VALUE self, VALUE context_handle, VALUE timeout_m
 static VALUE
 quicsilver_connection_status(VALUE self, VALUE context_handle)
 {
-    ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
-    
+    ConnectionContext* ctx = find_connection(context_handle);
+
     VALUE status = rb_hash_new();
+    if (ctx == NULL) {
+        rb_hash_aset(status, rb_str_new_cstr("connected"), Qfalse);
+        rb_hash_aset(status, rb_str_new_cstr("failed"), Qtrue);
+        return status;
+    }
+
     rb_hash_aset(status, rb_str_new_cstr("connected"), ctx->connected ? Qtrue : Qfalse);
     rb_hash_aset(status, rb_str_new_cstr("failed"), ctx->failed ? Qtrue : Qfalse);
     
@@ -1900,7 +1972,7 @@ quicsilver_transport_counters(VALUE self)
 static VALUE
 quicsilver_get_resumption_ticket(VALUE self, VALUE context_handle_val)
 {
-    ConnectionContext* ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle_val);
+    ConnectionContext* ctx = find_connection(context_handle_val);
     if (ctx == NULL || ctx->resumption_ticket == NULL || ctx->resumption_ticket_length == 0) {
         return Qnil;
     }
@@ -2136,6 +2208,7 @@ quicsilver_close(VALUE self)
 {
     if (MsQuic != NULL) {
         st_clear(LiveStreams);
+        st_clear(LiveConnections);
         if (Registration != NULL) {
             MsQuic->RegistrationClose(Registration);
             Registration = NULL;
@@ -2425,7 +2498,14 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
     VALUE context_handle = rb_ary_entry(connection_data, 1);
 
     HQUIC Connection = (HQUIC)(uintptr_t)NUM2ULL(connection_handle);
-    ConnectionContext* conn_ctx = (ConnectionContext*)(uintptr_t)NUM2ULL(context_handle);
+    ConnectionContext* conn_ctx = find_connection(context_handle);
+    if (conn_ctx == NULL) {
+        // The context is released once Ruby has seen CONNECTION_CLOSED, so
+        // the HQUIC above is closed too. Opening a stream on it is a
+        // use-after-free, not a recoverable no-op.
+        rb_raise(rb_eIOError, "QUIC connection is closed");
+        return Qnil;
+    }
     HQUIC Stream = NULL;
 
     StreamContext* ctx = (StreamContext*)malloc(sizeof(StreamContext));
@@ -2436,7 +2516,7 @@ quicsilver_open_stream(VALUE self, VALUE connection_data, VALUE unidirectional)
 
     ctx->connection = Connection;
     ctx->connection_ctx = conn_ctx;  // Store connection context pointer
-    ctx->client_obj = conn_ctx ? conn_ctx->client_obj : Qnil;
+    ctx->client_obj = conn_ctx->client_obj;
     ctx->stream_id = UINT64_MAX;  // Sentinel: lazily resolved on first callback
     ctx->started = 1;
     ctx->shutdown = 0;
@@ -2681,6 +2761,7 @@ Init_quicsilver(void)
 {
     mQuicsilver = rb_define_module("Quicsilver");
     LiveStreams = st_init_numtable();
+    LiveConnections = st_init_numtable();
     LiveSends = st_init_numtable();
     LiveSendsRoot = TypedData_Wrap_Struct(rb_cObject, &live_sends_type, &LiveSendsRootData);
     rb_gc_register_mark_object(LiveSendsRoot);
