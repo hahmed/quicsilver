@@ -66,6 +66,12 @@ module Quicsilver
         protocol_headers = ::Protocol::HTTP::Headers.new
         headers.each do |name, value|
           next if name.start_with?(":")
+          # content-length rides on the body, which carries the length read
+          # above. Left in the header list it reaches Rack as
+          # HTTP_CONTENT_LENGTH, which Rack::Lint rejects outright — every
+          # POST to a Lint-wrapped app 500s. Bodyless requests have no body to
+          # carry it, and Rack allows CONTENT_LENGTH to be absent there.
+          next if name == "content-length"
           protocol_headers.add(name, value)
         end
 
