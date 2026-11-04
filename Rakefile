@@ -72,7 +72,19 @@ task :setup do
 end
 
 task :build_msquic => :setup do
-  MsquicPatch.apply!(File.expand_path("vendor/msquic", __dir__))
+  source = File.expand_path("vendor/msquic", __dir__)
+  built_library = Dir[File.join(source, "build/bin/Release/libmsquic.{2.dylib,so.2}")].first
+
+  # Reconfiguring picks up whatever toolchain is live, which is how a working
+  # checkout starts failing to build gtest under a different shell. If the
+  # patches are unchanged and the library is there, there is nothing to do.
+  if MsquicPatch.built?(source) && built_library
+    puts "MsQuic already built for the current patch set (#{built_library}); skipping."
+    puts "Force a rebuild with: rm -rf vendor/msquic/build"
+    next
+  end
+
+  MsquicPatch.apply!(source)
   cmake_args = ['-B build', '-DCMAKE_BUILD_TYPE=Release', '-DQUIC_TLS_LIB=quictls', '-DQUIC_LINUX_IOURING_ENABLED=OFF']
   if RUBY_PLATFORM =~ /darwin/
     cmake_args << '-DCMAKE_EXE_LINKER_FLAGS="-framework CoreServices"'
