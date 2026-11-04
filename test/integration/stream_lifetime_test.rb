@@ -218,6 +218,35 @@ class StreamLifetimeTest < Minitest::Test
     assert_delivers(fresh_incoming, @client, id, "reply after reconnect")
   end
 
+  # The native ConnectionContext is freed on the dispatcher once Ruby has seen
+  # CONNECTION_CLOSED, but Ruby can still be holding the handle — disconnect
+  # reads the resumption ticket after an idle timeout or a peer-initiated
+  # close. Dereferencing it then segfaulted in dispatch_events and raised a
+  # bus error out of get_resumption_ticket, so every accessor has to resolve
+  # the handle through the registry instead.
+  def test_connection_accessors_survive_a_handle_outliving_its_context
+    # Deliberately kept past the close the client is about to perform.
+    stale = @client.instance_variable_get(:@connection_data).dup
+    @client.disconnect
+    @server_connection.shutdown
+    await_event(@server, "CONNECTION_CLOSED", connection: @server_connection.handle)
+
+    # The release runs on the dispatcher, so wait for it rather than racing it.
+    # Before the fix this loop crashed the process instead of timing out.
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
+    status = nil
+    loop do
+      status = Quicsilver.connection_status(stale[1])
+      break if status["failed"]
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      sleep 0.01
+    end
+
+    refute status["connected"], "a released context must not report itself connected"
+    assert_nil Quicsilver.get_resumption_ticket(stale[1])
+    assert_raises(IOError) { Quicsilver.open_stream(stale, false) }
+  end
+
   def test_retired_stream_operations_leave_new_stream_usable
     retired = []
     8.times do
