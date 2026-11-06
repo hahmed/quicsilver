@@ -28,23 +28,41 @@ end
 PORT_MUTEX = Mutex.new
 ALLOCATED_PORTS = Set.new
 
+# Below the ephemeral range on both Linux (32768) and macOS (49152), so the
+# kernel never hands one of these out on its own. Probing for an ephemeral port
+# and then closing it loses a race the suite actually hit: a client socket
+# binding port 0 got the port back before the server bound it, and setup died
+# with "Address already in use". Picking outside the range means only another
+# deliberate bind can collide.
+PORT_RANGE = (20_000...32_000)
+# Offset per process so the two test_parallel processes do not walk in step.
+PORT_CURSOR = [ PORT_RANGE.first + (Process.pid % (PORT_RANGE.size - 200)) ]
+
 def find_available_port
   PORT_MUTEX.synchronize do
-    50.times do
+    200.times do
+      port = PORT_CURSOR[0]
+      PORT_CURSOR[0] += 1
+      PORT_CURSOR[0] = PORT_RANGE.first if PORT_CURSOR[0] >= PORT_RANGE.last
+      next if ALLOCATED_PORTS.include?(port)
+
       # Probe dual-stack. The server's listener binds both families, so a
       # port held only on IPv6 (a local Postgres on [::1]:65000, say) must
       # read as taken; an IPv4-only probe reports it free.
-      socket = UDPSocket.new(Socket::AF_INET6)
-      socket.setsockopt(:IPV6, :V6ONLY, 0)
-      socket.bind("::", 0)
-      port = socket.addr[1]
-      socket.close
-      unless ALLOCATED_PORTS.include?(port)
-        ALLOCATED_PORTS << port
-        return port
+      begin
+        socket = UDPSocket.new(Socket::AF_INET6)
+        socket.setsockopt(:IPV6, :V6ONLY, 0)
+        socket.bind("::", port)
+      rescue Errno::EADDRINUSE, Errno::EACCES
+        next
+      ensure
+        socket&.close
       end
+
+      ALLOCATED_PORTS << port
+      return port
     end
-    raise "Could not find an available port after 50 attempts"
+    raise "Could not find an available port after 200 attempts"
   end
 end
 
