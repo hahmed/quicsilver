@@ -47,6 +47,10 @@ jobs:
       uses: ruby/setup-ruby@v1
       with:
         ruby-version: ${{ matrix.ruby-version }}
+        # The Bundler paired with ruby-head still references Pathname::SEPARATOR_PAT,
+        # which trunk removed, so setup failed before a single test ran. A
+        # permanently red allow-failure job warns about nothing.
+        bundler: ${{ matrix.ruby-version == 'head' && 'latest' || 'default' }}
         bundler-cache: true # runs 'bundle install' and caches installed gems automatically
     # Ubuntu ships curl built without HTTP/3. Drop in a static build that has
     # it, at the path test/integration/integration_helper.rb already probes.
