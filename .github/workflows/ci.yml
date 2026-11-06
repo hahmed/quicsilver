@@ -31,6 +31,13 @@ jobs:
             allow-failure: false
           - ruby-version: "head"
             allow-failure: true
+          # Ubuntu's curl has no HTTP/3, so until the step below the 22 tests in
+          # curl_http3_test.rb skipped on every CI run. That changes the timing
+          # of the whole suite, and two races only ever showed up in the skipped
+          # configuration. Keep one job running it on purpose.
+          - ruby-version: "4.0"
+            allow-failure: false
+            skip-curl-http3: true
 
     steps:
     - uses: actions/checkout@v4
@@ -41,9 +48,28 @@ jobs:
       with:
         ruby-version: ${{ matrix.ruby-version }}
         bundler-cache: true # runs 'bundle install' and caches installed gems automatically
+    # Ubuntu ships curl built without HTTP/3. Drop in a static build that has
+    # it, at the path test/integration/integration_helper.rb already probes.
+    - name: Install curl with HTTP/3
+      if: ${{ !matrix.skip-curl-http3 }}
+      env:
+        CURL_VERSION: 8.23.0-1
+      run: |
+        set -euo pipefail
+        sudo mkdir -p /usr/local/opt/curl/bin
+        curl -fsSL -o /tmp/static-curl.tar.xz \
+          "https://github.com/stunnel/static-curl/releases/download/${CURL_VERSION}/curl-linux-x86_64-musl-${CURL_VERSION}.tar.xz"
+        tar -xJf /tmp/static-curl.tar.xz -C /tmp curl
+        sudo install -m 0755 /tmp/curl /usr/local/opt/curl/bin/curl
+        # The helper decides by grepping --version for HTTP3; fail loudly here
+        # rather than silently skipping 22 tests again.
+        /usr/local/opt/curl/bin/curl --version
+        /usr/local/opt/curl/bin/curl --version | grep -q HTTP3
     - name: Build MSQUIC
       run: bundle exec rake build_msquic
     - name: Compile
       run: bundle exec rake compile
     - name: Run tests
+      env:
+        FORCE_NO_CURL_HTTP3: ${{ matrix.skip-curl-http3 && '1' || '' }}
       run: bundle exec rake
