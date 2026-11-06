@@ -145,7 +145,12 @@ class ServerTest < Minitest::Test
 
       assert server.request_registry.empty?, "Request should be cleaned up after STREAM_RESET"
 
-      reset_log = logged_messages.find { |m| m.include?("reset") }
+      # The logger is stubbed globally, so logged_messages also collects lines
+      # from server threads still winding down from earlier tests. One of them,
+      # "Stream send failed (client likely reset)", contains "reset" and used
+      # to win this search, failing the test about one run in four on Ruby 4.0.
+      # Match the message under test instead of any mention of a reset.
+      reset_log = logged_messages.find { |m| m.include?("reset by peer with error code") }
       assert reset_log, "Should log the reset event"
       assert_includes reset_log, "0x10c", "Should log the correct error code, not the handle"
     end
