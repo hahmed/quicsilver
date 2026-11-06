@@ -37,6 +37,11 @@ module IntegrationHelpers
   end
 
   def curl_http3_available?
+    # CI's curl has no HTTP/3, so these 22 tests skip there and run locally.
+    # That changes the timing of the whole suite, and races have only shown up
+    # in the skipped configuration. Set FORCE_NO_CURL_HTTP3=1 to reproduce it
+    # without a container.
+    return false if ENV["FORCE_NO_CURL_HTTP3"]
     return @@curl_http3_available if defined?(@@curl_http3_available)
     # Check for nghttp3 linkage — much faster than `curl --version` (20ms vs 5s on macOS)
     if RUBY_PLATFORM =~ /darwin/
