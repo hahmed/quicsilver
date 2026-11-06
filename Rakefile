@@ -3,6 +3,7 @@ require "bundler/gem_tasks"
 require "rake/testtask"
 require "rake/extensiontask"
 require_relative "ext/quicsilver/msquic_patch"
+require_relative "lib/quicsilver/extension"
 
 # Installed under the ABI version that built it, which is the path lib/quicsilver.rb already looks
 # for first. A single shared lib/quicsilver/quicsilver.bundle is owned by whichever Ruby ran compile
@@ -10,7 +11,7 @@ require_relative "ext/quicsilver/msquic_patch"
 # and `rake compile` considers itself up to date, so it does not rebuild. Version-scoped builds
 # coexist instead, and each Ruby loads its own.
 Rake::ExtensionTask.new("quicsilver") do |ext|
-  ext.lib_dir = "lib/quicsilver/#{RUBY_VERSION[/\d+\.\d+/]}"
+  ext.lib_dir = "lib/quicsilver/#{Quicsilver::Extension::DIR}"
 end
 
 # Keep `rake compile` useful in source checkouts, but let cibuildgem own
@@ -29,8 +30,7 @@ end
 # path is only what a released gem ships; a build left there by a different
 # Ruby gets picked up by the fallback require and fails inside dyld.
 def extension_path
-  abi = RUBY_VERSION[/\d+\.\d+/]
-  versioned = "lib/quicsilver/#{abi}/quicsilver.bundle"
+  versioned = "lib/quicsilver/#{Quicsilver::Extension::DIR}/quicsilver.bundle"
   File.exist?(versioned) ? versioned : 'lib/quicsilver/quicsilver.bundle'
 end
 

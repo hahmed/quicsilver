@@ -50,25 +50,34 @@ require_relative "quicsilver/client/request"
 require_relative "quicsilver/client/connection_pool"
 require_relative "quicsilver/client/client"
 
-# C extension, preferring a build made by this exact Ruby ABI.
+# C extension. Quicsilver::Extension::REQUIRE_PATHS is ordered most to least specific: a build made
+# by this exact Ruby install, then any build for this ABI, then the flat path a released gem ships.
 #
-# The flat fallback is what a released gem installs, and what older source checkouts have. It is
-# also how a binary built by a different Ruby gets loaded: dyld then rejects it from deep inside
-# Bundler, with a message that says nothing about how to fix it. Re-raise with one that does.
-begin
-  require "quicsilver/#{RUBY_VERSION[/\d+\.\d+/]}/quicsilver"
-rescue LoadError
+# Every candidate can fail for two different reasons — absent, or present but linked against another
+# Ruby — and dyld reports the second from deep inside Bundler with a message that names no fix. Keep
+# trying the rest, then re-raise with every reason listed.
+require_relative "quicsilver/extension"
+
+extension_errors = []
+Quicsilver::Extension::REQUIRE_PATHS.each do |candidate|
   begin
-    require "quicsilver/quicsilver"
+    require candidate
+    extension_errors.clear
+    break
   rescue LoadError => error
-    raise LoadError, <<~MESSAGE.strip
-      quicsilver has no usable C extension for Ruby #{RUBY_VERSION}.
-
-      Build one with: rake compile
-
-      (#{error.message})
-    MESSAGE
+    extension_errors << "#{candidate}: #{error.message}"
   end
+end
+
+unless extension_errors.empty?
+  raise LoadError, <<~MESSAGE.strip
+    quicsilver has no usable C extension for Ruby #{RUBY_VERSION} (#{RbConfig::CONFIG["prefix"]}).
+
+    Build one with: rake compile
+
+    Tried:
+    #{extension_errors.join("\n")}
+  MESSAGE
 end
 
 # Rackup handler
