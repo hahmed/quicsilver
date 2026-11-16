@@ -16,12 +16,13 @@ module Quicsilver
       end
 
       def call(connection, stream, early_data: false)
+        started_at = ResponseLog.now
         request = parse_request(connection, stream, early_data: early_data)
         return unless request
 
         response = @adapter.call(request)
 
-        send_response(connection, stream, request, response)
+        send_response(connection, stream, request, response, started_at)
       rescue Server::DrainTimeoutError
         Quicsilver.logger.debug("Request interrupted by drain: stream #{stream.stream_id}")
       rescue Protocol::FrameError => e
@@ -34,6 +35,7 @@ module Quicsilver
         Quicsilver.logger.error("Error handling request: #{e.class} - #{e.message}")
         Quicsilver.logger.debug(e.backtrace.first(5).join("\n"))
         connection.send_error(stream, 500, "Internal Server Error") if stream.writable?
+        log_response(stream, request, "500 (error)", started_at) if request
       ensure
         @request_registry.complete(stream.stream_id, connection.handle)
         @cancelled_mutex.synchronize { @cancelled_streams.delete([connection.handle, stream.stream_id]) }
@@ -99,9 +101,10 @@ module Quicsilver
         request
       end
 
-      def send_response(connection, stream, request, response)
+      def send_response(connection, stream, request, response, started_at)
         if cancelled_stream?(stream.stream_id, connection.handle)
           Quicsilver.logger.debug("Skipping response for cancelled stream #{stream.stream_id}")
+          log_response(stream, request, "cancelled", started_at)
           return
         end
 
@@ -137,8 +140,14 @@ module Quicsilver
         body = response.body || []
         connection.send_response(stream, response.status, response_headers, body,
           head_request: request.head?, trailers: trailers)
+        log_response(stream, request, response.status, started_at, response_headers)
         @request_registry.complete(stream.stream_id, connection.handle)
         connection.remove_stream(stream.stream_id)
+      end
+
+      def log_response(stream, request, outcome, started_at, headers = nil)
+        ResponseLog.record(stream_id: stream.stream_id, method: request.method, path: request.path,
+          outcome: outcome, started_at: started_at, headers: headers)
       end
 
       def cancelled_stream?(stream_id, connection_handle)

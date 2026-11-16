@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A DEBUG line for each finished request stream, the counterpart of the `HTTP/3 request` line: `HTTP/3 response stream=916 GET /boards/1 200 length=18322 duration=15.2ms`. It records what happened to the response after the application returned it — sent, skipped because the client cancelled (`cancelled`), or failed (`500 (error)`, `timeout (no stream handle)`) — on both the buffered and streaming dispatch paths. `duration` is the time until the response is handed to MsQuic, not until the last byte is acknowledged; `length` is the content-length, or `-` when the body's length is unknown.
+
 ### Fixed
 
 - `content-length` on a request no longer reaches Rack as `HTTP_CONTENT_LENGTH`, which `Rack::Lint` rejects — every POST to a Lint-wrapped app returned 500. The length still reaches the application as `CONTENT_LENGTH`, carried by the request body.

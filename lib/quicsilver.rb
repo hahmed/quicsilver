@@ -39,6 +39,7 @@ require_relative "quicsilver/transport/connection_stats"
 # Server
 require_relative "quicsilver/server/listener_data"
 require_relative "quicsilver/server/request_registry"
+require_relative "quicsilver/server/response_log"
 require_relative "quicsilver/server/request_handler"
 require_relative "quicsilver/server/rack_adapter"
 require_relative "quicsilver/server/web_transport_flow_control"

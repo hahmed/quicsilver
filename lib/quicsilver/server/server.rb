@@ -904,16 +904,21 @@ module Quicsilver
     end
 
     def handle_streaming_request(pending)
+      started_at = ResponseLog.now
       response = @request_handler.adapter.call(pending.request)
 
       # Wait for RECEIVE_FIN to provide the stream handle
       stream_handle = pending.wait_for_handle(timeout: 30)
       unless stream_handle
         Quicsilver.logger.error("Timed out waiting for stream handle on stream #{pending.stream_id}")
+        log_streaming_response(pending, "timeout (no stream handle)", started_at)
         return
       end
 
-      return if cancelled_stream?(pending.stream_id, pending.connection.handle)
+      if cancelled_stream?(pending.stream_id, pending.connection.handle)
+        log_streaming_response(pending, "cancelled", started_at)
+        return
+      end
 
       headers = response.headers
 
@@ -941,9 +946,11 @@ module Quicsilver
       pending.connection.apply_stream_priority(stream, pending.priority)
       pending.connection.send_response(stream, response.status, response_headers, response.body,
         head_request: pending.request.method == "HEAD", trailers: trailers)
+      log_streaming_response(pending, response.status, started_at, response_headers)
       @request_registry.complete(pending.stream_id, pending.connection.handle)
     rescue => e
       Quicsilver.logger.error("Streaming request error: #{e.class} - #{e.message}")
+      log_streaming_response(pending, "500 (error)", started_at)
       if pending.stream_handle
         stream = Transport::InboundStream.new(pending.stream_id)
         stream.stream_handle = pending.stream_handle
@@ -954,6 +961,11 @@ module Quicsilver
       @cancelled_mutex.synchronize { @cancelled_streams.delete([pending.connection.handle, pending.stream_id]) }
       @request_registry.complete(pending.stream_id, pending.connection.handle)
       pending.connection.remove_stream(pending.stream_id)
+    end
+
+    def log_streaming_response(pending, outcome, started_at, headers = nil)
+      ResponseLog.record(stream_id: pending.stream_id, method: pending.request.method,
+        path: pending.request.path, outcome: outcome, started_at: started_at, headers: headers)
     end
 
     # Drain buffered body frames, failing the connection if the peer sends a

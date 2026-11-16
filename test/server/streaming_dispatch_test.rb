@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
+require "stringio"
 
 class StreamingDispatchTest < Minitest::Test
   # --- PendingStream ---
@@ -157,7 +158,56 @@ class StreamingDispatchTest < Minitest::Test
     end
   end
 
+  def test_a_streamed_response_is_logged_with_its_outcome
+    with_streaming_connections do |server, alice, _bob, requests|
+      receive_headers(server, alice)
+      pending = requests.fetch(0)
+      response = Protocol::HTTP::Response.new("HTTP/3", 202, Protocol::HTTP::Headers.new,
+        Protocol::HTTP::Body::Buffered.new(["done"]))
+
+      log = capture_log do
+        server.instance_variable_get(:@request_handler).adapter.stub(:call, response) do
+          pending.stub(:wait_for_handle, alice.handle + 8) do
+            alice.stub(:apply_stream_priority, nil) do
+              alice.stub(:send_response, nil) { server.send(:handle_streaming_request, pending) }
+            end
+          end
+        end
+      end
+
+      assert_match %r{HTTP/3 response stream=8 POST /upload 202 length=4 duration=\d+\.\dms}, log
+    end
+  end
+
+  def test_a_streamed_request_the_client_cancelled_is_logged_as_cancelled
+    with_streaming_connections do |server, alice, _bob, requests|
+      receive_headers(server, alice)
+      pending = requests.fetch(0)
+      response = Protocol::HTTP::Response.new("HTTP/3", 200, Protocol::HTTP::Headers.new, nil)
+
+      log = capture_log do
+        server.instance_variable_get(:@request_handler).adapter.stub(:call, response) do
+          pending.stub(:wait_for_handle, alice.handle + 8) do
+            server.stub(:cancelled_stream?, true) { server.send(:handle_streaming_request, pending) }
+          end
+        end
+      end
+
+      assert_match %r{HTTP/3 response stream=8 POST /upload cancelled length=- duration=}, log
+    end
+  end
+
   private
+
+  def capture_log
+    log = StringIO.new
+    previous = Quicsilver.logger
+    Quicsilver.logger = Logger.new(log, level: Logger::DEBUG)
+    yield
+    log.string
+  ensure
+    Quicsilver.logger = previous
+  end
 
   def with_streaming_connections
     config = Quicsilver::Transport::Configuration.new(cert_file_path, key_file_path)
