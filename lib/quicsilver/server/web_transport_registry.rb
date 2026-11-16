@@ -32,6 +32,11 @@ module Quicsilver
         manager.sessions
       end
 
+      # Every session on every connection.
+      def sessions
+        @mutex.synchronize { @managers.values.flat_map(&:sessions) }
+      end
+
       def connection_count
         @mutex.synchronize { @managers.size }
       end

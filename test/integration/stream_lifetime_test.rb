@@ -117,6 +117,49 @@ class StreamLifetimeTest < Minitest::Test
     @server_thread&.join(3)
   end
 
+  def test_shutdown_drains_then_closes_an_open_webtransport_session
+    connect_without_settings
+    @client.send_settings(webtransport_settings)
+    _peer, session = open_webtransport_session
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @server.shutdown(timeout: 5)
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+    capsules = connect_capsules(read_connect_response_until_fin(session.stream_id))
+    assert_equal [Quicsilver::Protocol::WebTransport::DRAIN_SESSION_CAPSULE,
+                  Quicsilver::Protocol::WebTransport::CLOSE_SESSION_CAPSULE], capsules.map(&:first)
+    assert_equal [0].pack("N") + "server shutting down", capsules.last.last
+
+    info = @wt_closes.pop(timeout: 3)
+    refute_nil info
+    assert_equal 0, info.code
+    refute info.remote
+    assert session.closed?
+    # Drain window (<= 0.5s here) plus the fixed grace periods, not the 5s timeout.
+    assert_operator elapsed, :<, 2.5
+  end
+
+  def test_shutdown_does_not_close_a_session_the_peer_closed_after_drain
+    connect_without_settings
+    @client.send_settings(webtransport_settings)
+    peer, session = open_webtransport_session
+    # The peer answers the drain by closing, as a well-behaved client does.
+    session.on_close { |info| @wt_closes << info }
+    closer = Thread.new do
+      sleep 0.05 until (@server.shutting_down rescue false)
+      peer.send(data_frame(close_capsule(code: 3, reason: "bye")), fin: true)
+    end
+
+    @server.shutdown(timeout: 5)
+    closer.join(3)
+
+    info = @wt_closes.pop(timeout: 3)
+    refute_nil info
+    assert_equal 3, info.code
+    assert info.remote, "The peer's own close must not be overwritten by the server's"
+  end
+
   def test_aborting_incoming_uni_stream_requests_peer_to_stop
     _, incoming, id = open_stream(unidirectional: true)
 
@@ -1399,6 +1442,16 @@ class StreamLifetimeTest < Minitest::Test
 
   def data_frame(payload)
     Quicsilver::Protocol.build_frame(Quicsilver::Protocol::FRAME_DATA, payload)
+  end
+
+  def connect_capsules(parser)
+    buffer = parser.body.respond_to?(:read) ? (parser.body.rewind; parser.body.read.to_s.b) : parser.body.to_s.b
+    capsules = []
+    while (capsule = Quicsilver::Protocol::Capsule.parse(buffer))
+      type, payload, buffer = capsule
+      capsules << [type, payload]
+    end
+    capsules
   end
 
   def close_capsule(code: 0, reason: "")

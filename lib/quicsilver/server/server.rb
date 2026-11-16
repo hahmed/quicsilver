@@ -10,6 +10,15 @@ module Quicsilver
   class Server
     attr_reader :address, :port, :server_configuration, :running, :connections, :request_registry, :shutting_down, :max_queue_size, :max_connections, :scheduler
 
+    # How long a signal-initiated graceful shutdown may take (default 30s). A process manager with
+    # its own grace period (foreman gives 5s) needs this to be shorter, or the shutdown is killed
+    # before it finishes.
+    attr_accessor :shutdown_timeout
+
+    # How long open WebTransport sessions get, after being asked to drain, to close themselves
+    # before the server closes them.
+    WEBTRANSPORT_CLOSE_GRACE = 1.0
+
     DEFAULT_THREAD_POOL_SIZE = 5
     DEFAULT_QUEUE_MULTIPLIER = 4
     DEFAULT_MAX_CONNECTIONS = 100
@@ -219,10 +228,11 @@ module Quicsilver
       raise ServerError, "Server start failed: #{error_msg}"
     end
 
-    def stop
+    # drain_timeout bounds the wait for queued requests; 0 stops without waiting.
+    def stop(drain_timeout: 5)
       return unless @running
 
-      drain
+      drain(timeout: drain_timeout)
 
       if @listener_data && @listener_data.listener_handle
         Quicsilver.stop_listener(@listener_data.listener_handle)
@@ -317,8 +327,18 @@ module Quicsilver
       # Phase 1: Send GOAWAY - tell clients to stop sending new requests
       @connections.each_value { |c| c.send_goaway(Protocol::MAX_STREAM_ID) }
 
+      # Phase 1b: Ask open WebTransport sessions to wind down (draft-16 §4.7). A session never
+      # finishes the way a request does, so without this the client only learns it is over when
+      # the connection is shut down underneath it.
+      sessions = @webtransport.sessions.select(&:open?)
+      sessions.each(&:drain!)
+
       # Phase 2: Drain in-flight requests
       drain(timeout: timeout)
+
+      # Phase 2a: Close the sessions that did not close themselves, with a CLOSE capsule rather
+      # than the reset a connection shutdown would give them.
+      wind_down_webtransport_sessions(sessions, grace: [WEBTRANSPORT_CLOSE_GRACE, timeout * 0.1].min)
 
       # Phase 2b: Send final GOAWAY with actual last processed stream ID (RFC 9114 §5.2)
       @connections.each_value do |c|
@@ -343,8 +363,9 @@ module Quicsilver
       @connections.each_value(&:shutdown)
       sleep [0.1, timeout * 0.05].min
 
-      # Phase 4: Hard stop
-      stop
+      # Phase 4: Hard stop. The queue was drained in phase 2, within this shutdown's timeout;
+      # draining again would add stop's own default on top of it.
+      stop(drain_timeout: 0)
       @shutting_down = false
 
       Quicsilver.logger.info("Graceful shutdown complete")
@@ -558,7 +579,31 @@ module Quicsilver
 
     def setup_signal_handlers
       %w[INT TERM].each do |signal|
-        trap(signal) { Thread.new { shutdown } }
+        trap(signal) { handle_signal }
+      end
+    end
+
+    # The first INT or TERM starts a graceful shutdown. A second one while it runs means "now":
+    # process managers send TERM after INT when the grace period they allow is running out, and
+    # ignoring it only gets the process killed.
+    def handle_signal # :nodoc:
+      if @shutting_down
+        Thread.new { stop(drain_timeout: 0) }
+      else
+        Thread.new { shutdown(timeout: @shutdown_timeout || 30) }
+      end
+    end
+
+    def wind_down_webtransport_sessions(sessions, grace:)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + grace
+      until sessions.all?(&:closed?) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.02
+      end
+
+      sessions.reject(&:closed?).each do |session|
+        session.close(code: 0, reason: "server shutting down")
+      rescue => e
+        Quicsilver.logger.debug("WebTransport close during shutdown failed: #{e.message}")
       end
     end
 

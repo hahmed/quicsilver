@@ -154,6 +154,29 @@ class StreamControlIntegrationTest < Minitest::Test
     assert @server.request_registry.empty?, "Request registry should be cleaned up"
   end
 
+  # One worker, one request stuck in it and another queued behind: a graceful drain waits for the
+  # queue until its timeout, which makes how long a signal takes to stop the server observable.
+  def test_signal_shutdown_gives_up_after_the_configured_timeout
+    start_server_with_a_queued_request
+    @server.shutdown_timeout = 1
+
+    elapsed = time_until_stopped { @server.send(:handle_signal) }
+
+    assert_operator elapsed, :<, 6, "shutdown_timeout = 1 must not wait out the 30s default"
+  end
+
+  def test_a_second_signal_stops_without_waiting_for_the_drain
+    start_server_with_a_queued_request
+
+    elapsed = time_until_stopped do
+      @server.send(:handle_signal)
+      sleep 0.2
+      @server.send(:handle_signal)
+    end
+
+    assert_operator elapsed, :<, 6, "a second signal must not wait out the 30s graceful drain"
+  end
+
   def test_max_concurrent_requests_limits_concurrency
     request_count = Queue.new
 
@@ -347,6 +370,33 @@ class StreamControlIntegrationTest < Minitest::Test
     value = queue.pop(timeout: 3)
     refute_nil value, "Timed out waiting for the peer"
     value
+  end
+
+  def start_server_with_a_queued_request
+    @release = Queue.new
+    started = Queue.new
+    app = ->(_env) { started << true; @release.pop(timeout: 15); [200, {}, ["OK"]] }
+
+    @server = Quicsilver::Server.new(@port, server_configuration: default_server_config, app: app, threads: 1)
+    @server_thread = Thread.new { @server.start }
+    wait_for_server(@server)
+    @client = Quicsilver::Client.new("localhost", @port, unsecure: true, connection_timeout: 10_000, request_timeout: 30)
+
+    @requests = 2.times.map do |i|
+      Thread.new { @client.get("/held-#{i}") rescue nil }.tap { |t| t.report_on_exception = false }
+    end
+    started.pop(timeout: 3)
+    sleep 0.2 # let the second request reach the queue
+    assert_operator @server.scheduler.pending, :>=, 1, "the second request should be queued"
+  end
+
+  def time_until_stopped
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    yield
+    sleep 0.05 while @server.running? && Process.clock_gettime(Process::CLOCK_MONOTONIC) - started < 15
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+  ensure
+    2.times { @release&.push(true) }
   end
 
   def start_server_and_client(app, server_class: Quicsilver::Server)
