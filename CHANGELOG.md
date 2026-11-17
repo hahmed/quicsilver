@@ -7,17 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-17
+
 ### Added
 
 - `Server#shutdown_timeout=` sets how long a signal-initiated graceful shutdown may take (default 30s). A process manager's own grace period needs it to be shorter: foreman kills after 5s.
 - A DEBUG line for each finished request stream, the counterpart of the `HTTP/3 request` line: `HTTP/3 response stream=916 GET /boards/1 200 length=18322 duration=15.2ms`. It records what happened to the response after the application returned it — sent, skipped because the client cancelled (`cancelled`), or failed (`500 (error)`, `timeout (no stream handle)`) — on both the buffered and streaming dispatch paths. `duration` is the time until the response is handed to MsQuic, not until the last byte is acknowledged; `length` is the content-length, or `-` when the body's length is unknown.
 
-### Fixed
+### Changed
 
 - Graceful shutdown winds WebTransport sessions down instead of resetting them. Open sessions are sent `WT_DRAIN_SESSION` with the first GOAWAY (draft-ietf-webtrans-http3-16 §4.7); any still open after the request drain and a grace period of up to 1s are closed with a `WT_CLOSE_SESSION` capsule (code 0, "server shutting down"). Previously the client only learned the session was over when the connection was shut down beneath it, and its streams were reset with `WT_SESSION_GONE`. A session the peer closes in response keeps the peer's code and reason.
-- Graceful shutdown no longer drains the work queue twice. `shutdown(timeout:)` drained within its timeout and then called `stop`, which drained again with its own 5s default, so a shutdown with requests still queued took up to 5s longer than its timeout.
 - A second INT or TERM during a graceful shutdown stops the server at once, without waiting for queued requests. It was ignored, so a process manager that escalates from INT to TERM (foreman does when another process exits) had to SIGKILL the server.
 - `content-length` on a request no longer reaches Rack as `HTTP_CONTENT_LENGTH`, which `Rack::Lint` rejects — every POST to a Lint-wrapped app returned 500. The length still reaches the application as `CONTENT_LENGTH`, carried by the request body.
+  Apps that read `env["HTTP_CONTENT_LENGTH"]` should read `CONTENT_LENGTH`.
+
+### Fixed
+
+- Graceful shutdown no longer drains the work queue twice. `shutdown(timeout:)` drained within its timeout and then called `stop`, which drained again with its own 5s default, so a shutdown with requests still queued took up to 5s longer than its timeout.
 - Crash when a connection handle outlives its native context. `Client#disconnect` reads the resumption ticket after an idle timeout or a peer-initiated close, by which point the dispatcher has freed the `ConnectionContext` — a segfault in `dispatch_events` and a bus error in `Quicsilver.get_resumption_ticket`. Contexts are now registered in a token-keyed table under the same lock as streams, and `connection_status`, `wait_for_connection`, `get_resumption_ticket` and `open_stream` resolve the handle instead of dereferencing it. Opening a stream on a closed connection raises `IOError` rather than reusing freed memory.
 
 ## [0.5.0] - 2026-11-02
