@@ -89,7 +89,7 @@ jobs:
       - name: "Setup Ruby"
         uses: "ruby/setup-ruby@v1"
         with:
-          ruby-version: "4.0.0"
+          ruby-version: "4.0"
       - name: "Download platform gems"
         uses: "actions/download-artifact@v5"
         with:
@@ -110,7 +110,7 @@ jobs:
       - name: "Setup Ruby"
         uses: "ruby/setup-ruby@v1"
         with:
-          ruby-version: "4.0.0"
+          ruby-version: "4.0"
       - name: "Run cibuildgem"
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
